@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: oceanbase
+  labels:
+    name: oceanbase
+    app.kubernetes.io/name: oceanbase
+    app.kubernetes.io/part-of: distdiag 

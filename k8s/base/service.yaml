@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: oceanbase-headless
+  namespace: oceanbase
+  labels:
+    app: oceanbase
+spec:
+  clusterIP: None
+  selector:
+    app: oceanbase
+  ports:
+  - name: sql
+    port: 2881
+    targetPort: 2881
+  - name: rpc
+    port: 2882
+    targetPort: 2882
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oceanbase
+  namespace: oceanbase
+  labels:
+    app: oceanbase
+spec:
+  type: LoadBalancer
+  selector:
+    app: oceanbase
+  ports:
+  - name: sql
+    port: 2881
+    targetPort: 2881
+  - name: rpc
+    port: 2882
+    targetPort: 2882 

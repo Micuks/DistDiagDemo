@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: oceanbase
+  namespace: oceanbase
+  labels:
+    app: oceanbase
+spec:
+  serviceName: oceanbase
+  replicas: 3
+  selector:
+    matchLabels:
+      app: oceanbase
+  template:
+    metadata:
+      labels:
+        app: oceanbase
+    spec:
+      containers:
+      - name: oceanbase
+        image: oceanbase/oceanbase-ce:4.3.0
+        ports:
+        - containerPort: 2881
+          name: sql
+        - containerPort: 2882
+          name: rpc
+        env:
+        - name: OB_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ob-secrets
+              key: root-password
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        volumeMounts:
+        - name: data
+          mountPath: /root/oceanbase
+        - name: config
+          mountPath: /root/conf
+        resources:
+          requests:
+            memory: "8Gi"
+            cpu: "2"
+          limits:
+            memory: "16Gi"
+            cpu: "4"
+        readinessProbe:
+          tcpSocket:
+            port: 2881
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        livenessProbe:
+          tcpSocket:
+            port: 2881
+          initialDelaySeconds: 120
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: ob-config
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 100Gi 

@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import make_asgi_app
 
 app = FastAPI(
     title="DistDiagDemo API",
@@ -27,6 +28,10 @@ from app.api import anomaly_detection, graph_analysis, metrics
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 app.include_router(anomaly_detection.router, prefix="/api/v1/anomalies", tags=["anomalies"])
 app.include_router(graph_analysis.router, prefix="/api/v1/graph", tags=["graph"])
+
+# Create metrics endpoint
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 if __name__ == "__main__":
     import uvicorn

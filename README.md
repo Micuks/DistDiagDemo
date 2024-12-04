@@ -10,6 +10,7 @@ A demonstration application for detecting and diagnosing anomalies in distribute
 - Multi-model anomaly detection (XGBoost + LSTM)
 - Real-time metric collection and processing
 - Automated notification system
+- Kubernetes-based OceanBase cluster deployment
 
 ## Project Structure
 
@@ -23,6 +24,9 @@ A demonstration application for detecting and diagnosing anomalies in distribute
 ├── docker/              # Docker configuration
 ├── docs/                # Documentation
 ├── frontend/            # React frontend application
+├── k8s/                 # Kubernetes manifests
+│   ├── base/           # Base configurations
+│   └── overlays/       # Environment-specific overlays
 ├── models/              # Trained model artifacts
 ├── notifications/       # Alert and notification system
 ├── scripts/            # Utility scripts
@@ -35,8 +39,13 @@ A demonstration application for detecting and diagnosing anomalies in distribute
 - Python 3.8+
 - Node.js 16+
 - Neo4j 4.4+
+- Kubernetes tools (for K8s deployment)
+  - kubectl
+  - kind (for local deployment)
 
-## Quick Start
+## Deployment Options
+
+### 1. Docker Compose (Development)
 
 1. Clone the repository:
    ```bash
@@ -56,9 +65,114 @@ A demonstration application for detecting and diagnosing anomalies in distribute
    ```
 
 4. Access the applications:
-   - Frontend Dashboard: http://localhost:3000
-   - API Documentation: http://localhost:8000/docs
+   - Frontend Dashboard: http://localhost:13000
+   - API Documentation: http://localhost:18000/docs
    - Neo4j Browser: http://localhost:7474
+
+### 2. Kubernetes Deployment
+
+#### Local Single-Server Deployment
+
+1. Set up local Kubernetes cluster using Kind:
+   ```bash
+   ./scripts/setup-local-cluster.sh
+   ```
+
+2. Deploy OceanBase in development mode (single node):
+   ```bash
+   ./scripts/deploy-k8s.sh dev
+   ```
+
+3. Verify the deployment:
+   ```bash
+   kubectl -n oceanbase get pods
+   kubectl -n oceanbase get services
+   ```
+
+#### Production Multi-Node Deployment
+
+1. Ensure you have a Kubernetes cluster with sufficient resources:
+   - Minimum 3 worker nodes
+   - Each node: 16GB RAM, 4 CPU cores, 100GB storage
+   - Container runtime (Docker/containerd)
+
+2. Deploy OceanBase in production mode (3 nodes):
+   ```bash
+   ./scripts/deploy-k8s.sh prod
+   ```
+
+3. Verify the deployment:
+   ```bash
+   kubectl -n oceanbase get pods
+   kubectl -n oceanbase get services
+   ```
+
+4. Check cluster status:
+   ```bash
+   kubectl -n oceanbase exec -it oceanbase-0 -- mysql -h127.0.0.1 -P2881 -uroot -ppassword123 -e "SELECT * FROM oceanbase.gv\$observer;"
+   ```
+
+#### Kubernetes Deployment Architecture
+
+The production deployment consists of:
+
+1. **Controller Node**
+   - Manages cluster coordination
+   - Handles metadata operations
+   - Runs on the first pod (oceanbase-0)
+
+2. **Data Nodes** (3 replicas)
+   - Store and process data
+   - Handle SQL queries
+   - Automatic failover support
+   - Distributed across pods (oceanbase-[0,1,2])
+
+3. **Services**
+   - Headless service for inter-node communication
+   - LoadBalancer service for external access
+   - NodePort service for local development
+
+4. **Storage**
+   - Persistent volumes for data storage
+   - Automatic volume provisioning
+   - Data replication across nodes
+
+5. **Configuration**
+   - ConfigMaps for OceanBase settings
+   - Secrets for sensitive data
+   - Environment-specific overlays
+
+#### Resource Requirements
+
+| Environment | Nodes | CPU/Node | RAM/Node | Storage/Node |
+|-------------|-------|----------|----------|--------------|
+| Development | 1     | 2 cores  | 4GB      | 20GB        |
+| Production  | 3     | 4 cores  | 16GB     | 100GB       |
+
+#### Accessing the Cluster
+
+1. Get the cluster endpoint:
+   ```bash
+   kubectl -n oceanbase get service oceanbase -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+   ```
+
+2. Connect using MySQL client:
+   ```bash
+   mysql -h<CLUSTER_IP> -P2881 -uroot -ppassword123
+   ```
+
+3. Monitor the cluster:
+   ```bash
+   # Check pod status
+   kubectl -n oceanbase get pods -o wide
+
+   # View pod logs
+   kubectl -n oceanbase logs -f oceanbase-0
+
+   # Get cluster status
+   kubectl -n oceanbase exec -it oceanbase-0 -- mysql -h127.0.0.1 -P2881 -uroot -ppassword123 \
+     -e "SELECT zone,svr_ip,svr_port,status FROM oceanbase.gv\$observer;"
+   ```
 
 ## Development Setup
 
