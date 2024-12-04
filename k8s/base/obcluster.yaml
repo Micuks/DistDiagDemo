@@ -1,14 +1,11 @@
-apiVersion: oceanbase.oceanbase.com/v1alpha1
+apiVersion: oceanbase.oceanbase.com/v1
 kind: OBCluster
 metadata:
   name: obcluster
   namespace: oceanbase
 spec:
   clusterName: obcluster
-  clusterId: 1
-  userSecrets:
-    root: root-password
-    proxyro: proxyro-password
+  mode: service
   topology:
     - zone: zone1
       replica: 1
@@ -17,22 +14,28 @@ spec:
     - zone: zone3
       replica: 1
   observer:
-    image: oceanbase/oceanbase-cloud-native:4.2.1.1-101010012023111012
     resource:
-      cpu: 2
-      memory: 10Gi
+      cpu: 4
+      memory: 8Gi
     storage:
       dataStorage:
-        storageClass: local-path
-        size: 10Gi
+        size: 50Gi
       redoLogStorage:
-        storageClass: local-path
-        size: 10Gi
+        size: 50Gi
       logStorage:
-        storageClass: local-path
-        size: 10Gi
-  monitor:
-    image: oceanbase/obagent:4.2.1-100000092023101717
+        size: 20Gi
+  parameters:
+    - name: system_memory
+      value: 4G
+    - name: memory_limit
+      value: 24G
+  obproxy:
+    replicas: 1
     resource:
-      cpu: 1
-      memory: 1Gi 
+      cpu: 2
+      memory: 4Gi
+    parameters:
+      - name: proxy_mem_limited
+        value: "4G"
+      - name: enable_compression_protocol
+        value: "True" 
