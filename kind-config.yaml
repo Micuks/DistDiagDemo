@@ -5,16 +5,6 @@ networking:
   apiServerAddress: "172.17.0.1"
 nodes:
 - role: control-plane
-  extraPortMappings:
-  - containerPort: 2881
-    hostPort: 2881
-    protocol: TCP
-  - containerPort: 2882
-    hostPort: 2882
-    protocol: TCP
-  - containerPort: 7474
-    hostPort: 7474
-    protocol: TCP
   extraMounts:
   - hostPath: ./data
     containerPath: /data
