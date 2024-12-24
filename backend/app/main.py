@@ -23,11 +23,9 @@ async def health_check():
     return {"status": "healthy"}
 
 # Import and include routers
-from app.api import anomaly_detection, graph_analysis, metrics
+from app.api import anomaly
 
-app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
-app.include_router(anomaly_detection.router, prefix="/api/v1/anomalies", tags=["anomalies"])
-app.include_router(graph_analysis.router, prefix="/api/v1/graph", tags=["graph"])
+app.include_router(anomaly.router, prefix="/api", tags=["anomaly"])
 
 # Create metrics endpoint
 metrics_app = make_asgi_app()
