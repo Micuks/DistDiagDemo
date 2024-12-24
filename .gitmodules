@@ -1,3 +1,6 @@
 [submodule "dist_diagnosis"]
 	path = dist_diagnosis
 	url = https://github.com/Q-ModifiedJ/dist_diagnosis.git
+[submodule "obdiag"]
+	path = obdiag
+	url = https://github.com/oceanbase/obdiag.git
