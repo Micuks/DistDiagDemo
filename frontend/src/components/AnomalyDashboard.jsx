@@ -10,8 +10,8 @@ import {
   Button,
   Typography,
   Snackbar,
-} from '@material-ui/core';
-import { Alert } from '@material-ui/lab';
+  Alert,
+} from '@mui/material';
 import {
   LineChart,
   Line,
@@ -90,15 +90,17 @@ const AnomalyDashboard = () => {
     <Container maxWidth="lg">
       <Grid container spacing={3}>
         <Grid item xs={12}>
-          <Paper style={{ padding: 20 }}>
+          <Paper sx={{ p: 2.5 }}>
             <Grid container spacing={2} alignItems="center">
               <Grid item xs={8}>
                 <FormControl fullWidth>
-                  <InputLabel>Select Anomaly</InputLabel>
+                  <InputLabel id="anomaly-select-label">Select Anomaly</InputLabel>
                   <Select
+                    labelId="anomaly-select-label"
                     value={selectedAnomaly}
                     onChange={handleAnomalyChange}
                     disabled={loading}
+                    label="Select Anomaly"
                   >
                     {anomalyOptions.map((option) => (
                       <MenuItem key={option.id} value={option.id}>
@@ -111,7 +113,7 @@ const AnomalyDashboard = () => {
               <Grid item xs={4}>
                 <Button
                   variant="contained"
-                  color={isAnomalyActive ? "secondary" : "primary"}
+                  color={isAnomalyActive ? "error" : "primary"}
                   onClick={handleAnomalyToggle}
                   fullWidth
                   disabled={!selectedAnomaly || loading}
@@ -124,14 +126,19 @@ const AnomalyDashboard = () => {
         </Grid>
 
         <Grid item xs={12}>
-          <Paper style={{ padding: 20 }}>
-            <Typography variant="h6">System Metrics</Typography>
+          <Paper sx={{ p: 2.5 }}>
+            <Typography variant="h6" gutterBottom>System Metrics</Typography>
             <ResponsiveContainer width="100%" height={300}>
               <LineChart data={metrics}>
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="timestamp" />
+                <XAxis 
+                  dataKey="timestamp"
+                  tickFormatter={(timestamp) => new Date(timestamp).toLocaleTimeString()}
+                />
                 <YAxis />
-                <Tooltip />
+                <Tooltip 
+                  labelFormatter={(timestamp) => new Date(timestamp).toLocaleString()}
+                />
                 <Legend />
                 <Line type="monotone" dataKey="cpu" stroke="#8884d8" name="CPU Usage" />
                 <Line type="monotone" dataKey="memory" stroke="#82ca9d" name="Memory Usage" />
@@ -142,14 +149,19 @@ const AnomalyDashboard = () => {
         </Grid>
 
         <Grid item xs={12}>
-          <Paper style={{ padding: 20 }}>
-            <Typography variant="h6">Anomaly Ranks</Typography>
+          <Paper sx={{ p: 2.5 }}>
+            <Typography variant="h6" gutterBottom>Anomaly Ranks</Typography>
             <ResponsiveContainer width="100%" height={300}>
               <LineChart data={anomalyRanks}>
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="timestamp" />
+                <XAxis 
+                  dataKey="timestamp"
+                  tickFormatter={(timestamp) => new Date(timestamp).toLocaleTimeString()}
+                />
                 <YAxis domain={[0, 1]} />
-                <Tooltip />
+                <Tooltip 
+                  labelFormatter={(timestamp) => new Date(timestamp).toLocaleString()}
+                />
                 <Legend />
                 <Line type="monotone" dataKey="rank" stroke="#ff7300" name="Anomaly Rank" />
               </LineChart>
@@ -162,8 +174,14 @@ const AnomalyDashboard = () => {
         open={!!error} 
         autoHideDuration={6000} 
         onClose={() => setError('')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       >
-        <Alert onClose={() => setError('')} severity="error">
+        <Alert 
+          onClose={() => setError('')} 
+          severity="error" 
+          variant="filled"
+          sx={{ width: '100%' }}
+        >
           {error}
         </Alert>
       </Snackbar>
