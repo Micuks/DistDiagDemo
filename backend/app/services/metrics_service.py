@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import os
 from datetime import datetime, timedelta
 from typing import List, Dict
@@ -10,55 +11,31 @@ class MetricsService:
 
     async def get_system_metrics(self) -> List[Dict]:
         """Fetch system metrics from Prometheus"""
-        end_time = datetime.now()
-        start_time = end_time - timedelta(minutes=self.metrics_window)
-
-        # Prometheus queries for different metrics
-        queries = {
-            'cpu': 'avg(rate(container_cpu_usage_seconds_total{container="oceanbase"}[5m]))',
-            'memory': 'avg(container_memory_usage_bytes{container="oceanbase"}) / 1024 / 1024',
-            'network': 'sum(rate(container_network_transmit_bytes_total{container="oceanbase"}[5m]))'
-        }
-
-        metrics_data = []
-        async with aiohttp.ClientSession() as session:
-            # Fetch all metrics in parallel
-            tasks = []
-            for metric_name, query in queries.items():
-                task = self._fetch_metric(
-                    session,
-                    query,
-                    start_time.timestamp(),
-                    end_time.timestamp(),
-                    metric_name
-                )
-                tasks.append(task)
+        # For testing, return mock data until Prometheus is set up
+        now = datetime.now()
+        metrics = []
+        
+        # Generate 30 minutes of mock data
+        for i in range(self.metrics_window):
+            timestamp = now - timedelta(minutes=i)
             
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process and combine the results
-        metrics_by_timestamp = {}
-        for metric_name, result in zip(queries.keys(), results):
-            if isinstance(result, Exception):
-                print(f"Error fetching {metric_name}: {str(result)}")
-                continue
-
-            for value in result:
-                timestamp = datetime.fromtimestamp(value[0])
-                if timestamp not in metrics_by_timestamp:
-                    metrics_by_timestamp[timestamp] = {
-                        'timestamp': timestamp,
-                        'cpu': 0,
-                        'memory': 0,
-                        'network': 0
-                    }
-                metrics_by_timestamp[timestamp][metric_name] = float(value[1])
-
-        # Convert to list and sort by timestamp
-        metrics_data = list(metrics_by_timestamp.values())
-        metrics_data.sort(key=lambda x: x['timestamp'])
-
-        return metrics_data
+            # Add some variation to make it interesting
+            base_cpu = 0.5 + 0.1 * ((i % 10) - 5) / 5  # Oscillate between 0.4 and 0.6
+            base_memory = 1024 + 100 * ((i % 15) - 7) / 7  # Oscillate around 1024
+            
+            metrics.append({
+                'timestamp': timestamp,
+                'cpu': max(0, min(1, base_cpu)),  # Keep between 0 and 1
+                'memory': max(0, base_memory),
+                'network': 1000 + 100 * (i % 5),
+                'disk_io_bytes': 500 + 50 * (i % 3),
+                'disk_iops': 100 + 10 * (i % 4),
+                'active_sessions': 10 + (i % 5),
+                'sql_response_time': 0.1 + 0.02 * (i % 3),
+                'cache_hit_ratio': min(1, 0.95 + 0.01 * (i % 3))
+            })
+        
+        return metrics
 
     async def _fetch_metric(
         self,

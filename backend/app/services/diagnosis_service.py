@@ -1,79 +1,136 @@
+import sys
+from pathlib import Path
+
+# Add project root and dist_diagnosis root to Python path
+project_root = Path(__file__).parent.parent.parent.parent
+dist_diagnosis_root = project_root / 'dist_diagnosis'
+sys.path.extend([str(project_root), str(dist_diagnosis_root)])
+
+from dist_diagnosis.dist_diagnosis.dist_diagnosis import DistDiagnosis
 import numpy as np
 from typing import List, Dict
 from datetime import datetime
-import tensorflow as tf
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class DiagnosisService:
     def __init__(self):
         self.model_path = os.getenv('MODEL_PATH', 'models/anomaly_detector')
-        self.model = self._load_model()
-        self.scaler = self._load_scaler()
-        self.feature_columns = ['cpu', 'memory', 'network']
-
-    def _load_model(self):
-        """Load the trained TensorFlow model"""
-        try:
-            return tf.keras.models.load_model(self.model_path)
-        except Exception as e:
-            print(f"Warning: Failed to load model: {str(e)}")
-            return self._create_default_model()
-
-    def _load_scaler(self):
-        """Load the trained scaler for feature normalization"""
-        try:
-            return np.load(os.path.join(self.model_path, 'scaler.npy'), allow_pickle=True).item()
-        except Exception as e:
-            print(f"Warning: Failed to load scaler: {str(e)}")
-            return None
-
-    def _create_default_model(self):
-        """Create a default model if loading fails"""
-        model = tf.keras.Sequential([
-            tf.keras.layers.Dense(64, activation='relu', input_shape=(len(self.feature_columns),)),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(32, activation='relu'),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(16, activation='relu'),
-            tf.keras.layers.Dense(1, activation='sigmoid')
-        ])
-        model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-        return model
+        # Define anomaly types that can be detected
+        self.anomaly_types = ['cpu', 'io', 'buffer', 'net', 'load']
+        # Initialize DistDiagnosis with multi-node support and all anomaly types
+        self.diagnosis = DistDiagnosis(
+            num_classifier=len(self.anomaly_types), 
+            classes_for_each_node=self.anomaly_types,
+            node_num=3  # Default to 3 nodes, can be adjusted based on cluster size
+        )
+        if os.path.exists(self.model_path):
+            self.diagnosis.load_model(self.model_path)
+        
+        # Define metrics needed for each anomaly type
+        self.feature_columns = [
+            'cpu_util', 'cpu_sys', 'cpu_user', 'cpu_iowait',  # CPU metrics
+            'memory_used', 'memory_free', 'memory_cached',     # Memory metrics
+            'disk_read', 'disk_write', 'disk_iops',           # IO metrics
+            'net_recv', 'net_send', 'net_packets',            # Network metrics
+            'active_sessions', 'sql_response_time',           # Database metrics
+            'buffer_hit', 'buffer_miss', 'buffer_ratio'       # Buffer metrics
+        ]
 
     async def analyze_metrics(self, metrics: List[Dict]) -> List[Dict]:
         """Analyze metrics and return anomaly ranks"""
         if not metrics:
             return []
 
-        # Extract features
-        features = np.array([[m[col] for col in self.feature_columns] for m in metrics])
-
-        # Normalize features if scaler is available
-        if self.scaler:
-            features = self.scaler.transform(features)
-
-        # Get predictions
         try:
-            predictions = self.model.predict(features)
-            ranks = predictions.flatten()
+            # Group metrics by node
+            nodes = {}
+            for metric in metrics:
+                node_name = metric.get('node_name', 'default')
+                if node_name not in nodes:
+                    nodes[node_name] = []
+                nodes[node_name].append(metric)
+
+            # Convert metrics to format expected by DistDiagnosis
+            node_metrics = {}
+            for node_name, node_data in nodes.items():
+                node_metrics[node_name] = {
+                    m['timestamp'].isoformat(): {
+                        col: float(m.get(col, 0)) 
+                        for col in self.feature_columns
+                        if col in m
+                    }
+                    for m in node_data
+                }
+
+            # Perform diagnosis
+            diagnosis_result = self.diagnosis.diagnose(node_metrics)
+            
+            # Convert diagnosis result to ranked anomalies
+            ranked_anomalies = []
+            for node, score in diagnosis_result['scores'].items():
+                for anomaly in diagnosis_result.get('anomalies', []):
+                    if anomaly.startswith(f"{node}."):
+                        anomaly_type = anomaly.split('.')[1]
+                        ranked_anomalies.append({
+                            'node': node,
+                            'type': anomaly_type,
+                            'score': score,
+                            'timestamp': datetime.now().isoformat()
+                        })
+
+            # Sort by score descending
+            ranked_anomalies.sort(key=lambda x: x['score'], reverse=True)
+            return ranked_anomalies
+
         except Exception as e:
-            print(f"Warning: Prediction failed: {str(e)}")
-            # Fallback to simple threshold-based detection
-            ranks = self._fallback_detection(features)
+            logger.error(f"Error in analyze_metrics: {str(e)}")
+            return []
 
-        # Create response
-        return [
-            {
-                'timestamp': metrics[i]['timestamp'],
-                'rank': float(ranks[i])
-            }
-            for i in range(len(metrics))
-        ]
-
-    def _fallback_detection(self, features: np.ndarray) -> np.ndarray:
-        """Simple threshold-based detection as fallback"""
-        # Calculate Euclidean distance from the origin as an anomaly score
-        distances = np.linalg.norm(features, axis=1)
-        # Normalize to [0, 1] range
-        ranks = (distances - np.min(distances)) / (np.max(distances) - np.min(distances) + 1e-10)
-        return ranks 
+    def train(self, training_data: List[Dict]):
+        """Train the diagnosis model with historical data"""
+        try:
+            # Convert training data to format expected by DistDiagnosis
+            X_train = []  # Features
+            y_train = []  # Labels
+            
+            # Group data by timestamp to create training samples
+            timestamp_groups = {}
+            for data in training_data:
+                ts = data['timestamp'].isoformat()
+                if ts not in timestamp_groups:
+                    timestamp_groups[ts] = []
+                timestamp_groups[ts].append(data)
+            
+            # Create training samples
+            for ts_data in timestamp_groups.values():
+                # Create feature vectors for each node
+                node_features = []
+                node_labels = []
+                
+                for node_data in ts_data:
+                    # Extract features
+                    features = [float(node_data.get(col, 0)) for col in self.feature_columns]
+                    node_features.append(features)
+                    
+                    # Extract labels (anomaly types)
+                    labels = [1 if node_data.get(f'is_{atype}', False) else 0 
+                             for atype in self.anomaly_types]
+                    node_labels.append(labels)
+                
+                X_train.append(node_features)
+                y_train.append(node_labels)
+            
+            # Train the model
+            self.diagnosis.train(np.array(X_train), np.array(y_train))
+            
+            # Save the model
+            if self.model_path:
+                os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
+                self.diagnosis.save_model(self.model_path)
+                
+        except Exception as e:
+            logger.error(f"Error in training: {str(e)}")
+            raise

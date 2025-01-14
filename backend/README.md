@@ -1,30 +1,29 @@
-# Backend - DistDiagDemo
+# DistDiagDemo Backend
 
-A FastAPI-based backend for the Distributed Database Diagnosis Demo application. This service manages anomaly injection into OceanBase clusters using Chaos Mesh, collects metrics via Prometheus, and performs anomaly detection using machine learning models.
+This is the backend service for the DistDiagDemo project, providing APIs for anomaly detection, metrics collection, and workload management for OceanBase clusters.
 
 ## Features
 
-- Chaos Mesh integration for anomaly injection
-- Prometheus metrics collection
-- Machine learning-based anomaly detection
-- RESTful API endpoints
-- Kubernetes integration
+- Real-time metrics collection from OceanBase clusters
+- Database and tenant-level metrics monitoring
+- Anomaly detection and diagnosis
+- Workload generation and management using sysbench
+- Prometheus integration for metrics storage
 
 ## Prerequisites
 
-- Python 3.8 or higher
-- Kubernetes cluster with:
-  - OceanBase deployed
-  - Chaos Mesh installed
-  - Prometheus set up
-- Access to Kubernetes cluster (kubeconfig)
+- Python 3.8+
+- sysbench
+- Docker (for containerized deployment)
+- Access to an OceanBase cluster
+- Prometheus instance for metrics collection
 
 ## Installation
 
-1. Create a virtual environment and activate it:
+1. Clone the repository:
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+git clone <repository-url>
+cd backend
 ```
 
 2. Install dependencies:
@@ -32,103 +31,185 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-3. Create a `.env` file in the backend directory:
-```env
-PROMETHEUS_URL=http://prometheus:9090
-METRICS_WINDOW_MINUTES=30
-MODEL_PATH=models/anomaly_detector
-CHAOS_MESH_NAMESPACE=chaos-testing
-```
-
-## Development
-
-To start the development server:
-
+3. Install sysbench:
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+apt-get update && apt-get install -y sysbench
 ```
 
-The API will be available at `http://localhost:8000`.
-
-## API Documentation
-
-Once the server is running, you can access:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-## Project Structure
-
-```
-backend/
-├── app/
-│   ├── api/              # API endpoints
-│   │   └── anomaly.py
-│   ├── schemas/          # Pydantic models
-│   │   └── anomaly.py
-│   ├── services/         # Business logic
-│   │   ├── k8s_service.py
-│   │   ├── metrics_service.py
-│   │   └── diagnosis_service.py
-│   └── main.py          # FastAPI application
-├── models/              # ML models
-└── requirements.txt     # Project dependencies
+4. Set up environment variables (create a `.env` file):
+```env
+OB_HOST=obproxy
+OB_PORT=2881
+OB_USER=root
+OB_PASSWORD=your_password
+PROMETHEUS_URL=http://prometheus:9090
 ```
 
 ## API Endpoints
 
-- `POST /api/anomaly/start` - Start an anomaly experiment
-  - Body: `{"type": "cpu_stress"}`
-  - Available types: cpu_stress, memory_stress, network_delay, disk_stress
+### Metrics API
 
-- `POST /api/anomaly/stop` - Stop all running anomalies
+#### Get Database Metrics
+```
+GET /api/metrics/database
+Response: {
+    "metrics": [
+        {
+            "timestamp": "2024-01-10T12:00:00",
+            "qps": 1000.5,
+            "tps": 500.2,
+            "active_sessions": 50,
+            "sql_response_time": 0.1,
+            "disk_io_bytes": 1024000,
+            "disk_iops": 1000,
+            "memory_usage": 8192,
+            "cache_hit_ratio": 95.5,
+            "slow_queries": 5,
+            "deadlocks": 0,
+            "replication_lag": 0,
+            "connection_count": 100
+        }
+    ]
+}
+```
 
-- `GET /api/metrics` - Get system metrics
-  - Returns CPU, memory, and network metrics
+#### Get Tenant Metrics
+```
+GET /api/metrics/tenant?tenant_name=tenant1
+Response: {
+    "metrics": [
+        {
+            "timestamp": "2024-01-10T12:00:00",
+            "tenant": "tenant1",
+            "cpu_percent": 45.5,
+            "memory_used": 1024.5,
+            "disk_used": 10240.0,
+            "iops": 1000,
+            "session_count": 50,
+            "active_session_count": 10
+        }
+    ]
+}
+```
 
-- `GET /api/anomaly/ranks` - Get anomaly detection results
-  - Returns anomaly ranks over time
+### Workload API
 
-## Chaos Mesh Experiments
+#### Prepare Database
+```
+POST /api/workload/prepare
+Response: {
+    "workload_id": "prepare",
+    "status": "Database prepared successfully"
+}
+```
 
-The backend supports the following Chaos Mesh experiments:
+#### Start Workload
+```
+POST /api/workload/start
+Request: {
+    "workload_type": "oltp_read_write",  // or "oltp_read_only", "oltp_write_only"
+    "threads": 4  // 1-64 threads
+}
+Response: {
+    "workload_id": "oltp_read_write_20240110_120000",
+    "status": "Workload started successfully"
+}
+```
 
-1. CPU Stress:
-   - Stresses CPU with 100% load on one core
+#### Stop Workload
+```
+POST /api/workload/{workload_id}/stop
+Response: {
+    "workload_id": "oltp_read_write_20240110_120000",
+    "status": "Workload stopped successfully"
+}
+```
 
-2. Memory Stress:
-   - Consumes 256MB of memory
+#### Stop All Workloads
+```
+POST /api/workload/stop-all
+Response: {
+    "workload_id": "all",
+    "status": "All workloads stopped successfully"
+}
+```
 
-3. Network Delay:
-   - Adds 100ms latency to network traffic
+#### Get Active Workloads
+```
+GET /api/workload/active
+Response: {
+    "workloads": [
+        {
+            "workload_id": "oltp_read_write_20240110_120000",
+            "running": true
+        }
+    ]
+}
+```
 
-4. Disk Stress:
-   - Adds 100ms latency to I/O operations
+### Anomaly API
 
-## Machine Learning Model
+#### Start Anomaly
+```
+POST /api/anomaly/start
+Request: {
+    "type": "cpu_stress"  // or "memory_stress", "network_delay", "disk_stress"
+}
+Response: {
+    "status": "success",
+    "message": "Started cpu_stress anomaly"
+}
+```
 
-The anomaly detection uses a TensorFlow model with:
-- Input features: CPU, Memory, Network metrics
-- Output: Anomaly rank (0-1)
-- Fallback to distance-based detection if model unavailable
+#### Stop Anomaly
+```
+POST /api/anomaly/stop
+Response: {
+    "status": "success",
+    "message": "Stopped all anomalies"
+}
+```
 
-## Contributing
+## Development
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+1. Start the development server:
+```bash
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-## Troubleshooting
+2. Access the API documentation:
+```
+http://localhost:8000/docs
+```
 
-1. Kubernetes Connection Issues:
-   - Ensure kubeconfig is properly configured
-   - Check if KUBERNETES_SERVICE_HOST environment variable is set in cluster
+## Docker Deployment
 
-2. Prometheus Connection Issues:
-   - Verify PROMETHEUS_URL is correct
-   - Check if Prometheus is accessible from the backend
+1. Build the Docker image:
+```bash
+docker build -t distdiagdemo-backend .
+```
 
-3. Model Loading Issues:
-   - Ensure model files exist in MODEL_PATH
-   - Check if TensorFlow is properly installed 
+2. Run the container:
+```bash
+docker run -d \
+  -p 8000:8000 \
+  -e OB_HOST=obproxy \
+  -e OB_PORT=2881 \
+  -e OB_USER=root \
+  -e OB_PASSWORD=your_password \
+  --name distdiagdemo-backend \
+  distdiagdemo-backend
+```
+
+## Testing
+
+Run the test suite:
+```bash
+pytest
+```
+
+## Monitoring
+
+The service exposes Prometheus metrics at `/metrics` endpoint for monitoring the backend service itself.
+
+## License

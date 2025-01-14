@@ -50,16 +50,36 @@ async def get_metrics():
 
 @router.get("/ranks", response_model=List[AnomalyRankResponse])
 async def get_anomaly_ranks():
-    """Get anomaly ranks predicted by the diagnosis algorithm"""
+    """Get ranked anomalies from the OceanBase cluster"""
     try:
-        # Get metrics and run diagnosis
+        # Fetch latest metrics
         metrics = await metrics_service.get_system_metrics()
-        ranks = await diagnosis_service.analyze_metrics(metrics)
+        
+        # Get anomaly ranks from diagnosis service
+        ranked_anomalies = await diagnosis_service.analyze_metrics(metrics)
+        
+        # Convert to response format
         return [
             AnomalyRankResponse(
-                timestamp=entry["timestamp"],
-                rank=entry["rank"]
-            ) for entry in ranks
+                timestamp=anomaly["timestamp"],
+                node=anomaly["node"],
+                type=anomaly["type"],
+                score=anomaly["score"]
+            ) for anomaly in ranked_anomalies
         ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/train")
+async def train_model():
+    """Train the anomaly detection model with historical data"""
+    try:
+        # Fetch historical metrics with labels
+        training_data = await metrics_service.get_training_metrics()
+        
+        # Train the model
+        diagnosis_service.train(training_data)
+        
+        return {"status": "success", "message": "Model trained successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) 
