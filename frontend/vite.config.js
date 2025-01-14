@@ -22,9 +22,10 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://10.101.168.97:8001',
         changeOrigin: true,
-        secure: false
+        secure: false,
+        rewrite: (path) => path
       }
     }
   },

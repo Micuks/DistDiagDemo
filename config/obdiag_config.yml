@@ -1,0 +1,35 @@
+obcluster:
+  ob_cluster_name: obcluster
+  db_host: 127.0.0.1
+  db_port: '22883'
+  tenant_sys:
+    user: root
+    password: 'cm9vdF9wYXNzd29yZA=='
+  servers:
+    nodes:
+    - namespace: oceanbase
+      ssh_type: "kubernetes"
+      pod_name: obcluster-1-zone1-663bcbd31802
+      container_name: observer
+      home_path: /home/admin/oceanbase
+      data_dir: /home/admin/oceanbase/store
+      redo_dir: /home/admin/oceanbase/store
+      ip: 10.244.1.13
+    - namespace: oceanbase
+      ssh_type: "kubernetes"
+      pod_name: obcluster-1-zone2-d8c90004392f
+      container_name: observer
+      home_path: /home/admin/oceanbase
+      data_dir: /home/admin/oceanbase/store
+      redo_dir: /home/admin/oceanbase/store
+      ip: 10.244.2.13
+    - namespace: oceanbase
+      ssh_type: "kubernetes"
+      pod_name: obcluster-1-zone3-9d3f2d890807
+      container_name: observer
+      home_path: /home/admin/oceanbase
+      data_dir: /home/admin/oceanbase/store
+      redo_dir: /home/admin/oceanbase/store
+      ip: 10.244.3.15
+    global:
+      kubernetes_config_file: "/home/wuql/.kube/config"

@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://10.101.168.97:8001';
 
 export const anomalyService = {
   startAnomaly: async (anomalyType) => {
@@ -27,7 +27,7 @@ export const anomalyService = {
 
   getMetrics: async () => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/api/metrics`);
+      const response = await axios.get(`${API_BASE_URL}/api/metrics/system`);
       return response.data;
     } catch (error) {
       console.error('Error fetching metrics:', error);

@@ -11,6 +11,18 @@ import {
   Typography,
   Snackbar,
   Alert,
+  Divider,
+  Stack,
+  Chip,
+  Box,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  CircularProgress,
+  LinearProgress,
 } from '@mui/material';
 import {
   LineChart,
@@ -23,6 +35,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { anomalyService } from '../services/anomalyService';
+import { workloadService } from '../services/workloadService';
 
 const AnomalyDashboard = () => {
   const [selectedAnomaly, setSelectedAnomaly] = useState('');
@@ -31,12 +44,19 @@ const AnomalyDashboard = () => {
   const [anomalyRanks, setAnomalyRanks] = useState([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [activeWorkloads, setActiveWorkloads] = useState([]);
+  const [workloadLoading, setWorkloadLoading] = useState(false);
+  const [systemMetrics, setSystemMetrics] = useState({});
 
   const anomalyOptions = [
     { id: 'cpu_stress', name: 'CPU Stress' },
     { id: 'memory_stress', name: 'Memory Stress' },
     { id: 'network_delay', name: 'Network Delay' },
     { id: 'disk_stress', name: 'Disk Stress' },
+  ];
+
+  const workloadOptions = [
+    { id: 'sysbench', name: 'Sysbench OLTP' },
   ];
 
   const handleAnomalyChange = (event) => {
@@ -59,6 +79,69 @@ const AnomalyDashboard = () => {
     }
   };
 
+  const handleStartWorkload = async (workloadType) => {
+    try {
+      setWorkloadLoading(true);
+      await workloadService.startWorkload(workloadType);
+      await fetchActiveWorkloads();
+    } catch (err) {
+      setError(err.message || 'Failed to start workload');
+    } finally {
+      setWorkloadLoading(false);
+    }
+  };
+
+  const handlePrepareDatabase = async () => {
+    try {
+      setWorkloadLoading(true);
+      await workloadService.prepareDatabase();
+      setError('Database prepared successfully');
+    } catch (err) {
+      setError(err.message || 'Failed to prepare database');
+    } finally {
+      setWorkloadLoading(false);
+    }
+  };
+
+  const handleStopWorkload = async (workloadId) => {
+    try {
+      setWorkloadLoading(true);
+      await workloadService.stopWorkload(workloadId);
+      await fetchActiveWorkloads();
+    } catch (err) {
+      setError(err.message || 'Failed to stop workload');
+    } finally {
+      setWorkloadLoading(false);
+    }
+  };
+
+  const handleStopAllWorkloads = async () => {
+    try {
+      setWorkloadLoading(true);
+      await workloadService.stopAllWorkloads();
+      await fetchActiveWorkloads();
+    } catch (err) {
+      setError(err.message || 'Failed to stop all workloads');
+    } finally {
+      setWorkloadLoading(false);
+    }
+  };
+
+  const fetchActiveWorkloads = async () => {
+    try {
+      const data = await workloadService.getActiveWorkloads();
+      setActiveWorkloads(data.workloads || []);
+      setSystemMetrics(data.systemMetrics || {
+        cpu_usage: 0,
+        memory_usage: 0,
+        disk_usage: 0
+      });
+    } catch (err) {
+      console.error('Failed to fetch active workloads:', err);
+      setError(err.message);
+    }
+  };
+
   useEffect(() => {
     let intervalId;
 
@@ -71,6 +154,7 @@ const AnomalyDashboard = () => {
         
         setMetrics(metricsData);
         setAnomalyRanks(ranksData);
+        await fetchActiveWorkloads();
       } catch (err) {
         setError(err.message || 'Failed to fetch data');
       }
@@ -89,8 +173,10 @@ const AnomalyDashboard = () => {
   return (
     <Container maxWidth="lg">
       <Grid container spacing={3}>
+        {/* Anomaly Control Panel */}
         <Grid item xs={12}>
           <Paper sx={{ p: 2.5 }}>
+            <Typography variant="h6" gutterBottom>Anomaly Control</Typography>
             <Grid container spacing={2} alignItems="center">
               <Grid item xs={8}>
                 <FormControl fullWidth>
@@ -125,6 +211,158 @@ const AnomalyDashboard = () => {
           </Paper>
         </Grid>
 
+        {/* Workload Control Panel */}
+        <Grid item xs={12}>
+          <Paper sx={{ p: 2.5 }}>
+            <Typography variant="h6" gutterBottom>Workload Control</Typography>
+            
+            {/* System Metrics */}
+            {Object.keys(systemMetrics).length > 0 && (
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="subtitle2" gutterBottom>System Load:</Typography>
+                <Grid container spacing={2}>
+                  <Grid item xs={4}>
+                    <Typography variant="body2" color="textSecondary">CPU Usage</Typography>
+                    <LinearProgress 
+                      variant="determinate" 
+                      value={systemMetrics.cpu_usage} 
+                      sx={{ mt: 1 }}
+                    />
+                    <Typography variant="body2" align="right">
+                      {(systemMetrics.cpu_usage || 0).toFixed(1)}%
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={4}>
+                    <Typography variant="body2" color="textSecondary">Memory Usage</Typography>
+                    <LinearProgress 
+                      variant="determinate" 
+                      value={systemMetrics.memory_usage} 
+                      sx={{ mt: 1 }}
+                    />
+                    <Typography variant="body2" align="right">
+                      {(systemMetrics.memory_usage || 0).toFixed(1)}%
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={4}>
+                    <Typography variant="body2" color="textSecondary">Disk I/O</Typography>
+                    <LinearProgress 
+                      variant="determinate" 
+                      value={systemMetrics.disk_usage} 
+                      sx={{ mt: 1 }}
+                    />
+                    <Typography variant="body2" align="right">
+                      {(systemMetrics.disk_usage || 0).toFixed(1)}%
+                    </Typography>
+                  </Grid>
+                </Grid>
+              </Box>
+            )}
+
+            <Divider sx={{ my: 2 }} />
+            
+            {/* Workload Controls */}
+            <Grid container spacing={2}>
+              <Grid item xs={12}>
+                <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
+                  <Button
+                    variant="outlined"
+                    color="info"
+                    onClick={handlePrepareDatabase}
+                    disabled={workloadLoading}
+                    startIcon={workloadLoading ? <CircularProgress size={20} /> : null}
+                  >
+                    Prepare Database
+                  </Button>
+                  {workloadOptions.map((workload) => (
+                    <Button
+                      key={workload.id}
+                      variant="outlined"
+                      onClick={() => handleStartWorkload(workload.id)}
+                      disabled={workloadLoading}
+                      startIcon={workloadLoading ? <CircularProgress size={20} /> : null}
+                    >
+                      Start {workload.name}
+                    </Button>
+                  ))}
+                  <Button
+                    variant="contained"
+                    color="error"
+                    onClick={handleStopAllWorkloads}
+                    disabled={workloadLoading || activeWorkloads.length === 0}
+                    startIcon={workloadLoading ? <CircularProgress size={20} /> : null}
+                  >
+                    Stop All Workloads
+                  </Button>
+                </Stack>
+              </Grid>
+
+              {/* Active Workloads Table */}
+              {activeWorkloads.length > 0 && (
+                <Grid item xs={12}>
+                  <Typography variant="subtitle2" gutterBottom>Active Workloads:</Typography>
+                  <TableContainer>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Type</TableCell>
+                          <TableCell>Status</TableCell>
+                          <TableCell align="right">TPS</TableCell>
+                          <TableCell align="right">QPS</TableCell>
+                          <TableCell align="right">Latency (ms)</TableCell>
+                          <TableCell align="right">Errors</TableCell>
+                          <TableCell>Actions</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {activeWorkloads.map((workload) => (
+                          <TableRow key={workload.id || `workload-${workload.type}-${workload.threads}`}>
+                            <TableCell>
+                              {workload.type}
+                              <Typography variant="caption" display="block" color="textSecondary">
+                                {workload.threads} threads
+                              </Typography>
+                            </TableCell>
+                            <TableCell>
+                              <Chip 
+                                label={workloadService.formatWorkloadStatus(workload)}
+                                color={workloadService.getStatusColor(workload.status)}
+                                size="small"
+                              />
+                            </TableCell>
+                            <TableCell align="right">
+                              {workload.metrics?.tps?.toFixed(2) || '-'}
+                            </TableCell>
+                            <TableCell align="right">
+                              {workload.metrics?.qps?.toFixed(2) || '-'}
+                            </TableCell>
+                            <TableCell align="right">
+                              {workload.metrics?.latency_ms?.toFixed(2) || '-'}
+                            </TableCell>
+                            <TableCell align="right">
+                              {workload.metrics?.errors || 0}
+                            </TableCell>
+                            <TableCell>
+                              <Button
+                                size="small"
+                                color="error"
+                                onClick={() => handleStopWorkload(workload.id)}
+                                disabled={workloadLoading || workload.status === 'stopping'}
+                              >
+                                Stop
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </Grid>
+              )}
+            </Grid>
+          </Paper>
+        </Grid>
+
+        {/* Metrics Chart */}
         <Grid item xs={12}>
           <Paper sx={{ p: 2.5 }}>
             <Typography variant="h6" gutterBottom>System Metrics</Typography>
@@ -148,6 +386,7 @@ const AnomalyDashboard = () => {
           </Paper>
         </Grid>
 
+        {/* Anomaly Ranks Chart */}
         <Grid item xs={12}>
           <Paper sx={{ p: 2.5 }}>
             <Typography variant="h6" gutterBottom>Anomaly Ranks</Typography>
@@ -163,7 +402,7 @@ const AnomalyDashboard = () => {
                   labelFormatter={(timestamp) => new Date(timestamp).toLocaleString()}
                 />
                 <Legend />
-                <Line type="monotone" dataKey="rank" stroke="#ff7300" name="Anomaly Rank" />
+                <Line type="monotone" dataKey="score" stroke="#ff7300" name="Anomaly Score" />
               </LineChart>
             </ResponsiveContainer>
           </Paper>
