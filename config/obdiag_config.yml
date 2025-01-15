@@ -3,8 +3,8 @@ obcluster:
   db_host: 127.0.0.1
   db_port: '22883'
   tenant_sys:
-    user: root
-    password: 'cm9vdF9wYXNzd29yZA=='
+    user: root@sys
+    password: 'root_password'
   servers:
     nodes:
     - namespace: oceanbase
