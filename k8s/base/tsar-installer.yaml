@@ -14,22 +14,40 @@ spec:
         - /bin/sh
         - -c
         - |
-          # Get all OceanBase pods
-          for pod in $(kubectl get pods -n oceanbase -l app=ob -o name); do
-            echo "Installing tsar in pod ${pod}..."
-            # Install build dependencies and tsar in each pod
+          # Get all OceanBase pods and install tsar in parallel
+          for pod in $(kubectl get pods -n oceanbase -l ref-obcluster=obcluster -o name); do
+            echo "Starting tsar installation in pod ${pod}..."
             kubectl exec -n oceanbase ${pod} -c observer -- sh -c '
-              apt-get update && \
-              apt-get install -y git build-essential libpcre3-dev && \
+              yum update -y && \
+              yum install -y git gcc make pcre-devel && \
               cd /tmp && \
               rm -rf tsar && \
-              git clone https://github.com/alibaba/tsar.git && \
+              # Try git clone with retries
+              max_retries=5
+              retry_count=0
+              while [ $retry_count -lt $max_retries ]; do
+                if git clone https://github.com/alibaba/tsar.git; then
+                  echo "Git clone successful"
+                  break
+                else
+                  retry_count=$((retry_count + 1))
+                  if [ $retry_count -eq $max_retries ]; then
+                    echo "Failed to clone after $max_retries attempts"
+                    exit 1
+                  fi
+                  echo "Git clone failed, retrying in 5 seconds (attempt $retry_count of $max_retries)..."
+                  sleep 5
+                fi
+              done && \
               cd tsar && \
               make && \
               make install && \
               chmod -R 755 /usr/local/bin/tsar /usr/local/tsar /etc/tsar
-            '
+            ' &
           done
+          # Wait for all background processes to complete
+          wait
+          echo "All tsar installations completed!"
       restartPolicy: Never
   backoffLimit: 4
 ---
