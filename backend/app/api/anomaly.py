@@ -4,7 +4,7 @@ from datetime import datetime
 from app.services.k8s_service import K8sService
 from app.services.metrics_service import MetricsService
 from app.services.diagnosis_service import DiagnosisService
-from app.schemas.anomaly import AnomalyRequest, MetricsResponse, AnomalyRankResponse
+from app.schemas.anomaly import AnomalyRequest, MetricsResponse, AnomalyRankResponse, ActiveAnomalyResponse
 
 router = APIRouter()
 k8s_service = K8sService()
@@ -28,6 +28,15 @@ async def stop_anomaly():
         # Delete all chaos mesh experiments
         await k8s_service.delete_all_chaos_experiments()
         return {"status": "success", "message": "Stopped all anomalies"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/active", response_model=List[ActiveAnomalyResponse])
+async def get_active_anomalies():
+    """Get list of currently active anomalies"""
+    try:
+        active_anomalies = await k8s_service.get_active_anomalies()
+        return active_anomalies
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

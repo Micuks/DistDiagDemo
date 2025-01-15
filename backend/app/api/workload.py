@@ -1,18 +1,28 @@
 import logging
 from fastapi import APIRouter, HTTPException
 from ..services.workload_service import WorkloadService
-from ..schemas.workload import WorkloadRequest, WorkloadInfo
+from ..schemas.workload import WorkloadRequest, WorkloadInfo, WorkloadType
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 workload_service = WorkloadService()
 
 @router.post("/prepare")
-async def prepare_database():
-    """Prepare the database for sysbench workload"""
-    logger.info("Received request to prepare database")
+async def prepare_database(request: WorkloadRequest):
+    """Prepare the database for the specified workload type"""
+    logger.info(f"Received request to prepare database for workload type: {request.type}")
     try:
-        success = workload_service.prepare_database()
+        success = False
+        if request.type == WorkloadType.SYSBENCH:
+            success = workload_service.prepare_database()
+        elif request.type == WorkloadType.TPCC:
+            success = workload_service.prepare_tpcc()
+        elif request.type == WorkloadType.TPCH:
+            success = workload_service.prepare_tpch()
+        else:
+            logger.error(f"Unsupported workload type: {request.type}")
+            raise HTTPException(status_code=400, detail=f"Unsupported workload type: {request.type}")
+
         if success:
             logger.info("Database preparation completed successfully")
             return {"status": "success", "message": "Database prepared successfully"}
@@ -28,13 +38,6 @@ async def start_workload(request: WorkloadRequest):
     """Start a new workload"""
     logger.info(f"Received request to start workload: type={request.type}, threads={request.threads}")
     try:
-        # First check if database is prepared
-        logger.info("Preparing database before starting workload")
-        if not workload_service.prepare_database():
-            logger.error("Failed to prepare database")
-            raise HTTPException(status_code=500, detail="Failed to prepare database")
-            
-        # Then start the workload
         success = workload_service.start_workload(request.type, request.threads)
         if success:
             logger.info("Workload started successfully")

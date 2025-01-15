@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class WorkloadService:
     def __init__(self):
         self.active_workloads: Dict[str, subprocess.Popen] = {}
-        self.workload_metrics: Dict[str, Dict] = {}  # Store workload-specific metrics
+        self.workload_metrics: Dict[str, Dict] = {}
         self._last_io_stats = None
         self._last_io_time = None
         # Database connection parameters
@@ -23,8 +23,10 @@ class WorkloadService:
         self.db_user = os.getenv('OB_USER', 'root@sys')
         self.db_password = os.getenv('OB_PASSWORD', 'root_password')
         self.db_name = 'sbtest'
+        self.tpcc_db = 'tpcc'
+        self.tpch_db = 'tpch'
         logger.info("WorkloadService initialized")
-        logger.info(f"Database connection: host={self.db_host}, port={self.db_port}, user={self.db_user}, db={self.db_name}")
+        logger.info(f"Database connection: host={self.db_host}, port={self.db_port}, user={self.db_user}")
 
     def _create_database(self):
         """Create the sysbench database if it doesn't exist"""
@@ -176,10 +178,148 @@ class WorkloadService:
             logger.error(f"Error parsing sysbench metrics: {str(e)}")
             return None
 
+    def _parse_tpcc_metrics(self, line: str) -> Optional[Dict]:
+        """Parse TPCC output line for metrics"""
+        try:
+            metrics = {}
+            # Example: [Current] NEW_ORDER - Time: 45.79 ms, TPM: 1200, Success: 99.9%
+            if 'NEW_ORDER' in line:
+                tpm_match = re.search(r'TPM: (\d+)', line)
+                if tpm_match:
+                    metrics['tpm'] = float(tpm_match.group(1))
+                lat_match = re.search(r'Time: (\d+\.\d+)', line)
+                if lat_match:
+                    metrics['latency_ms'] = float(lat_match.group(1))
+            return metrics if metrics else None
+        except Exception as e:
+            logger.error(f"Error parsing TPCC metrics: {str(e)}")
+            return None
+
+    def _parse_tpch_metrics(self, line: str) -> Optional[Dict]:
+        """Parse TPCH output line for metrics"""
+        try:
+            metrics = {}
+            # Example: Query 1 completed - Time: 10.5s
+            query_match = re.search(r'Query (\d+) completed - Time: (\d+\.\d+)s', line)
+            if query_match:
+                query_num = int(query_match.group(1))
+                execution_time = float(query_match.group(2))
+                metrics[f'q{query_num}_time'] = execution_time
+            return metrics if metrics else None
+        except Exception as e:
+            logger.error(f"Error parsing TPCH metrics: {str(e)}")
+            return None
+
+    def prepare_tpcc(self) -> bool:
+        """Prepare the database for TPCC workload"""
+        try:
+            logger.info("Preparing database for TPCC workload")
+            # Create TPCC database if not exists
+            conn = mysql.connector.connect(
+                host=self.db_host,
+                port=self.db_port,
+                user=self.db_user,
+                password=self.db_password
+            )
+            cursor = conn.cursor()
+            cursor.execute(f"DROP DATABASE IF EXISTS {self.tpcc_db}")
+            cursor.execute(f"CREATE DATABASE {self.tpcc_db}")
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            # Get the absolute path to the tpcc-mysql directory
+            tpcc_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "tpcc-mysql")
+            
+            # Create tables
+            create_tables_cmd = (
+                f"mysql "
+                f"-h {self.db_host} "
+                f"-P {self.db_port} "
+                f"-u {self.db_user} "
+                f"-p{self.db_password} "
+                f"{self.tpcc_db} "
+                f"< {os.path.join(tpcc_dir, 'create_table.sql')}"
+            )
+            logger.info(f"Creating tables with command: {create_tables_cmd}")
+            if os.system(create_tables_cmd) != 0:
+                logger.error("Failed to create tables")
+                return False
+
+            # Load data
+            load_data_cmd = (
+                f"{os.path.join(tpcc_dir, 'tpcc_load')} "
+                f"-h {self.db_host} "
+                f"-P {self.db_port} "
+                f"-d {self.tpcc_db} "
+                f"-u {self.db_user} "
+                f"-p {self.db_password} "
+                f"-w 10"  # 10 warehouses
+            )
+            logger.info(f"Loading data with command: {load_data_cmd}")
+            if os.system(load_data_cmd) != 0:
+                logger.error("Failed to load data")
+                return False
+
+            # Add foreign keys and indexes
+            add_indexes_cmd = (
+                f"mysql "
+                f"-h {self.db_host} "
+                f"-P {self.db_port} "
+                f"-u {self.db_user} "
+                f"-p{self.db_password} "
+                f"{self.tpcc_db} "
+                f"< {os.path.join(tpcc_dir, 'add_fkey_idx.sql')}"
+            )
+            logger.info(f"Adding indexes with command: {add_indexes_cmd}")
+            if os.system(add_indexes_cmd) != 0:
+                logger.error("Failed to add indexes")
+                return False
+
+            logger.info("TPC-C database preparation completed successfully")
+            return True
+        except Exception as e:
+            logger.exception("Error preparing TPCC database")
+            return False
+
+    def prepare_tpch(self) -> bool:
+        """Prepare the database for TPCH workload"""
+        try:
+            logger.info("Preparing database for TPCH workload")
+            # Create TPCH database if not exists
+            conn = mysql.connector.connect(
+                host=self.db_host,
+                port=self.db_port,
+                user=self.db_user,
+                password=self.db_password
+            )
+            cursor = conn.cursor()
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.tpch_db}")
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            # Run TPCH schema creation and data loading
+            cmd = (
+                f"tpch-mysql "
+                f"--host={self.db_host} "
+                f"--port={self.db_port} "
+                f"--user={self.db_user} "
+                f"--password={self.db_password} "
+                f"--database={self.tpch_db} "
+                f"--scale-factor=1 "  # 1GB default size
+                "prepare"
+            )
+            process = subprocess.run(cmd.split(), capture_output=True, text=True)
+            return process.returncode == 0
+        except Exception as e:
+            logger.exception("Error preparing TPCH database")
+            return False
+
     def _read_workload_output(self, workload_id: str, process: subprocess.Popen):
         """Read workload output in a separate thread and update metrics"""
         try:
-            while process.poll() is None:  # While process is running
+            while process.poll() is None:
                 line = process.stdout.readline()
                 if not line:
                     break
@@ -188,26 +328,27 @@ class WorkloadService:
                 if not line:
                     continue
                 
-                # Log the output for debugging
                 logger.debug(f"Workload {workload_id} output: {line}")
                 
-                # Parse metrics if this is a metrics line
-                if '[ ' in line and ' ]' in line and 'tps:' in line:
+                metrics = None
+                if 'sysbench' in workload_id and '[ ' in line and ' ]' in line and 'tps:' in line:
                     metrics = self._parse_sysbench_metrics(line)
-                    if metrics:
-                        # Update workload metrics
-                        if workload_id not in self.workload_metrics:
-                            self.workload_metrics[workload_id] = {}
-                        self.workload_metrics[workload_id].update(metrics)
-                        logger.debug(f"Updated metrics for workload {workload_id}: {metrics}")
+                elif 'tpcc' in workload_id and 'NEW_ORDER' in line:
+                    metrics = self._parse_tpcc_metrics(line)
+                elif 'tpch' in workload_id and 'Query' in line and 'completed' in line:
+                    metrics = self._parse_tpch_metrics(line)
+
+                if metrics:
+                    if workload_id not in self.workload_metrics:
+                        self.workload_metrics[workload_id] = {}
+                    self.workload_metrics[workload_id].update(metrics)
+                    logger.debug(f"Updated metrics for workload {workload_id}: {metrics}")
             
-            # Process has finished
             logger.info(f"Workload {workload_id} output reader thread finished")
             
         except Exception as e:
             logger.exception(f"Error reading workload {workload_id} output")
         finally:
-            # Clean up metrics when the workload is done
             if workload_id in self.workload_metrics:
                 del self.workload_metrics[workload_id]
 
@@ -222,8 +363,8 @@ class WorkloadService:
             
             logger.info(f"Starting workload: type={workload_type.value}, threads={num_threads}")
             
+            cmd = None
             if workload_type == WorkloadType.SYSBENCH:
-                # Build sysbench run command with database connection parameters
                 cmd = (
                     f"sysbench oltp_read_write "
                     f"--db-driver=mysql "
@@ -235,39 +376,68 @@ class WorkloadService:
                     f"--tables=10 "
                     f"--table-size=100000 "
                     f"--threads={num_threads} "
-                    f"--time=0 "  # Run indefinitely
-                    f"--report-interval=10 "  # Report every 10 seconds
+                    f"--time=0 "
+                    f"--report-interval=10 "
                     "run"
                 )
-                
-                logger.debug(f"Executing command: {cmd}")
-                
-                process = subprocess.Popen(
-                    cmd.split(),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=1,
-                    universal_newlines=True
+            elif workload_type == WorkloadType.TPCC:
+                # Get the absolute path to the tpcc-mysql directory
+                tpcc_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "tpcc-mysql")
+                cmd = (
+                    f"{os.path.join(tpcc_dir, 'tpcc_start')} "
+                    f"-h {self.db_host} "
+                    f"-P {self.db_port} "
+                    f"-d {self.tpcc_db} "
+                    f"-u {self.db_user} "
+                    f"-p {self.db_password} "
+                    f"-w 10 "  # 10 warehouses
+                    f"-c {num_threads} "  # Number of connections
+                    f"-r 10 "  # Warmup time in seconds
+                    f"-l 0"  # Run time in seconds (0 = infinite)
                 )
-                
-                self.active_workloads[workload_id] = process
-                
-                # Start a thread to read the process output
-                output_thread = threading.Thread(
-                    target=self._read_workload_output,
-                    args=(workload_id, process),
-                    daemon=True
+            elif workload_type == WorkloadType.TPCH:
+                cmd = (
+                    f"tpch-mysql "
+                    f"--host={self.db_host} "
+                    f"--port={self.db_port} "
+                    f"--user={self.db_user} "
+                    f"--password={self.db_password} "
+                    f"--database={self.tpch_db} "
+                    f"--scale-factor=1 "
+                    f"--threads={num_threads} "
+                    f"--time=0 "
+                    f"--report-interval=10 "
+                    "run"
                 )
-                output_thread.start()
-                
-                logger.info(f"Workload {workload_id} started successfully with PID {process.pid}")
-                return True
-            else:
+            
+            if not cmd:
                 logger.error(f"Unsupported workload type: {workload_type}")
                 return False
 
+            logger.debug(f"Executing command: {cmd}")
+            
+            process = subprocess.Popen(
+                cmd.split(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            self.active_workloads[workload_id] = process
+            
+            # Start a thread to read the output
+            output_thread = threading.Thread(
+                target=self._read_workload_output,
+                args=(workload_id, process)
+            )
+            output_thread.daemon = True
+            output_thread.start()
+            
+            return True
+            
         except Exception as e:
-            logger.exception(f"Error starting workload {workload_type}")
+            logger.exception(f"Error starting workload: {str(e)}")
             return False
 
     def stop_workload(self, workload_id: str) -> bool:

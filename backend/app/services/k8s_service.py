@@ -3,6 +3,7 @@ from kubernetes.client.rest import ApiException
 import logging
 import os
 from typing import Dict, Any
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ class K8sService:
         
         self.custom_api = client.CustomObjectsApi()
         self.namespace = os.getenv('OCEANBASE_NAMESPACE', 'oceanbase')
+        self.active_anomalies = {}  # Track active anomalies with timestamps
 
     async def apply_chaos_experiment(self, anomaly_type: str):
         """Apply a chaos mesh experiment based on the anomaly type"""
@@ -33,31 +35,56 @@ class K8sService:
                 plural=self._get_experiment_plural(anomaly_type),
                 body=experiment
             )
+            # Track the active anomaly
+            self.active_anomalies[anomaly_type] = {
+                "start_time": datetime.now().isoformat(),
+                "status": "active",
+                "type": anomaly_type,
+                "target": experiment["spec"]["selector"]["labelSelectors"]["ref-obcluster"]
+            }
             logger.info(f"Created {anomaly_type} experiment in namespace {self.namespace}")
         except ApiException as e:
             logger.error(f"Failed to create chaos experiment: {str(e)}")
             raise Exception(f"Failed to create chaos experiment: {str(e)}")
 
     async def delete_all_chaos_experiments(self):
-        """Delete all running chaos experiments"""
+        """Delete all running chaos mesh experiments"""
         try:
-            # Delete all types of experiments
-            experiment_types = ['podchaos', 'networkchaos', 'iochaos', 'stresschaos']
-            for exp_type in experiment_types:
-                try:
-                    self.custom_api.delete_collection_namespaced_custom_object(
-                        group="chaos-mesh.org",
-                        version="v1alpha1",
-                        namespace=self.namespace,
-                        plural=exp_type
-                    )
-                    logger.info(f"Deleted all {exp_type} experiments in namespace {self.namespace}")
-                except ApiException as e:
-                    if e.status != 404:  # Ignore if no experiments exist
-                        raise
-        except Exception as e:
+            # Clear active anomalies tracking
+            self.active_anomalies = {}
+            
+            # Delete CPU/Memory stress experiments
+            self.custom_api.delete_collection_namespaced_custom_object(
+                group="chaos-mesh.org",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="stresschaos"
+            )
+            
+            # Delete network chaos experiments
+            self.custom_api.delete_collection_namespaced_custom_object(
+                group="chaos-mesh.org",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="networkchaos"
+            )
+            
+            # Delete IO chaos experiments
+            self.custom_api.delete_collection_namespaced_custom_object(
+                group="chaos-mesh.org",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="iochaos"
+            )
+            
+            logger.info(f"Deleted all chaos experiments in namespace {self.namespace}")
+        except ApiException as e:
             logger.error(f"Failed to delete chaos experiments: {str(e)}")
             raise Exception(f"Failed to delete chaos experiments: {str(e)}")
+
+    async def get_active_anomalies(self):
+        """Get list of currently active anomalies"""
+        return list(self.active_anomalies.values())
 
     def _get_experiment_template(self, anomaly_type: str) -> Dict[str, Any]:
         """Get the appropriate chaos mesh experiment template"""

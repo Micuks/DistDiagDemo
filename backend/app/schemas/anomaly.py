@@ -24,4 +24,11 @@ class AnomalyRankResponse(BaseModel):
     timestamp: datetime
     node: str  # Node where anomaly was detected
     type: str  # Type of anomaly (cpu, io, buffer, net, load)
-    score: float  # Anomaly score between 0 and 1 
+    score: float  # Anomaly score between 0 and 1
+
+class ActiveAnomalyResponse(BaseModel):
+    """Response containing information about an active anomaly"""
+    start_time: str
+    status: str
+    type: str
+    target: str 

@@ -4,6 +4,8 @@ from typing import Dict, Optional
 
 class WorkloadType(str, Enum):
     SYSBENCH = "sysbench"
+    TPCC = "tpcc"
+    TPCH = "tpch"
 
 class WorkloadMetrics(BaseModel):
     cpu_usage: float
