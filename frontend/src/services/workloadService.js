@@ -3,9 +3,9 @@ import axios from 'axios';
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://10.101.168.97:8001';
 
 export const workloadService = {
-  prepareDatabase: async () => {
+  prepareDatabase: async (workloadType) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/api/workload/prepare`);
+      const response = await axios.post(`${API_BASE_URL}/api/workload/prepare`, { type: workloadType });
       return response.data;
     } catch (error) {
       console.error('Error preparing database:', error);
@@ -91,7 +91,24 @@ export const workloadService = {
     let statusText = `${status.charAt(0).toUpperCase()}${status.slice(1)}`;
     
     if (metrics && status === 'running') {
-      statusText += ` (TPS: ${metrics.tps}, QPS: ${metrics.qps}, Latency: ${metrics.latency_ms}ms)`;
+      switch (workload.type) {
+        case 'sysbench':
+          statusText += ` (TPS: ${metrics.tps}, QPS: ${metrics.qps}, Latency: ${metrics.latency_ms}ms)`;
+          break;
+        case 'tpcc':
+          statusText += ` (TPM: ${metrics.tpm}, Latency: ${metrics.latency_ms}ms)`;
+          break;
+        case 'tpch':
+          // For TPCH, show the latest query execution time
+          const queryTimes = Object.entries(metrics)
+            .filter(([key]) => key.startsWith('q'))
+            .sort(([a], [b]) => parseInt(b.slice(1)) - parseInt(a.slice(1)));
+          if (queryTimes.length > 0) {
+            const [query, time] = queryTimes[0];
+            statusText += ` (${query.toUpperCase()}: ${time}s)`;
+          }
+          break;
+      }
     }
     
     if (workload.error_message) {

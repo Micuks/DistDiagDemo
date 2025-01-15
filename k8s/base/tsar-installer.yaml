@@ -18,31 +18,44 @@ spec:
           for pod in $(kubectl get pods -n oceanbase -l ref-obcluster=obcluster -o name); do
             echo "Starting tsar installation in pod ${pod}..."
             kubectl exec -n oceanbase ${pod} -c observer -- sh -c '
+              # Install or update required packages first
+              echo "Installing/updating required packages..."
               yum update -y && \
-              yum install -y git gcc make pcre-devel && \
-              cd /tmp && \
-              rm -rf tsar && \
-              # Try git clone with retries
-              max_retries=5
-              retry_count=0
-              while [ $retry_count -lt $max_retries ]; do
-                if git clone https://github.com/alibaba/tsar.git; then
-                  echo "Git clone successful"
-                  break
-                else
-                  retry_count=$((retry_count + 1))
-                  if [ $retry_count -eq $max_retries ]; then
-                    echo "Failed to clone after $max_retries attempts"
-                    exit 1
+              yum install -y git gcc make pcre-devel cronie util-linux zip && \
+              # Create dmesg log file
+              dmesg > /var/log/dmesg && \
+              # Set up cron job to update dmesg log periodically
+              echo "*/5 * * * * root dmesg > /var/log/dmesg" > /etc/cron.d/dmesg-update && \
+              crond
+
+              # Check if tsar is already installed
+              if command -v tsar >/dev/null 2>&1; then
+                echo "Tsar is already installed, skipping tsar installation..."
+              else
+                echo "Installing tsar..."
+                cd /tmp && \
+                rm -rf tsar && \
+                # Try git clone with retries
+                max_retries=5
+                retry_count=0
+                while [ $retry_count -lt $max_retries ]; do
+                  if git clone https://github.com/alibaba/tsar.git; then
+                    echo "Git clone successful"
+                    break
+                  else
+                    retry_count=$((retry_count + 1))
+                    if [ $retry_count -eq $max_retries ]; then
+                      echo "Failed to clone after $max_retries attempts"
+                      exit 1
+                    fi
+                    echo "Git clone failed, retrying in 5 seconds (attempt $retry_count of $max_retries)..."
+                    sleep 5
                   fi
-                  echo "Git clone failed, retrying in 5 seconds (attempt $retry_count of $max_retries)..."
-                  sleep 5
-                fi
-              done && \
-              cd tsar && \
-              make && \
-              make install && \
-              chmod -R 755 /usr/local/bin/tsar /usr/local/tsar /etc/tsar
+                done && \
+                cd tsar && \
+                make && \
+                make install
+              fi
             ' &
           done
           # Wait for all background processes to complete

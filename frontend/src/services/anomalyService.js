@@ -25,6 +25,16 @@ export const anomalyService = {
     }
   },
 
+  getActiveAnomalies: async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/anomaly/active`);
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching active anomalies:', error);
+      throw error;
+    }
+  },
+
   getMetrics: async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/api/metrics/system`);

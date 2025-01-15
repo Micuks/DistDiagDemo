@@ -47,6 +47,7 @@ const AnomalyDashboard = () => {
   const [activeWorkloads, setActiveWorkloads] = useState([]);
   const [workloadLoading, setWorkloadLoading] = useState(false);
   const [systemMetrics, setSystemMetrics] = useState({});
+  const [activeAnomalies, setActiveAnomalies] = useState([]);
 
   const anomalyOptions = [
     { id: 'cpu_stress', name: 'CPU Stress' },
@@ -57,6 +58,8 @@ const AnomalyDashboard = () => {
 
   const workloadOptions = [
     { id: 'sysbench', name: 'Sysbench OLTP' },
+    { id: 'tpcc', name: 'TPC-C' },
+    { id: 'tpch', name: 'TPC-H' }
   ];
 
   const handleAnomalyChange = (event) => {
@@ -72,6 +75,8 @@ const AnomalyDashboard = () => {
         await anomalyService.startAnomaly(selectedAnomaly);
       }
       setIsAnomalyActive(!isAnomalyActive);
+      const anomalies = await anomalyService.getActiveAnomalies();
+      setActiveAnomalies(anomalies);
     } catch (err) {
       setError(err.message || 'Failed to toggle anomaly');
     } finally {
@@ -91,10 +96,10 @@ const AnomalyDashboard = () => {
     }
   };
 
-  const handlePrepareDatabase = async () => {
+  const handlePrepareDatabase = async (workloadType) => {
     try {
       setWorkloadLoading(true);
-      await workloadService.prepareDatabase();
+      await workloadService.prepareDatabase(workloadType);
       setError('Database prepared successfully');
     } catch (err) {
       setError(err.message || 'Failed to prepare database');
@@ -147,13 +152,15 @@ const AnomalyDashboard = () => {
 
     const fetchData = async () => {
       try {
-        const [metricsData, ranksData] = await Promise.all([
+        const [metricsData, ranksData, anomaliesData] = await Promise.all([
           anomalyService.getMetrics(),
-          anomalyService.getAnomalyRanks()
+          anomalyService.getAnomalyRanks(),
+          anomalyService.getActiveAnomalies()
         ]);
         
         setMetrics(metricsData);
         setAnomalyRanks(ranksData);
+        setActiveAnomalies(anomaliesData);
         await fetchActiveWorkloads();
       } catch (err) {
         setError(err.message || 'Failed to fetch data');
@@ -177,7 +184,7 @@ const AnomalyDashboard = () => {
         <Grid item xs={12}>
           <Paper sx={{ p: 2.5 }}>
             <Typography variant="h6" gutterBottom>Anomaly Control</Typography>
-            <Grid container spacing={2} alignItems="center">
+            <Grid container spacing={2}>
               <Grid item xs={8}>
                 <FormControl fullWidth>
                   <InputLabel id="anomaly-select-label">Select Anomaly</InputLabel>
@@ -208,6 +215,41 @@ const AnomalyDashboard = () => {
                 </Button>
               </Grid>
             </Grid>
+
+            {/* Active Anomalies Display */}
+            {activeAnomalies.length > 0 && (
+              <Box sx={{ mt: 2 }}>
+                <Typography variant="subtitle2" gutterBottom>Active Anomalies:</Typography>
+                <TableContainer>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Type</TableCell>
+                        <TableCell>Target</TableCell>
+                        <TableCell>Start Time</TableCell>
+                        <TableCell>Status</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {activeAnomalies.map((anomaly, index) => (
+                        <TableRow key={index}>
+                          <TableCell>{anomaly.type}</TableCell>
+                          <TableCell>{anomaly.target}</TableCell>
+                          <TableCell>{new Date(anomaly.start_time).toLocaleString()}</TableCell>
+                          <TableCell>
+                            <Chip
+                              label={anomaly.status}
+                              color={anomaly.status === 'active' ? 'success' : 'default'}
+                              size="small"
+                            />
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Box>
+            )}
           </Paper>
         </Grid>
 
@@ -215,6 +257,49 @@ const AnomalyDashboard = () => {
         <Grid item xs={12}>
           <Paper sx={{ p: 2.5 }}>
             <Typography variant="h6" gutterBottom>Workload Control</Typography>
+            
+            {/* Workload Buttons */}
+            <Grid container spacing={2} sx={{ mb: 3 }}>
+              {workloadOptions.map((workload) => (
+                <Grid item xs={12} sm={4} key={workload.id}>
+                  <Stack spacing={1}>
+                    <Typography variant="subtitle2">{workload.name}</Typography>
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      onClick={() => handlePrepareDatabase(workload.id)}
+                      disabled={workloadLoading}
+                      fullWidth
+                      size="small"
+                    >
+                      Prepare Database
+                    </Button>
+                    <Button
+                      variant="contained"
+                      color="success"
+                      onClick={() => handleStartWorkload(workload.id)}
+                      disabled={workloadLoading}
+                      fullWidth
+                    >
+                      Start Workload
+                    </Button>
+                  </Stack>
+                </Grid>
+              ))}
+            </Grid>
+
+            {/* Stop All Workloads Button */}
+            <Box sx={{ mb: 3 }}>
+              <Button
+                variant="contained"
+                color="error"
+                onClick={handleStopAllWorkloads}
+                disabled={workloadLoading || activeWorkloads.length === 0}
+                fullWidth
+              >
+                Stop All Workloads
+              </Button>
+            </Box>
             
             {/* System Metrics */}
             {Object.keys(systemMetrics).length > 0 && (
@@ -260,105 +345,52 @@ const AnomalyDashboard = () => {
 
             <Divider sx={{ my: 2 }} />
             
-            {/* Workload Controls */}
-            <Grid container spacing={2}>
+            {/* Active Workloads Table */}
+            {activeWorkloads.length > 0 && (
               <Grid item xs={12}>
-                <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
-                  <Button
-                    variant="outlined"
-                    color="info"
-                    onClick={handlePrepareDatabase}
-                    disabled={workloadLoading}
-                    startIcon={workloadLoading ? <CircularProgress size={20} /> : null}
-                  >
-                    Prepare Database
-                  </Button>
-                  {workloadOptions.map((workload) => (
-                    <Button
-                      key={workload.id}
-                      variant="outlined"
-                      onClick={() => handleStartWorkload(workload.id)}
-                      disabled={workloadLoading}
-                      startIcon={workloadLoading ? <CircularProgress size={20} /> : null}
-                    >
-                      Start {workload.name}
-                    </Button>
-                  ))}
-                  <Button
-                    variant="contained"
-                    color="error"
-                    onClick={handleStopAllWorkloads}
-                    disabled={workloadLoading || activeWorkloads.length === 0}
-                    startIcon={workloadLoading ? <CircularProgress size={20} /> : null}
-                  >
-                    Stop All Workloads
-                  </Button>
-                </Stack>
-              </Grid>
-
-              {/* Active Workloads Table */}
-              {activeWorkloads.length > 0 && (
-                <Grid item xs={12}>
-                  <Typography variant="subtitle2" gutterBottom>Active Workloads:</Typography>
-                  <TableContainer>
-                    <Table size="small">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell>Type</TableCell>
-                          <TableCell>Status</TableCell>
-                          <TableCell align="right">TPS</TableCell>
-                          <TableCell align="right">QPS</TableCell>
-                          <TableCell align="right">Latency (ms)</TableCell>
-                          <TableCell align="right">Errors</TableCell>
-                          <TableCell>Actions</TableCell>
+                <Typography variant="subtitle2" gutterBottom>Active Workloads:</Typography>
+                <TableContainer>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Type</TableCell>
+                        <TableCell>Status</TableCell>
+                        <TableCell>Actions</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {activeWorkloads.map((workload) => (
+                        <TableRow key={workload.id || `workload-${workload.type}-${workload.threads}`}>
+                          <TableCell>
+                            {workload.type}
+                            <Typography variant="caption" display="block" color="textSecondary">
+                              {workload.threads} threads
+                            </Typography>
+                          </TableCell>
+                          <TableCell>
+                            <Chip 
+                              label={workloadService.formatWorkloadStatus(workload)}
+                              color={workloadService.getStatusColor(workload.status)}
+                              size="small"
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <Button
+                              size="small"
+                              color="error"
+                              onClick={() => handleStopWorkload(workload.id)}
+                              disabled={workloadLoading || workload.status === 'stopping'}
+                            >
+                              Stop
+                            </Button>
+                          </TableCell>
                         </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {activeWorkloads.map((workload) => (
-                          <TableRow key={workload.id || `workload-${workload.type}-${workload.threads}`}>
-                            <TableCell>
-                              {workload.type}
-                              <Typography variant="caption" display="block" color="textSecondary">
-                                {workload.threads} threads
-                              </Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Chip 
-                                label={workloadService.formatWorkloadStatus(workload)}
-                                color={workloadService.getStatusColor(workload.status)}
-                                size="small"
-                              />
-                            </TableCell>
-                            <TableCell align="right">
-                              {workload.metrics?.tps?.toFixed(2) || '-'}
-                            </TableCell>
-                            <TableCell align="right">
-                              {workload.metrics?.qps?.toFixed(2) || '-'}
-                            </TableCell>
-                            <TableCell align="right">
-                              {workload.metrics?.latency_ms?.toFixed(2) || '-'}
-                            </TableCell>
-                            <TableCell align="right">
-                              {workload.metrics?.errors || 0}
-                            </TableCell>
-                            <TableCell>
-                              <Button
-                                size="small"
-                                color="error"
-                                onClick={() => handleStopWorkload(workload.id)}
-                                disabled={workloadLoading || workload.status === 'stopping'}
-                              >
-                                Stop
-                              </Button>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                </Grid>
-              )}
-            </Grid>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Grid>
+            )}
           </Paper>
         </Grid>
 
