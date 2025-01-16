@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict
 from datetime import datetime
+import asyncio
 from app.services.k8s_service import K8sService
 from app.services.metrics_service import MetricsService
 from app.services.diagnosis_service import DiagnosisService
@@ -11,23 +12,48 @@ k8s_service = K8sService()
 metrics_service = MetricsService()
 diagnosis_service = DiagnosisService()
 
+async def retry_with_backoff(func, max_retries=3, initial_delay=1):
+    delay = initial_delay
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            return await func()
+        except Exception as e:
+            last_exception = e
+            if "AlreadyExists" in str(e) and "is being deleted" in str(e):
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            raise e
+    
+    raise last_exception
+
 @router.post("/start")
 async def start_anomaly(request: AnomalyRequest):
     """Start an anomaly experiment in the OceanBase cluster"""
     try:
-        # Apply the chaos mesh experiment
-        await k8s_service.apply_chaos_experiment(request.type)
+        # Apply the chaos mesh experiment with retry logic
+        async def start_experiment():
+            return await k8s_service.apply_chaos_experiment(request.type)
+            
+        await retry_with_backoff(start_experiment)
         return {"status": "success", "message": f"Started {request.type} anomaly"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/stop")
-async def stop_anomaly():
-    """Stop all running anomaly experiments"""
+async def stop_anomaly(request: AnomalyRequest = None):
+    """Stop specific or all running anomaly experiments"""
     try:
-        # Delete all chaos mesh experiments
-        await k8s_service.delete_all_chaos_experiments()
-        return {"status": "success", "message": "Stopped all anomalies"}
+        if request and request.type:
+            # Delete specific chaos mesh experiment
+            await k8s_service.delete_chaos_experiment(request.type)
+            return {"status": "success", "message": f"Stopped {request.type} anomaly"}
+        else:
+            # Delete all chaos mesh experiments
+            await k8s_service.delete_all_chaos_experiments()
+            return {"status": "success", "message": "Stopped all anomalies"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -4,3 +4,6 @@
 [submodule "obdiag"]
 	path = obdiag
 	url = https://github.com/oceanbase/obdiag.git
+[submodule "tpcc-mysql"]
+	path = tpcc-mysql
+	url = https://github.com/Percona-Lab/tpcc-mysql.git

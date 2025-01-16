@@ -4,6 +4,7 @@ import logging
 import os
 from typing import Dict, Any
 from datetime import datetime
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +25,34 @@ class K8sService:
         experiment = self._get_experiment_template(anomaly_type)
         
         try:
-            # Delete any existing experiments first
-            await self.delete_all_chaos_experiments()
+            # Delete any existing experiment of the same type first
+            await self.delete_chaos_experiment(anomaly_type)
             
-            # Create new experiment
-            self.custom_api.create_namespaced_custom_object(
-                group="chaos-mesh.org",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural=self._get_experiment_plural(anomaly_type),
-                body=experiment
-            )
+            # Wait for a short time to ensure the deletion is complete
+            await asyncio.sleep(2)
+            
+            # Create new experiment with retry logic
+            max_retries = 3
+            retry_delay = 1
+            
+            for attempt in range(max_retries):
+                try:
+                    self.custom_api.create_namespaced_custom_object(
+                        group="chaos-mesh.org",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=self._get_experiment_plural(anomaly_type),
+                        body=experiment
+                    )
+                    break
+                except ApiException as e:
+                    if attempt < max_retries - 1 and "AlreadyExists" in str(e) and "is being deleted" in str(e):
+                        logger.info(f"Experiment still being deleted, retrying in {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    raise e
+            
             # Track the active anomaly
             self.active_anomalies[anomaly_type] = {
                 "start_time": datetime.now().isoformat(),
@@ -43,9 +61,36 @@ class K8sService:
                 "target": experiment["spec"]["selector"]["labelSelectors"]["ref-obcluster"]
             }
             logger.info(f"Created {anomaly_type} experiment in namespace {self.namespace}")
-        except ApiException as e:
+        except Exception as e:
             logger.error(f"Failed to create chaos experiment: {str(e)}")
             raise Exception(f"Failed to create chaos experiment: {str(e)}")
+
+    async def delete_chaos_experiment(self, anomaly_type: str):
+        """Delete a specific chaos mesh experiment"""
+        try:
+            plural = self._get_experiment_plural(anomaly_type)
+            name = f"ob-{anomaly_type.replace('_', '-')}"
+            
+            try:
+                self.custom_api.delete_namespaced_custom_object(
+                    group="chaos-mesh.org",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural=plural,
+                    name=name
+                )
+            except ApiException as e:
+                if e.status != 404:  # Ignore 404 Not Found errors
+                    raise e
+            
+            # Remove from active anomalies tracking
+            if anomaly_type in self.active_anomalies:
+                del self.active_anomalies[anomaly_type]
+            
+            logger.info(f"Deleted {anomaly_type} experiment in namespace {self.namespace}")
+        except Exception as e:
+            logger.error(f"Failed to delete chaos experiment: {str(e)}")
+            raise Exception(f"Failed to delete chaos experiment: {str(e)}")
 
     async def delete_all_chaos_experiments(self):
         """Delete all running chaos mesh experiments"""
@@ -53,32 +98,13 @@ class K8sService:
             # Clear active anomalies tracking
             self.active_anomalies = {}
             
-            # Delete CPU/Memory stress experiments
-            self.custom_api.delete_collection_namespaced_custom_object(
-                group="chaos-mesh.org",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural="stresschaos"
-            )
-            
-            # Delete network chaos experiments
-            self.custom_api.delete_collection_namespaced_custom_object(
-                group="chaos-mesh.org",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural="networkchaos"
-            )
-            
-            # Delete IO chaos experiments
-            self.custom_api.delete_collection_namespaced_custom_object(
-                group="chaos-mesh.org",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural="iochaos"
-            )
+            # Delete all types of chaos experiments
+            experiment_types = ["cpu_stress", "memory_stress", "network_delay", "disk_stress"]
+            for exp_type in experiment_types:
+                await self.delete_chaos_experiment(exp_type)
             
             logger.info(f"Deleted all chaos experiments in namespace {self.namespace}")
-        except ApiException as e:
+        except Exception as e:
             logger.error(f"Failed to delete chaos experiments: {str(e)}")
             raise Exception(f"Failed to delete chaos experiments: {str(e)}")
 

@@ -39,7 +39,6 @@ import { workloadService } from '../services/workloadService';
 
 const AnomalyDashboard = () => {
   const [selectedAnomaly, setSelectedAnomaly] = useState('');
-  const [isAnomalyActive, setIsAnomalyActive] = useState(false);
   const [metrics, setMetrics] = useState([]);
   const [anomalyRanks, setAnomalyRanks] = useState([]);
   const [error, setError] = useState('');
@@ -66,15 +65,18 @@ const AnomalyDashboard = () => {
     setSelectedAnomaly(event.target.value);
   };
 
-  const handleAnomalyToggle = async () => {
+  const isAnomalyActive = (anomalyType) => {
+    return activeAnomalies.some(anomaly => anomaly.type === anomalyType);
+  };
+
+  const handleAnomalyToggle = async (anomalyType) => {
     try {
       setLoading(true);
-      if (isAnomalyActive) {
-        await anomalyService.stopAnomaly();
+      if (isAnomalyActive(anomalyType)) {
+        await anomalyService.stopAnomaly(anomalyType);
       } else {
-        await anomalyService.startAnomaly(selectedAnomaly);
+        await anomalyService.startAnomaly(anomalyType);
       }
-      setIsAnomalyActive(!isAnomalyActive);
       const anomalies = await anomalyService.getActiveAnomalies();
       setActiveAnomalies(anomalies);
     } catch (err) {
@@ -132,6 +134,19 @@ const AnomalyDashboard = () => {
     }
   };
 
+  const handleStopAllAnomalies = async () => {
+    try {
+      setLoading(true);
+      await anomalyService.stopAllAnomalies();
+      const anomalies = await anomalyService.getActiveAnomalies();
+      setActiveAnomalies(anomalies);
+    } catch (err) {
+      setError(err.message || 'Failed to stop all anomalies');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const fetchActiveWorkloads = async () => {
     try {
       const data = await workloadService.getActiveWorkloads();
@@ -185,35 +200,33 @@ const AnomalyDashboard = () => {
           <Paper sx={{ p: 2.5 }}>
             <Typography variant="h6" gutterBottom>Anomaly Control</Typography>
             <Grid container spacing={2}>
-              <Grid item xs={8}>
-                <FormControl fullWidth>
-                  <InputLabel id="anomaly-select-label">Select Anomaly</InputLabel>
-                  <Select
-                    labelId="anomaly-select-label"
-                    value={selectedAnomaly}
-                    onChange={handleAnomalyChange}
+              {anomalyOptions.map((option) => (
+                <Grid item xs={12} sm={6} md={3} key={option.id}>
+                  <Button
+                    variant="contained"
+                    color={isAnomalyActive(option.id) ? "error" : "primary"}
+                    onClick={() => handleAnomalyToggle(option.id)}
+                    fullWidth
                     disabled={loading}
-                    label="Select Anomaly"
                   >
-                    {anomalyOptions.map((option) => (
-                      <MenuItem key={option.id} value={option.id}>
-                        {option.name}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-              <Grid item xs={4}>
-                <Button
-                  variant="contained"
-                  color={isAnomalyActive ? "error" : "primary"}
-                  onClick={handleAnomalyToggle}
-                  fullWidth
-                  disabled={!selectedAnomaly || loading}
-                >
-                  {loading ? 'Processing...' : isAnomalyActive ? 'Stop Anomaly' : 'Start Anomaly'}
-                </Button>
-              </Grid>
+                    {loading && option.id === selectedAnomaly ? 'Processing...' : 
+                     isAnomalyActive(option.id) ? `Stop ${option.name}` : `Start ${option.name}`}
+                  </Button>
+                </Grid>
+              ))}
+              {activeAnomalies.length > 0 && (
+                <Grid item xs={12}>
+                  <Button
+                    variant="contained"
+                    color="error"
+                    onClick={handleStopAllAnomalies}
+                    fullWidth
+                    disabled={loading}
+                  >
+                    Stop All Anomalies
+                  </Button>
+                </Grid>
+              )}
             </Grid>
 
             {/* Active Anomalies Display */}

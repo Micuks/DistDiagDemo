@@ -15,12 +15,24 @@ export const anomalyService = {
     }
   },
 
-  stopAnomaly: async () => {
+  stopAnomaly: async (anomalyType) => {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/api/anomaly/stop`, {
+        type: anomalyType
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error stopping anomaly:', error);
+      throw error;
+    }
+  },
+
+  stopAllAnomalies: async () => {
     try {
       const response = await axios.post(`${API_BASE_URL}/api/anomaly/stop`);
       return response.data;
     } catch (error) {
-      console.error('Error stopping anomaly:', error);
+      console.error('Error stopping all anomalies:', error);
       throw error;
     }
   },
