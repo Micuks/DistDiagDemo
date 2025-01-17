@@ -20,50 +20,33 @@ class K8sService:
         self.namespace = os.getenv('OCEANBASE_NAMESPACE', 'oceanbase')
         self.active_anomalies = {}  # Track active anomalies with timestamps
 
-    async def apply_chaos_experiment(self, anomaly_type: str):
-        """Apply a chaos mesh experiment based on the anomaly type"""
-        experiment = self._get_experiment_template(anomaly_type)
-        
+    async def verify_experiment_deleted(self, anomaly_type: str) -> bool:
+        """Verify that an experiment has been fully deleted"""
         try:
-            # Delete any existing experiment of the same type first
-            await self.delete_chaos_experiment(anomaly_type)
+            plural = self._get_experiment_plural(anomaly_type)
+            name = f"ob-{anomaly_type.replace('_', '-')}"
             
-            # Wait for a short time to ensure the deletion is complete
+            self.custom_api.get_namespaced_custom_object(
+                group="chaos-mesh.org",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural=plural,
+                name=name
+            )
+            return False  # If we get here, the object still exists
+        except ApiException as e:
+            if e.status == 404:  # Not found means it's deleted
+                return True
+            raise e
+
+    async def wait_for_deletion(self, anomaly_type: str, timeout: int = 30):
+        """Wait for an experiment to be fully deleted"""
+        start_time = datetime.now()
+        while (datetime.now() - start_time).seconds < timeout:
+            if await self.verify_experiment_deleted(anomaly_type):
+                return True
             await asyncio.sleep(2)
-            
-            # Create new experiment with retry logic
-            max_retries = 3
-            retry_delay = 1
-            
-            for attempt in range(max_retries):
-                try:
-                    self.custom_api.create_namespaced_custom_object(
-                        group="chaos-mesh.org",
-                        version="v1alpha1",
-                        namespace=self.namespace,
-                        plural=self._get_experiment_plural(anomaly_type),
-                        body=experiment
-                    )
-                    break
-                except ApiException as e:
-                    if attempt < max_retries - 1 and "AlreadyExists" in str(e) and "is being deleted" in str(e):
-                        logger.info(f"Experiment still being deleted, retrying in {retry_delay} seconds...")
-                        await asyncio.sleep(retry_delay)
-                        retry_delay *= 2
-                        continue
-                    raise e
-            
-            # Track the active anomaly
-            self.active_anomalies[anomaly_type] = {
-                "start_time": datetime.now().isoformat(),
-                "status": "active",
-                "type": anomaly_type,
-                "target": experiment["spec"]["selector"]["labelSelectors"]["ref-obcluster"]
-            }
-            logger.info(f"Created {anomaly_type} experiment in namespace {self.namespace}")
-        except Exception as e:
-            logger.error(f"Failed to create chaos experiment: {str(e)}")
-            raise Exception(f"Failed to create chaos experiment: {str(e)}")
+        return False
 
     async def delete_chaos_experiment(self, anomaly_type: str):
         """Delete a specific chaos mesh experiment"""
@@ -79,6 +62,9 @@ class K8sService:
                     plural=plural,
                     name=name
                 )
+                # Wait for the deletion to complete
+                if not await self.wait_for_deletion(anomaly_type):
+                    raise Exception(f"Timeout waiting for {anomaly_type} experiment deletion")
             except ApiException as e:
                 if e.status != 404:  # Ignore 404 Not Found errors
                     raise e
@@ -225,3 +211,52 @@ class K8sService:
             return "iochaos"
         else:
             raise ValueError(f"Unsupported anomaly type: {anomaly_type}") 
+
+    async def apply_chaos_experiment(self, anomaly_type: str):
+        """Apply a chaos mesh experiment based on the anomaly type"""
+        experiment = self._get_experiment_template(anomaly_type)
+        
+        try:
+            # Delete any existing experiment of the same type first
+            await self.delete_chaos_experiment(anomaly_type)
+            
+            # Create new experiment with retry logic
+            max_retries = 5  # Increased from 3
+            retry_delay = 2  # Increased initial delay
+            
+            for attempt in range(max_retries):
+                try:
+                    # Verify again that the old experiment is gone
+                    if not await self.verify_experiment_deleted(anomaly_type):
+                        logger.info(f"Experiment still exists, waiting {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+
+                    self.custom_api.create_namespaced_custom_object(
+                        group="chaos-mesh.org",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=self._get_experiment_plural(anomaly_type),
+                        body=experiment
+                    )
+                    break
+                except ApiException as e:
+                    if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
+                        logger.info(f"Experiment still being deleted, retrying in {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    raise e
+            
+            # Track the active anomaly
+            self.active_anomalies[anomaly_type] = {
+                "start_time": datetime.now().isoformat(),
+                "status": "active",
+                "type": anomaly_type,
+                "target": experiment["spec"]["selector"]["labelSelectors"]["ref-obcluster"]
+            }
+            logger.info(f"Created {anomaly_type} experiment in namespace {self.namespace}")
+        except Exception as e:
+            logger.error(f"Failed to create chaos experiment: {str(e)}")
+            raise Exception(f"Failed to create chaos experiment: {str(e)}") 
