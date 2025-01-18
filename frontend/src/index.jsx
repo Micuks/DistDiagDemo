@@ -1,7 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
-import AnomalyDashboard from './components/AnomalyDashboard.jsx';
+import App from './App.jsx';
 
 const theme = createTheme({
   palette: {
@@ -28,12 +28,12 @@ const theme = createTheme({
   },
 });
 
-function App() {
+function Main() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
       <div style={{ padding: '24px 0' }}>
-        <AnomalyDashboard />
+        <App />
       </div>
     </ThemeProvider>
   );
@@ -42,6 +42,6 @@ function App() {
 const root = createRoot(document.getElementById('root'));
 root.render(
   <React.StrictMode>
-    <App />
+    <Main />
   </React.StrictMode>
 ); 

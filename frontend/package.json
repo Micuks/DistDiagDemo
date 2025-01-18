@@ -5,21 +5,23 @@
   "dependencies": {
     "@emotion/react": "^11.11.1",
     "@emotion/styled": "^11.11.0",
-    "@mui/material": "^5.14.20",
     "@mui/icons-material": "^5.14.20",
     "@mui/lab": "^5.0.0-alpha.155",
+    "@mui/material": "^5.14.20",
     "@testing-library/jest-dom": "^6.1.5",
     "@testing-library/react": "^14.1.2",
     "@testing-library/user-event": "^14.5.1",
+    "antd": "^5.23.1",
     "axios": "^1.6.2",
     "d3": "^7.8.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.20.1",
+    "react-router-dom": "^6.28.1",
     "recharts": "^2.10.3",
     "web-vitals": "^3.5.0"
   },
   "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 3000",
     "start": "vite --host 0.0.0.0 --port 3000",
     "build": "vite build",
     "serve": "vite preview --host 0.0.0.0 --port 3000",
@@ -48,4 +50,4 @@
     "vite": "^5.0.7",
     "vitest": "^1.0.1"
   }
-} 
+}

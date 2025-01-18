@@ -49,7 +49,7 @@ export const anomalyService = {
 
   getMetrics: async () => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/api/metrics/system`);
+      const response = await axios.get(`${API_BASE_URL}/api/metrics`);
       return response.data;
     } catch (error) {
       console.error('Error fetching metrics:', error);
