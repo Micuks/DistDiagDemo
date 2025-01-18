@@ -447,6 +447,8 @@ class MetricsService:
         """Parse time series data from lines into metrics"""
         logger.debug(f"Parsing time series data with {len(lines)} lines")
         metrics = {}
+        max_points = 60  # Keep last 60 data points (5 minutes with 5s interval)
+        
         for metric_name, idx in metric_indices.items():
             data_points = []
             latest = 0.0
@@ -482,8 +484,12 @@ class MetricsService:
                         logger.error(f"Error parsing metric {metric_name} at line {line_num + 1}: {e}")
                         continue
 
+            # Only keep the most recent data points
+            if len(data_points) > max_points:
+                data_points = data_points[-max_points:]
+
             metrics[metric_name] = {"data": data_points, "latest": latest}
-            logger.debug(f"Parsed {valid_points} points for {metric_name}")
+            logger.debug(f"Parsed {valid_points} points for {metric_name}, kept last {len(data_points)} points")
 
         return metrics
 
@@ -606,16 +612,53 @@ class MetricsService:
         """Get the latest collected metrics."""
         current_timestamp = self.timestamp
         if current_timestamp and len(current_timestamp) == 14:  # Format: YYYYMMDDHHMMSS
-            # Convert numeric timestamp to ISO format
             try:
                 dt = datetime.strptime(current_timestamp, "%Y%m%d%H%M%S")
                 current_timestamp = dt.isoformat()
             except ValueError:
                 current_timestamp = datetime.now().isoformat()
 
+        # Create a simplified version of metrics for initial load
+        simplified_metrics = {}
+        for node_ip, node_data in self.metrics.items():
+            simplified_metrics[node_ip] = {}
+            for category, metrics in node_data.items():
+                if category == 'io':
+                    # For IO, only include aggregated metrics
+                    simplified_metrics[node_ip][category] = {
+                        'aggregated': {
+                            metric: {'latest': data['latest']}
+                            for metric, data in metrics['aggregated'].items()
+                        }
+                    }
+                else:
+                    # For other categories, only include latest values
+                    simplified_metrics[node_ip][category] = {
+                        metric: {'latest': data['latest']}
+                        for metric, data in metrics.items()
+                    }
+
         return {
             "timestamp": current_timestamp,
-            "metrics": self.metrics
+            "metrics": simplified_metrics
+        }
+
+    def get_detailed_metrics(self, node_ip: str = None, category: str = None) -> Dict[str, Any]:
+        """Get detailed metrics with historical data for specific node and category."""
+        if not node_ip or not category or node_ip not in self.metrics:
+            return {"error": "Invalid node_ip or category"}
+
+        node_data = self.metrics[node_ip]
+        if category not in node_data:
+            return {"error": "Category not found"}
+
+        return {
+            "timestamp": self.timestamp,
+            "metrics": {
+                node_ip: {
+                    category: node_data[category]
+                }
+            }
         }
 
 # Create a singleton instance

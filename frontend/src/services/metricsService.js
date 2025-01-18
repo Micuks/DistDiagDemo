@@ -14,22 +14,14 @@ export const fetchMetrics = async () => {
     }
 };
 
-export const startMetricsCollection = async () => {
+export const fetchDetailedMetrics = async (nodeIp, category) => {
     try {
-        const response = await axios.post(`${API_BASE_URL}/api/metrics/start`);
+        const response = await axios.get(`${API_BASE_URL}/api/metrics/detailed`, {
+            params: { node_ip: nodeIp, category }
+        });
         return response.data;
     } catch (error) {
-        console.error('Error starting metrics collection:', error);
-        throw error;
-    }
-};
-
-export const stopMetricsCollection = async () => {
-    try {
-        const response = await axios.post(`${API_BASE_URL}/api/metrics/stop`);
-        return response.data;
-    } catch (error) {
-        console.error('Error stopping metrics collection:', error);
+        console.error('Error fetching detailed metrics:', error.response || error);
         throw error;
     }
 }; 

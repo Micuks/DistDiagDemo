@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Space, Card, Row, Col, Statistic, Spin, Select, Modal, Button } from 'antd';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { fetchMetrics, startMetricsCollection, stopMetricsCollection } from '../services/metricsService';
+import { fetchMetrics, fetchDetailedMetrics } from '../services/metricsService';
 
 const { Option } = Select;
 
@@ -23,22 +23,40 @@ const MetricsChart = ({ data, title, dataKey, suffix = '' }) => (
 const MetricsPanel = () => {
     const [metrics, setMetrics] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [chartModal, setChartModal] = useState({ visible: false, title: '', data: [], suffix: '' });
+    const [chartData, setChartData] = useState({});
+    const [chartModal, setChartModal] = useState({ visible: false, title: '', data: [], suffix: '', loading: false });
     const nodeRefs = useRef({});
 
-    useEffect(() => {
-        const startCollection = async () => {
-            try {
-                await startMetricsCollection();
-            } catch (error) {
-                console.error('Error starting metrics collection:', error);
-            }
-        };
+    const fetchChartData = async (nodeIp, category) => {
+        try {
+            const detailedData = await fetchDetailedMetrics(nodeIp, category);
+            setChartData(prev => ({
+                ...prev,
+                [`${nodeIp}_${category}`]: detailedData.metrics[nodeIp][category]
+            }));
+        } catch (error) {
+            console.error(`Error fetching ${category} chart data for ${nodeIp}:`, error);
+        }
+    };
 
+    useEffect(() => {
         const fetchData = async () => {
             try {
                 const data = await fetchMetrics();
                 setMetrics(data);
+
+                // Fetch detailed data for displayed charts
+                if (data?.metrics) {
+                    Object.entries(data.metrics).forEach(([nodeIp, nodeData]) => {
+                        // Batch fetch all chart data
+                        const categories = ['cpu', 'memory', 'swap', 'io', 'network', 'tcp_udp'];
+                        Promise.all(categories.map(category => 
+                            fetchChartData(nodeIp, category)
+                        )).catch(error => {
+                            console.error('Error batch fetching chart data:', error);
+                        });
+                    });
+                }
             } catch (error) {
                 console.error('Error fetching metrics:', error);
             } finally {
@@ -46,35 +64,73 @@ const MetricsPanel = () => {
             }
         };
 
-        startCollection();
         fetchData();
-        const interval = setInterval(fetchData, 5000);
+        const interval = setInterval(fetchData, 10000);
 
         return () => {
             clearInterval(interval);
-            stopMetricsCollection().catch(error => {
-                console.error('Error stopping metrics collection:', error);
-            });
         };
     }, []);
+
+    const handleMetricClick = async (nodeIp, category, metric, title, suffix = '') => {
+        setChartModal({
+            visible: true,
+            title,
+            data: [],
+            suffix,
+            loading: true
+        });
+
+        try {
+            // Use cached data if available
+            const cachedData = chartData[`${nodeIp}_${category}`];
+            if (cachedData && cachedData[metric]) {
+                setChartModal(prev => ({
+                    ...prev,
+                    data: cachedData[metric].data,
+                    loading: false
+                }));
+            } else {
+                const detailedData = await fetchDetailedMetrics(nodeIp, category);
+                const metricData = detailedData.metrics[nodeIp][category][metric].data;
+                setChartModal(prev => ({
+                    ...prev,
+                    data: metricData,
+                    loading: false
+                }));
+            }
+        } catch (error) {
+            console.error('Error fetching detailed metrics:', error);
+            setChartModal(prev => ({
+                ...prev,
+                loading: false
+            }));
+        }
+    };
+
+    const renderChart = (nodeIp, category, metric, title, suffix = '') => {
+        const data = chartData[`${nodeIp}_${category}`]?.[metric]?.data;
+        return data ? (
+            <MetricsChart 
+                data={data}
+                title={title}
+                suffix={suffix}
+            />
+        ) : (
+            <div style={{ textAlign: 'center', padding: '20px' }}>
+                <Spin size="large" />
+            </div>
+        );
+    };
 
     const scrollToNode = (nodeIp) => {
         nodeRefs.current[nodeIp]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     };
 
-    const handleMetricClick = (title, data, suffix = '') => {
-        setChartModal({
-            visible: true,
-            title,
-            data,
-            suffix
-        });
-    };
-
-    const renderMetricStatistic = (metric, data, category, suffix = '') => (
+    const renderMetricStatistic = (nodeIp, metric, data, category, suffix = '') => (
         <Col span={8} key={metric}>
             <div 
-                onClick={() => handleMetricClick(`${category} - ${metric}`, data.data, suffix)}
+                onClick={() => handleMetricClick(nodeIp, category, metric, `${category} - ${metric}`, suffix)}
                 style={{ cursor: 'pointer' }}
             >
                 <Statistic 
@@ -105,14 +161,10 @@ const MetricsPanel = () => {
                             <Card title="CPU Usage">
                                 <Row gutter={[16, 16]}>
                                     <Col span={24}>
-                                        <MetricsChart 
-                                            data={cpu.util.data} 
-                                            title="CPU Utilization" 
-                                            suffix="%" 
-                                        />
+                                        {renderChart(nodeIp, 'cpu', 'util', 'CPU Utilization', '%')}
                                     </Col>
                                     {Object.entries(cpu).map(([metric, data]) => 
-                                        renderMetricStatistic(metric, data, 'CPU', '%')
+                                        renderMetricStatistic(nodeIp, metric, data, 'cpu', '%')
                                     )}
                                 </Row>
                             </Card>
@@ -125,17 +177,14 @@ const MetricsPanel = () => {
                             <Card title="Memory Usage">
                                 <Row gutter={[16, 16]}>
                                     <Col span={24}>
-                                        <MetricsChart 
-                                            data={memory.util.data} 
-                                            title="Memory Utilization" 
-                                            suffix="%" 
-                                        />
+                                        {renderChart(nodeIp, 'memory', 'util', 'Memory Utilization', '%')}
                                     </Col>
                                     {Object.entries(memory).map(([metric, data]) => 
                                         renderMetricStatistic(
+                                            nodeIp,
                                             metric, 
                                             data, 
-                                            'Memory',
+                                            'memory',
                                             metric === 'util' ? '%' : 'MB'
                                         )
                                     )}
@@ -150,17 +199,14 @@ const MetricsPanel = () => {
                             <Card title="Swap Usage">
                                 <Row gutter={[16, 16]}>
                                     <Col span={24}>
-                                        <MetricsChart 
-                                            data={swap.util.data} 
-                                            title="Swap Utilization" 
-                                            suffix="%" 
-                                        />
+                                        {renderChart(nodeIp, 'swap', 'util', 'Swap Utilization', '%')}
                                     </Col>
                                     {Object.entries(swap).map(([metric, data]) => 
                                         renderMetricStatistic(
+                                            nodeIp,
                                             metric, 
                                             data, 
-                                            'Swap',
+                                            'swap',
                                             metric === 'util' ? '%' : 
                                             metric.includes('rate') ? '/s' : 'MB'
                                         )
@@ -176,17 +222,14 @@ const MetricsPanel = () => {
                             <Card title="Disk I/O">
                                 <Row gutter={[16, 16]}>
                                     <Col span={24}>
-                                        <MetricsChart 
-                                            data={io.aggregated.util.data} 
-                                            title="I/O Utilization" 
-                                            suffix="%" 
-                                        />
+                                        {renderChart(nodeIp, 'io', 'util', 'I/O Utilization', '%')}
                                     </Col>
                                     {Object.entries(io.aggregated).map(([metric, data]) => 
                                         renderMetricStatistic(
+                                            nodeIp,
                                             metric, 
                                             data, 
-                                            'I/O',
+                                            'io',
                                             metric === 'util' ? '%' : ''
                                         )
                                     )}
@@ -201,17 +244,14 @@ const MetricsPanel = () => {
                             <Card title="Network">
                                 <Row gutter={[16, 16]}>
                                     <Col span={24}>
-                                        <MetricsChart 
-                                            data={network.bytin.data} 
-                                            title="Network In" 
-                                            suffix=" B/s" 
-                                        />
+                                        {renderChart(nodeIp, 'network', 'bytin', 'Network In', 'B/s')}
                                     </Col>
                                     {Object.entries(network).map(([metric, data]) => 
                                         renderMetricStatistic(
+                                            nodeIp,
                                             metric, 
                                             data, 
-                                            'Network',
+                                            'network',
                                             metric.includes('byt') ? 'B/s' : 'pkt/s'
                                         )
                                     )}
@@ -226,13 +266,15 @@ const MetricsPanel = () => {
                             <Card title="TCP/UDP">
                                 <Row gutter={[16, 16]}>
                                     <Col span={24}>
-                                        <MetricsChart 
-                                            data={tcp_udp.active.data} 
-                                            title="TCP Active Connections" 
-                                        />
+                                        {renderChart(nodeIp, 'tcp_udp', 'active', 'TCP Active Connections')}
                                     </Col>
                                     {Object.entries(tcp_udp).map(([metric, data]) => 
-                                        renderMetricStatistic(metric, data, 'TCP/UDP')
+                                        renderMetricStatistic(
+                                            nodeIp,
+                                            metric, 
+                                            data, 
+                                            'tcp_udp'
+                                        )
                                     )}
                                 </Row>
                             </Card>
@@ -281,15 +323,21 @@ const MetricsPanel = () => {
             <Modal
                 title={chartModal.title}
                 open={chartModal.visible}
-                onCancel={() => setChartModal({ ...chartModal, visible: false })}
+                onCancel={() => setChartModal({ visible: false, title: '', data: [], suffix: '', loading: false })}
                 footer={null}
                 width={800}
             >
-                <MetricsChart 
-                    data={chartModal.data} 
-                    title={chartModal.title}
-                    suffix={chartModal.suffix}
-                />
+                {chartModal.loading ? (
+                    <div style={{ textAlign: 'center', padding: '20px' }}>
+                        <Spin size="large" />
+                    </div>
+                ) : (
+                    <MetricsChart 
+                        data={chartModal.data} 
+                        title={chartModal.title}
+                        suffix={chartModal.suffix}
+                    />
+                )}
             </Modal>
         </Space>
     );
