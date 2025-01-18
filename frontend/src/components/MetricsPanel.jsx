@@ -1,6 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { Space, Card, Row, Col, Statistic, Spin } from 'antd';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { fetchMetrics, startMetricsCollection, stopMetricsCollection } from '../services/metricsService';
+
+const MetricsChart = ({ data, title, dataKey, suffix = '' }) => (
+    <div style={{ width: '100%', height: 200 }}>
+        <ResponsiveContainer>
+            <LineChart data={data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="timestamp" />
+                <YAxis />
+                <Tooltip formatter={(value) => `${value}${suffix}`} />
+                <Legend />
+                <Line type="monotone" dataKey="value" name={title} stroke="#8884d8" dot={false} />
+            </LineChart>
+        </ResponsiveContainer>
+    </div>
+);
 
 const MetricsPanel = () => {
     const [metrics, setMetrics] = useState(null);
@@ -27,14 +43,10 @@ const MetricsPanel = () => {
             }
         };
 
-        // Start collection and fetch data initially
         startCollection();
         fetchData();
-
-        // Then fetch every 5 seconds instead of 30
         const interval = setInterval(fetchData, 5000);
 
-        // Cleanup: stop collection when component unmounts
         return () => {
             clearInterval(interval);
             stopMetricsCollection().catch(error => {
@@ -44,73 +56,162 @@ const MetricsPanel = () => {
     }, []);
 
     const renderNodeMetrics = (nodeIp, nodeData) => {
-        const { cpu, memory, io, network } = nodeData;
+        const { cpu, memory, io, network, tcp_udp, swap } = nodeData;
 
         return (
             <Card title={`Node: ${nodeIp}`} key={nodeIp} style={{ marginBottom: 16 }}>
-                <Row gutter={16}>
+                <Row gutter={[16, 16]}>
                     {/* CPU Metrics */}
                     {cpu && (
-                        <Col span={6}>
+                        <Col span={12}>
                             <Card title="CPU Usage">
-                                {Object.entries(cpu).map(([metric, data]) => (
-                                    <Statistic 
-                                        key={metric}
-                                        title={metric} 
-                                        value={data.latest} 
-                                        suffix="%" 
-                                    />
-                                ))}
+                                <Row gutter={[16, 16]}>
+                                    <Col span={24}>
+                                        <MetricsChart 
+                                            data={cpu.util.data} 
+                                            title="CPU Utilization" 
+                                            suffix="%" 
+                                        />
+                                    </Col>
+                                    {Object.entries(cpu).map(([metric, data]) => (
+                                        <Col span={8} key={metric}>
+                                            <Statistic 
+                                                title={metric} 
+                                                value={data.latest} 
+                                                suffix="%" 
+                                            />
+                                        </Col>
+                                    ))}
+                                </Row>
                             </Card>
                         </Col>
                     )}
 
                     {/* Memory Metrics */}
                     {memory && (
-                        <Col span={6}>
+                        <Col span={12}>
                             <Card title="Memory Usage">
-                                {Object.entries(memory).map(([metric, data]) => (
-                                    <Statistic 
-                                        key={metric}
-                                        title={metric} 
-                                        value={data.latest} 
-                                        suffix={metric === 'util' ? '%' : 'MB'} 
-                                    />
-                                ))}
+                                <Row gutter={[16, 16]}>
+                                    <Col span={24}>
+                                        <MetricsChart 
+                                            data={memory.util.data} 
+                                            title="Memory Utilization" 
+                                            suffix="%" 
+                                        />
+                                    </Col>
+                                    {Object.entries(memory).map(([metric, data]) => (
+                                        <Col span={8} key={metric}>
+                                            <Statistic 
+                                                title={metric} 
+                                                value={data.latest} 
+                                                suffix={metric === 'util' ? '%' : 'MB'} 
+                                            />
+                                        </Col>
+                                    ))}
+                                </Row>
+                            </Card>
+                        </Col>
+                    )}
+
+                    {/* Swap Metrics */}
+                    {swap && (
+                        <Col span={12}>
+                            <Card title="Swap Usage">
+                                <Row gutter={[16, 16]}>
+                                    <Col span={24}>
+                                        <MetricsChart 
+                                            data={swap.util.data} 
+                                            title="Swap Utilization" 
+                                            suffix="%" 
+                                        />
+                                    </Col>
+                                    {Object.entries(swap).map(([metric, data]) => (
+                                        <Col span={8} key={metric}>
+                                            <Statistic 
+                                                title={metric} 
+                                                value={data.latest} 
+                                                suffix={metric === 'util' ? '%' : 
+                                                       metric.includes('rate') ? '/s' : 'MB'} 
+                                            />
+                                        </Col>
+                                    ))}
+                                </Row>
                             </Card>
                         </Col>
                     )}
 
                     {/* IO Metrics */}
                     {io && (
-                        <Col span={6}>
+                        <Col span={12}>
                             <Card title="Disk I/O">
-                                <Card type="inner" title="Aggregated I/O">
-                                    {Object.entries(io.aggregated).map(([metric, data]) => (
-                                        <Statistic 
-                                            key={metric}
-                                            title={metric} 
-                                            value={data.latest} 
-                                            suffix={metric === 'util' ? '%' : ''} 
+                                <Row gutter={[16, 16]}>
+                                    <Col span={24}>
+                                        <MetricsChart 
+                                            data={io.aggregated.util.data} 
+                                            title="I/O Utilization" 
+                                            suffix="%" 
                                         />
+                                    </Col>
+                                    {Object.entries(io.aggregated).map(([metric, data]) => (
+                                        <Col span={8} key={metric}>
+                                            <Statistic 
+                                                title={metric} 
+                                                value={data.latest} 
+                                                suffix={metric === 'util' ? '%' : ''} 
+                                            />
+                                        </Col>
                                     ))}
-                                </Card>
+                                </Row>
                             </Card>
                         </Col>
                     )}
 
                     {/* Network Metrics */}
                     {network && (
-                        <Col span={6}>
+                        <Col span={12}>
                             <Card title="Network">
-                                {Object.entries(network).map(([metric, data]) => (
-                                    <Statistic 
-                                        key={metric}
-                                        title={metric} 
-                                        value={data.latest} 
-                                        suffix={metric.includes('byt') ? 'B/s' : 'pkt/s'} 
-                                    />
-                                ))}
+                                <Row gutter={[16, 16]}>
+                                    <Col span={24}>
+                                        <MetricsChart 
+                                            data={network.bytin.data} 
+                                            title="Network In" 
+                                            suffix=" B/s" 
+                                        />
+                                    </Col>
+                                    {Object.entries(network).map(([metric, data]) => (
+                                        <Col span={8} key={metric}>
+                                            <Statistic 
+                                                title={metric} 
+                                                value={data.latest} 
+                                                suffix={metric.includes('byt') ? 'B/s' : 'pkt/s'} 
+                                            />
+                                        </Col>
+                                    ))}
+                                </Row>
+                            </Card>
+                        </Col>
+                    )}
+
+                    {/* TCP/UDP Metrics */}
+                    {tcp_udp && (
+                        <Col span={12}>
+                            <Card title="TCP/UDP">
+                                <Row gutter={[16, 16]}>
+                                    <Col span={24}>
+                                        <MetricsChart 
+                                            data={tcp_udp.active.data} 
+                                            title="TCP Active Connections" 
+                                        />
+                                    </Col>
+                                    {Object.entries(tcp_udp).map(([metric, data]) => (
+                                        <Col span={8} key={metric}>
+                                            <Statistic 
+                                                title={metric} 
+                                                value={data.latest} 
+                                            />
+                                        </Col>
+                                    ))}
+                                </Row>
                             </Card>
                         </Col>
                     )}

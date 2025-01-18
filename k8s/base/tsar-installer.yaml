@@ -21,7 +21,7 @@ spec:
               # Install or update required packages first
               echo "Installing/updating required packages..."
               yum update -y && \
-              yum install -y git gcc make pcre-devel cronie util-linux zip && \
+              yum install -y git gcc make pcre-devel cronie util-linux zip perf && \
               # Create dmesg log file
               dmesg > /var/log/dmesg && \
               # Set up cron job to update dmesg log periodically
