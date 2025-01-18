@@ -1,4 +1,4 @@
-# DistDiag Demo
+# DistDiagDemo
 
 A comprehensive diagnostic and workload management system for distributed databases, featuring real-time monitoring, anomaly detection, and multi-workload support.
 
@@ -76,13 +76,26 @@ pip install -r requirements.txt
 # Set up workload tools (see backend/README.md for details)
 ```
 
-3. Set up the frontend:
+3. Configure obdiag:
+The system uses obdiag for collecting system metrics. You need to set up the `OBDIAG_CMD` environment variable to point to your obdiag installation:
+
+```bash
+# Add to your .env file or shell configuration
+export OBDIAG_CMD='PYTHONPATH=$PYTHONPATH:/path/to/obdiag python3 /path/to/obdiag/src/main.py'
+
+# Example for a typical installation:
+export OBDIAG_CMD='PYTHONPATH=$PYTHONPATH:/home/user/dev/DistDiagDemo/obdiag python3 /home/user/dev/DistDiagDemo/obdiag/src/main.py'
+```
+
+If not set, the system will try to use 'obdiag' command directly and fall back to psutil for basic metrics collection.
+
+4. Set up the frontend:
 ```bash
 cd frontend
 pnpm install
 ```
 
-4. Configure environment variables:
+5. Configure environment variables:
 ```bash
 # Backend (.env)
 OB_HOST=your_db_host

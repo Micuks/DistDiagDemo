@@ -1,154 +1,186 @@
 import os
 import json
+import psutil
+import time
 import asyncio
 import subprocess
+from typing import Dict, Any, List
 from datetime import datetime
-from typing import Dict, List, Any
+import threading
 import logging
-from ..schemas.metrics import MetricsData, TimeSeriesMetric
 
 logger = logging.getLogger(__name__)
 
-
 class MetricsService:
-    def __init__(self):
-        self.collection_interval = 300  # 5 minutes
-        self.metrics_cache: Dict[str, Any] = {}
-        self.is_collecting = False
-        self.collection_task = None
+    _instance = None
+    _lock = threading.Lock()
 
-    async def start_collection(self):
-        """Start periodic metrics collection"""
-        if not self.is_collecting:
-            self.is_collecting = True
-            self.collection_task = asyncio.create_task(self._collect_metrics_loop())
-            logger.info("Started periodic metrics collection")
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialize()
+        return cls._instance
 
-    async def stop_collection(self):
-        """Stop periodic metrics collection"""
-        if self.is_collecting:
-            self.is_collecting = False
-            if self.collection_task:
-                self.collection_task.cancel()
-                try:
-                    await self.collection_task
-                except asyncio.CancelledError:
-                    pass
-            logger.info("Stopped periodic metrics collection")
+    def _initialize(self):
+        self.metrics = {}
+        self.timestamp = None
+        self.collection_active = False
+        self.collection_thread = None
+        self.collection_interval = 5  # seconds
+        self.use_obdiag = True  # Flag to control collection method
 
-    async def _collect_metrics_loop(self):
-        """Main collection loop"""
-        while self.is_collecting:
+    def start_collection(self):
+        """Start collecting metrics in a background thread."""
+        if not self.collection_active:
+            self.collection_active = True
+            self.collection_thread = threading.Thread(target=self._collect_metrics_loop, daemon=True)
+            self.collection_thread.start()
+            logger.info("Started metrics collection")
+
+    def stop_collection(self):
+        """Stop collecting metrics."""
+        self.collection_active = False
+        if self.collection_thread:
+            self.collection_thread.join(timeout=5)
+            logger.info("Stopped metrics collection")
+
+    def _collect_metrics_loop(self):
+        """Continuously collect metrics while collection is active."""
+        while self.collection_active:
             try:
-                await self._collect_metrics()
+                if self.use_obdiag:
+                    try:
+                        asyncio.run(self._collect_obdiag_metrics())
+                    except Exception as e:
+                        logger.error(f"Error collecting metrics with obdiag: {e}")
+                        logger.info("Falling back to psutil collection")
+                        self._collect_psutil_metrics()
+                else:
+                    self._collect_psutil_metrics()
+                time.sleep(self.collection_interval)
             except Exception as e:
-                logger.error(f"Error collecting metrics: {str(e)}")
-            await asyncio.sleep(self.collection_interval)
+                logger.error(f"Error collecting metrics: {e}")
 
-    async def _collect_metrics(self):
+    async def _collect_obdiag_metrics(self):
         """Collect metrics using obdiag"""
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        pack_dir = f"obdiag_gather_pack_{timestamp}"
-
-        # Run obdiag gather sysstat
-        cmd = f"obdiag gather sysstat --store-dir={pack_dir}"
+        timestamp = datetime.now().isoformat()
+        dir_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        base_pack_dir = f"obdiag_gather_pack_{dir_timestamp}"
+        obdiag_cmd = os.getenv('OBDIAG_CMD', 'obdiag')
+        
+        cmd = f"{obdiag_cmd} gather sysstat --store_dir={base_pack_dir}"
+        logger.debug(f"Running command: {cmd}")
         process = await asyncio.create_subprocess_shell(
             cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
+        logger.debug(f"Command output: {stdout.decode()}")
 
         if process.returncode != 0:
             logger.error(f"Error running obdiag: {stderr.decode()}")
-            return
+            raise Exception("Failed to collect metrics with obdiag")
 
-        # Parse collected stats
+        if not os.path.exists(base_pack_dir):
+            logger.error(f"Base pack directory {base_pack_dir} does not exist")
+            raise Exception("Obdiag output directory not found")
+
+        nested_dirs = [d for d in os.listdir(base_pack_dir) if d.startswith("obdiag_gather_pack_")]
+        if not nested_dirs:
+            logger.error(f"No nested pack directory found in {base_pack_dir}")
+            raise Exception("Nested pack directory not found")
+
+        pack_dir = os.path.join(base_pack_dir, nested_dirs[0])
+        logger.debug(f"Using pack directory: {pack_dir}")
+
         metrics = {}
-        for node_dir in os.listdir(pack_dir):
-            if node_dir.startswith("sysstat_"):
-                node_ip = node_dir.split("_")[1]
-                metrics[node_ip] = await self._parse_node_metrics(
-                    os.path.join(pack_dir, node_dir)
-                )
-
-        # Update cache with timestamp
-        self.metrics_cache = {"timestamp": timestamp, "metrics": metrics}
-
-        # Cleanup
-        subprocess.run(f"rm -rf {pack_dir}", shell=True)
-
-    def _parse_time_series_data(
-        self, lines: List[str], metric_indices: Dict[str, int], skip_first_n: int = 0
-    ) -> Dict[str, TimeSeriesMetric]:
-        """Parse time series data from lines into metrics
-        Args:
-            lines: List of data lines
-            metric_indices: Dictionary mapping metric names to their column indices
-            skip_first_n: Number of columns to skip
-        """
-        metrics = {}
-        for metric_name, idx in metric_indices.items():
-            data_points = []
-            latest = 0.0
-
-            for line in lines:
-                if line.startswith(("#", "MAX", "MEAN", "MIN")) or not line.strip():
+        for zip_file in os.listdir(pack_dir):
+            if zip_file.startswith("sysstat_"):
+                node_ip = zip_file.split("_")[1]
+                logger.debug(f"Processing metrics for node: {node_ip}")
+                zip_path = os.path.join(pack_dir, zip_file)
+                
+                extract_dir = pack_dir
+                try:
+                    cmd = f"unzip -o {zip_path} -d {extract_dir}"
+                    logger.debug(f"Extracting metrics data: {cmd}")
+                    subprocess.run(cmd, shell=True, check=True)
+                    metrics[node_ip] = await self._parse_node_metrics(extract_dir)
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"Failed to extract metrics data for {node_ip}: {e}")
                     continue
 
-                parts = line.strip().split()
-                if len(parts) > idx:
-                    try:
-                        timestamp = parts[0]
-                        value = float(
-                            "K" in parts[idx]
-                            and float(parts[idx]) * 1000
-                            or float(parts[idx])
-                        )
-                        data_points.append({"timestamp": timestamp, "value": value})
-                        latest = value
-                    except (ValueError, IndexError) as e:
-                        logger.error(f"Error parsing metric {metric_name}: {str(e)}")
-                        continue
+        if not metrics:
+            logger.warning("No metrics were collected from any nodes")
+        else:
+            logger.info(f"Successfully collected metrics from nodes: {list(metrics.keys())}")
 
-            metrics[metric_name] = {"data": data_points, "latest": latest}
+        self.metrics = metrics
+        self.timestamp = timestamp
 
-        return metrics
+        logger.debug(f"Cleaning up directory: {base_pack_dir}")
+        subprocess.run(f"rm -rf {base_pack_dir}", shell=True)
+
+    def _collect_psutil_metrics(self):
+        """Collect metrics using psutil as fallback."""
+        metrics = {
+            "localhost": {  # Using localhost as we're collecting local metrics
+                "cpu": {
+                    "util": self._get_cpu_metrics(),
+                },
+                "memory": self._get_memory_metrics(),
+                "io": {
+                    "aggregated": self._get_io_metrics(),
+                },
+                "network": self._get_network_metrics(),
+            }
+        }
+        
+        self.metrics = metrics
+        self.timestamp = datetime.now().isoformat()
 
     async def _parse_node_metrics(self, node_dir: str) -> Dict[str, Any]:
         """Parse metrics from node directory"""
+        logger.debug(f"Parsing metrics from directory: {node_dir}")
         metrics = {}
 
+        node_dirs = [d for d in os.listdir(node_dir) if d.startswith("sysstat_") and not d.endswith(".zip")]
+        if not node_dirs:
+            logger.error("No node-specific directory found")
+            return metrics
+
+        node_specific_dir = os.path.join(node_dir, node_dirs[0])
+        logger.debug(f"Using node-specific directory: {node_specific_dir}")
+
         # Parse CPU metrics
-        cpu_file = os.path.join(node_dir, "one_day_cpu_data.txt")
+        cpu_file = os.path.join(node_specific_dir, "one_day_cpu_data.txt")
         if os.path.exists(cpu_file):
             with open(cpu_file) as f:
                 lines = f.readlines()
                 cpu_indices = {
-                    "user": 1,
-                    "system": 2,
-                    "wait": 3,
-                    "hirq": 4,
-                    "sirq": 5,
-                    "util": 6,
+                    "user": 1, "system": 2, "wait": 3,
+                    "hirq": 4, "sirq": 5, "util": 6,
                 }
                 metrics["cpu"] = self._parse_time_series_data(lines, cpu_indices)
+        else:
+            logger.debug(f"CPU metrics file not found at {cpu_file}")
 
         # Parse Memory metrics
-        mem_file = os.path.join(node_dir, "one_day_mem_data.txt")
+        mem_file = os.path.join(node_specific_dir, "one_day_mem_data.txt")
         if os.path.exists(mem_file):
             with open(mem_file) as f:
                 lines = f.readlines()
                 mem_indices = {
-                    "free": 1,
-                    "used": 2,
-                    "buff": 3,
-                    "cach": 4,
-                    "total": 5,
-                    "util": 6,
+                    "free": 1, "used": 2, "buff": 3,
+                    "cach": 4, "total": 5, "util": 6,
                 }
                 metrics["memory"] = self._parse_time_series_data(lines, mem_indices)
+        else:
+            logger.debug(f"Memory metrics file not found at {mem_file}")
 
         # Parse Swap metrics
-        swap_file = os.path.join(node_dir, "tsar_swap_data.txt")
+        swap_file = os.path.join(node_specific_dir, "tsar_swap_data.txt")
         if os.path.exists(swap_file):
             with open(swap_file) as f:
                 lines = f.readlines()
@@ -163,7 +195,7 @@ class MetricsService:
                 metrics["swap"] = self._parse_time_series_data(lines, swap_indices)
 
         # Parse TCP/UDP metrics
-        tcp_udp_file = os.path.join(node_dir, "tsar_tcp_udp_data.txt")
+        tcp_udp_file = os.path.join(node_specific_dir, "tsar_tcp_udp_data.txt")
         if os.path.exists(tcp_udp_file):
             with open(tcp_udp_file) as f:
                 lines = f.readlines()
@@ -182,12 +214,14 @@ class MetricsService:
                 )
 
         # Parse IO metrics
-        io_file = os.path.join(node_dir, "tsar_io_data.txt")
+        io_file = os.path.join(node_specific_dir, "tsar_io_data.txt")
         if os.path.exists(io_file):
             with open(io_file) as f:
                 lines = f.readlines()
+                truncated_lines = [line[:30] + '...' if len(line) > 30 else line for line in lines[:3]]
                 if len(lines) >= 2:
-                    device_line = lines[0]
+                    # Clean and parse device line
+                    device_line = ''.join(c if c.isalnum() or c in ['-', ' '] else ' ' for c in lines[0])
                     metric_line = lines[1]
                     data_lines = [
                         line
@@ -210,6 +244,10 @@ class MetricsService:
                             in_device = False
                         elif not in_device and char != "-":
                             current_device += char
+                    
+                    # Add last device if exists
+                    if current_device.strip():
+                        devices.append(current_device.strip())
 
                     if devices and data_lines:
                         metrics_per_device = 17
@@ -237,7 +275,14 @@ class MetricsService:
 
                         # Process each timestamp's data
                         for line in data_lines:
+                            # Skip header and empty lines
+                            if line.startswith(("Time", "#", "MAX", "MEAN", "MIN", "-")) or not line.strip():
+                                continue
+
                             values = line.strip().split()
+                            if not values:
+                                continue
+
                             timestamp = values[0]
 
                             # Process each device's metrics at this timestamp
@@ -251,30 +296,30 @@ class MetricsService:
                                 start_idx = i * metrics_per_device + 1
                                 if start_idx + metrics_per_device <= len(values):
                                     try:
+                                        # Convert values with units (K, M, G) to base values
+                                        def convert_io_value(val_str):
+                                            try:
+                                                return self._convert_to_bytes(val_str)
+                                            except ValueError:
+                                                logger.error(f"Error converting IO value: {val_str}")
+                                                return 0.0
+
                                         device_data = {
-                                            "rrqms": float(values[start_idx]),
-                                            "wrqms": float(values[start_idx + 1]),
-                                            "rs": float(values[start_idx + 4]),
-                                            "ws": float(values[start_idx + 5]),
-                                            "rsecs": float(
-                                                "K" in values[start_idx + 6]
-                                                and float(values[start_idx + 6]) * 1000
-                                                or float(values[start_idx + 6])
-                                            ),
-                                            "wsecs": float(
-                                                "K" in values[start_idx + 7]
-                                                and float(values[start_idx + 7]) * 1000
-                                                or float(values[start_idx + 7])
-                                            ),
-                                            "rqsize": float(values[start_idx + 8]),
-                                            "rarqsz": float(values[start_idx + 9]),
-                                            "warqsz": float(values[start_idx + 10]),
-                                            "qusize": float(values[start_idx + 11]),
-                                            "io_await": float(values[start_idx + 12]),
-                                            "rawait": float(values[start_idx + 13]),
-                                            "wawait": float(values[start_idx + 14]),
-                                            "svctm": float(values[start_idx + 15]),
-                                            "util": float(values[start_idx + 16]),
+                                            "rrqms": convert_io_value(values[start_idx]),
+                                            "wrqms": convert_io_value(values[start_idx + 1]),
+                                            "rs": convert_io_value(values[start_idx + 4]),
+                                            "ws": convert_io_value(values[start_idx + 5]),
+                                            "rsecs": convert_io_value(values[start_idx + 6]),
+                                            "wsecs": convert_io_value(values[start_idx + 7]),
+                                            "rqsize": convert_io_value(values[start_idx + 8]),
+                                            "rarqsz": convert_io_value(values[start_idx + 9]),
+                                            "warqsz": convert_io_value(values[start_idx + 10]),
+                                            "qusize": convert_io_value(values[start_idx + 11]),
+                                            "io_await": convert_io_value(values[start_idx + 12]),
+                                            "rawait": convert_io_value(values[start_idx + 13]),
+                                            "wawait": convert_io_value(values[start_idx + 14]),
+                                            "svctm": convert_io_value(values[start_idx + 15]),
+                                            "util": convert_io_value(values[start_idx + 16]),
                                         }
 
                                         # Initialize device's time series if needed
@@ -336,25 +381,241 @@ class MetricsService:
                         metrics["io"] = io_metrics
 
         # Parse Network metrics
-        net_file = os.path.join(node_dir, "tsar_traffic_data.txt")
+        net_file = os.path.join(node_specific_dir, "tsar_traffic_data.txt")
         if os.path.exists(net_file):
             with open(net_file) as f:
                 lines = f.readlines()
-                net_indices = {
-                    "bytin": 1,
-                    "bytout": 2,
-                    "pktin": 3,
-                    "pktout": 4,
-                    "pkterr": 5,
-                    "pktdrp": 6,
-                }
-                metrics["network"] = self._parse_time_series_data(lines, net_indices)
+                if len(lines) > 3:
+                    # Update indices based on actual tsar output format
+                    net_indices = {
+                        "bytin": 1,    # KB/s
+                        "bytout": 2,   # KB/s
+                        "pktin": 3,    # packets/s
+                        "pktout": 4,   # packets/s
+                        "pkterr": 5,   # packets/s
+                        "pktdrp": 6,   # packets/s
+                    }
+                    try:
+                        metrics["network"] = self._parse_time_series_data(lines, net_indices)
+                        # Convert bytin/bytout from KB/s to B/s for frontend
+                        if "bytin" in metrics["network"]:
+                            for point in metrics["network"]["bytin"]["data"]:
+                                point["value"] *= 1024  # Convert KB/s to B/s
+                            metrics["network"]["bytin"]["latest"] *= 1024
+                        if "bytout" in metrics["network"]:
+                            for point in metrics["network"]["bytout"]["data"]:
+                                point["value"] *= 1024  # Convert KB/s to B/s
+                            metrics["network"]["bytout"]["latest"] *= 1024
+                    except Exception as e:
+                        logger.error(f"Error parsing network metrics: {e}")
+                        logger.error(f"Network file content sample: {lines[:5] if lines else 'No lines'}")
+        else:
+            logger.warning(f"Network metrics file not found at {net_file}")
+
+        logger.debug(f"Finished parsing metrics. Available metrics: {list(metrics.keys())}")
+        return metrics
+
+    def _convert_to_bytes(self, value_str: str) -> float:
+        """Convert a string value with units (K, M, G) to float in bytes."""
+        try:
+            # Skip header lines or empty values
+            if not value_str or value_str.startswith('-') or value_str in ['free', 'used', 'buff', 'cach', 'total', 'util']:
+                return 0.0
+            
+            # Remove % if present and convert directly
+            if value_str.endswith('%'):
+                return float(value_str[:-1])
+
+            # Convert number with units
+            value_str = value_str.strip().upper()
+            if value_str.endswith('K'):
+                return float(value_str[:-1]) * 1024
+            elif value_str.endswith('M'):
+                return float(value_str[:-1]) * 1024 * 1024
+            elif value_str.endswith('G'):
+                return float(value_str[:-1]) * 1024 * 1024 * 1024
+            else:
+                return float(value_str)
+        except ValueError as e:
+            logger.error(f"Error converting value '{value_str}': {e}")
+            return 0.0
+
+    def _parse_time_series_data(
+        self, lines: List[str], metric_indices: Dict[str, int], skip_first_n: int = 0
+    ) -> Dict[str, Any]:
+        """Parse time series data from lines into metrics"""
+        logger.debug(f"Parsing time series data with {len(lines)} lines")
+        metrics = {}
+        for metric_name, idx in metric_indices.items():
+            data_points = []
+            latest = 0.0
+            valid_points = 0
+
+            parsing_data = False
+            for line_num, line in enumerate(lines):
+                line = line.strip()
+                if not line:
+                    continue
+
+                if any(header in line for header in ["Time", "-----", "MAX", "MEAN", "MIN"]):
+                    parsing_data = "Time" in line and not "-----" in line
+                    continue
+
+                if not parsing_data:
+                    continue
+
+                parts = line.split()
+                if len(parts) > idx:
+                    try:
+                        timestamp = parts[0]
+                        raw_value = parts[idx]
+                        value = self._convert_to_bytes(raw_value)
+                        
+                        if metric_name in ['free', 'used', 'buff', 'cach', 'total'] and value > 1024:
+                            value = value / (1024 * 1024)
+                            
+                        data_points.append({"timestamp": timestamp, "value": value})
+                        latest = value
+                        valid_points += 1
+                    except (ValueError, IndexError) as e:
+                        logger.error(f"Error parsing metric {metric_name} at line {line_num + 1}: {e}")
+                        continue
+
+            metrics[metric_name] = {"data": data_points, "latest": latest}
+            logger.debug(f"Parsed {valid_points} points for {metric_name}")
 
         return metrics
 
-    def get_latest_metrics(self) -> Dict[str, Any]:
-        """Get the latest collected metrics"""
-        return self.metrics_cache
+    def _get_cpu_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Get CPU utilization metrics using psutil."""
+        value = psutil.cpu_percent(interval=1)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        return {
+            "latest": value,
+            "min": 0,
+            "max": 100,
+            "data": [{"timestamp": timestamp, "value": value}]
+        }
 
+    def _get_memory_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Get memory utilization metrics using psutil."""
+        mem = psutil.virtual_memory()
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        return {
+            "total": {
+                "latest": mem.total / (1024 * 1024),  # Convert to MB
+                "min": 0,
+                "max": mem.total / (1024 * 1024),
+                "data": [{"timestamp": timestamp, "value": mem.total / (1024 * 1024)}]
+            },
+            "used": {
+                "latest": mem.used / (1024 * 1024),
+                "min": 0,
+                "max": mem.total / (1024 * 1024),
+                "data": [{"timestamp": timestamp, "value": mem.used / (1024 * 1024)}]
+            },
+            "util": {
+                "latest": mem.percent,
+                "min": 0,
+                "max": 100,
+                "data": [{"timestamp": timestamp, "value": mem.percent}]
+            }
+        }
 
+    def _get_io_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Get disk I/O metrics using psutil."""
+        io = psutil.disk_io_counters()
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        if not io:
+            return {
+                "read_bytes": {
+                    "latest": 0, "min": 0, "max": 100,
+                    "data": [{"timestamp": timestamp, "value": 0}]
+                },
+                "write_bytes": {
+                    "latest": 0, "min": 0, "max": 100,
+                    "data": [{"timestamp": timestamp, "value": 0}]
+                },
+                "util": {
+                    "latest": 0, "min": 0, "max": 100,
+                    "data": [{"timestamp": timestamp, "value": 0}]
+                }
+            }
+        
+        disk_usage = psutil.disk_usage('/')
+        read_bytes = io.read_bytes / (1024 * 1024)  # Convert to MB
+        write_bytes = io.write_bytes / (1024 * 1024)
+        
+        return {
+            "read_bytes": {
+                "latest": read_bytes,
+                "min": 0,
+                "max": read_bytes * 1.2,  # 20% headroom
+                "data": [{"timestamp": timestamp, "value": read_bytes}]
+            },
+            "write_bytes": {
+                "latest": write_bytes,
+                "min": 0,
+                "max": write_bytes * 1.2,
+                "data": [{"timestamp": timestamp, "value": write_bytes}]
+            },
+            "util": {
+                "latest": disk_usage.percent,
+                "min": 0,
+                "max": 100,
+                "data": [{"timestamp": timestamp, "value": disk_usage.percent}]
+            }
+        }
+
+    def _get_network_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Get network I/O metrics using psutil."""
+        net = psutil.net_io_counters()
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        bytes_sent = net.bytes_sent / 1024  # Convert to KB
+        bytes_recv = net.bytes_recv / 1024
+        
+        return {
+            "bytes_sent": {
+                "latest": bytes_sent,
+                "min": 0,
+                "max": bytes_sent * 1.2,
+                "data": [{"timestamp": timestamp, "value": bytes_sent}]
+            },
+            "bytes_recv": {
+                "latest": bytes_recv,
+                "min": 0,
+                "max": bytes_recv * 1.2,
+                "data": [{"timestamp": timestamp, "value": bytes_recv}]
+            },
+            "packets_sent": {
+                "latest": net.packets_sent,
+                "min": 0,
+                "max": net.packets_sent * 1.2,
+                "data": [{"timestamp": timestamp, "value": net.packets_sent}]
+            },
+            "packets_recv": {
+                "latest": net.packets_recv,
+                "min": 0,
+                "max": net.packets_recv * 1.2,
+                "data": [{"timestamp": timestamp, "value": net.packets_recv}]
+            }
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get the latest collected metrics."""
+        current_timestamp = self.timestamp
+        if current_timestamp and len(current_timestamp) == 14:  # Format: YYYYMMDDHHMMSS
+            # Convert numeric timestamp to ISO format
+            try:
+                dt = datetime.strptime(current_timestamp, "%Y%m%d%H%M%S")
+                current_timestamp = dt.isoformat()
+            except ValueError:
+                current_timestamp = datetime.now().isoformat()
+
+        return {
+            "timestamp": current_timestamp,
+            "metrics": self.metrics
+        }
+
+# Create a singleton instance
 metrics_service = MetricsService()

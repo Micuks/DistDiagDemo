@@ -1,10 +1,12 @@
 import os
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
 from app.api import anomaly, workload, metrics
 from app.core.logging import setup_logging
+from app.services.metrics_service import metrics_service
 
 # Load environment variables from .env file
 load_dotenv()
@@ -12,10 +14,19 @@ load_dotenv()
 # Setup logging first
 setup_logging()
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    metrics_service.start_collection()
+    yield
+    # Shutdown
+    metrics_service.stop_collection()
+
 app = FastAPI(    
     title="DistDiagDemo API",
     description="API for distributed database anomaly detection and diagnosis",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Configure CORS
@@ -44,6 +55,10 @@ app.mount("/metrics", metrics_app)
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+@app.get("/")
+async def root():
+    return {"message": "DistDiag API is running"}
 
 if __name__ == "__main__":
     import uvicorn
