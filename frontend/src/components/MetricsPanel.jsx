@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { Space, Card, Row, Col, Statistic, Spin } from 'antd';
+import React, { useState, useEffect, useRef } from 'react';
+import { Space, Card, Row, Col, Statistic, Spin, Select, Modal, Button } from 'antd';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { fetchMetrics, startMetricsCollection, stopMetricsCollection } from '../services/metricsService';
+
+const { Option } = Select;
 
 const MetricsChart = ({ data, title, dataKey, suffix = '' }) => (
     <div style={{ width: '100%', height: 200 }}>
@@ -21,6 +23,8 @@ const MetricsChart = ({ data, title, dataKey, suffix = '' }) => (
 const MetricsPanel = () => {
     const [metrics, setMetrics] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [chartModal, setChartModal] = useState({ visible: false, title: '', data: [], suffix: '' });
+    const nodeRefs = useRef({});
 
     useEffect(() => {
         const startCollection = async () => {
@@ -34,7 +38,6 @@ const MetricsPanel = () => {
         const fetchData = async () => {
             try {
                 const data = await fetchMetrics();
-                console.log('Received metrics data:', data);
                 setMetrics(data);
             } catch (error) {
                 console.error('Error fetching metrics:', error);
@@ -55,11 +58,46 @@ const MetricsPanel = () => {
         };
     }, []);
 
+    const scrollToNode = (nodeIp) => {
+        nodeRefs.current[nodeIp]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+
+    const handleMetricClick = (title, data, suffix = '') => {
+        setChartModal({
+            visible: true,
+            title,
+            data,
+            suffix
+        });
+    };
+
+    const renderMetricStatistic = (metric, data, category, suffix = '') => (
+        <Col span={8} key={metric}>
+            <div 
+                onClick={() => handleMetricClick(`${category} - ${metric}`, data.data, suffix)}
+                style={{ cursor: 'pointer' }}
+            >
+                <Statistic 
+                    title={metric} 
+                    value={data.latest} 
+                    suffix={suffix}
+                />
+            </div>
+        </Col>
+    );
+
     const renderNodeMetrics = (nodeIp, nodeData) => {
         const { cpu, memory, io, network, tcp_udp, swap } = nodeData;
 
         return (
-            <Card title={`Node: ${nodeIp}`} key={nodeIp} style={{ marginBottom: 16 }}>
+            <Card 
+                ref={el => nodeRefs.current[nodeIp] = el}
+                title={`Node: ${nodeIp}`} 
+                key={nodeIp} 
+                style={{ marginBottom: 16 }}
+                collapsible
+                defaultActiveKey={['1']}
+            >
                 <Row gutter={[16, 16]}>
                     {/* CPU Metrics */}
                     {cpu && (
@@ -73,15 +111,9 @@ const MetricsPanel = () => {
                                             suffix="%" 
                                         />
                                     </Col>
-                                    {Object.entries(cpu).map(([metric, data]) => (
-                                        <Col span={8} key={metric}>
-                                            <Statistic 
-                                                title={metric} 
-                                                value={data.latest} 
-                                                suffix="%" 
-                                            />
-                                        </Col>
-                                    ))}
+                                    {Object.entries(cpu).map(([metric, data]) => 
+                                        renderMetricStatistic(metric, data, 'CPU', '%')
+                                    )}
                                 </Row>
                             </Card>
                         </Col>
@@ -99,15 +131,14 @@ const MetricsPanel = () => {
                                             suffix="%" 
                                         />
                                     </Col>
-                                    {Object.entries(memory).map(([metric, data]) => (
-                                        <Col span={8} key={metric}>
-                                            <Statistic 
-                                                title={metric} 
-                                                value={data.latest} 
-                                                suffix={metric === 'util' ? '%' : 'MB'} 
-                                            />
-                                        </Col>
-                                    ))}
+                                    {Object.entries(memory).map(([metric, data]) => 
+                                        renderMetricStatistic(
+                                            metric, 
+                                            data, 
+                                            'Memory',
+                                            metric === 'util' ? '%' : 'MB'
+                                        )
+                                    )}
                                 </Row>
                             </Card>
                         </Col>
@@ -125,16 +156,15 @@ const MetricsPanel = () => {
                                             suffix="%" 
                                         />
                                     </Col>
-                                    {Object.entries(swap).map(([metric, data]) => (
-                                        <Col span={8} key={metric}>
-                                            <Statistic 
-                                                title={metric} 
-                                                value={data.latest} 
-                                                suffix={metric === 'util' ? '%' : 
-                                                       metric.includes('rate') ? '/s' : 'MB'} 
-                                            />
-                                        </Col>
-                                    ))}
+                                    {Object.entries(swap).map(([metric, data]) => 
+                                        renderMetricStatistic(
+                                            metric, 
+                                            data, 
+                                            'Swap',
+                                            metric === 'util' ? '%' : 
+                                            metric.includes('rate') ? '/s' : 'MB'
+                                        )
+                                    )}
                                 </Row>
                             </Card>
                         </Col>
@@ -152,15 +182,14 @@ const MetricsPanel = () => {
                                             suffix="%" 
                                         />
                                     </Col>
-                                    {Object.entries(io.aggregated).map(([metric, data]) => (
-                                        <Col span={8} key={metric}>
-                                            <Statistic 
-                                                title={metric} 
-                                                value={data.latest} 
-                                                suffix={metric === 'util' ? '%' : ''} 
-                                            />
-                                        </Col>
-                                    ))}
+                                    {Object.entries(io.aggregated).map(([metric, data]) => 
+                                        renderMetricStatistic(
+                                            metric, 
+                                            data, 
+                                            'I/O',
+                                            metric === 'util' ? '%' : ''
+                                        )
+                                    )}
                                 </Row>
                             </Card>
                         </Col>
@@ -178,15 +207,14 @@ const MetricsPanel = () => {
                                             suffix=" B/s" 
                                         />
                                     </Col>
-                                    {Object.entries(network).map(([metric, data]) => (
-                                        <Col span={8} key={metric}>
-                                            <Statistic 
-                                                title={metric} 
-                                                value={data.latest} 
-                                                suffix={metric.includes('byt') ? 'B/s' : 'pkt/s'} 
-                                            />
-                                        </Col>
-                                    ))}
+                                    {Object.entries(network).map(([metric, data]) => 
+                                        renderMetricStatistic(
+                                            metric, 
+                                            data, 
+                                            'Network',
+                                            metric.includes('byt') ? 'B/s' : 'pkt/s'
+                                        )
+                                    )}
                                 </Row>
                             </Card>
                         </Col>
@@ -203,14 +231,9 @@ const MetricsPanel = () => {
                                             title="TCP Active Connections" 
                                         />
                                     </Col>
-                                    {Object.entries(tcp_udp).map(([metric, data]) => (
-                                        <Col span={8} key={metric}>
-                                            <Statistic 
-                                                title={metric} 
-                                                value={data.latest} 
-                                            />
-                                        </Col>
-                                    ))}
+                                    {Object.entries(tcp_udp).map(([metric, data]) => 
+                                        renderMetricStatistic(metric, data, 'TCP/UDP')
+                                    )}
                                 </Row>
                             </Card>
                         </Col>
@@ -229,15 +252,45 @@ const MetricsPanel = () => {
                     </div>
                 ) : (
                     <>
-                        <div style={{ marginBottom: 16 }}>
-                            Last Updated: {metrics?.timestamp ? new Date(metrics.timestamp).toLocaleString() : 'N/A'}
-                        </div>
+                        <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+                            <Col>
+                                <Space>
+                                    <span>Quick Navigate:</span>
+                                    {metrics?.metrics && Object.keys(metrics.metrics).map(nodeIp => (
+                                        <Button 
+                                            key={nodeIp} 
+                                            onClick={() => scrollToNode(nodeIp)}
+                                            size="small"
+                                        >
+                                            {nodeIp}
+                                        </Button>
+                                    ))}
+                                </Space>
+                            </Col>
+                            <Col>
+                                Last Updated: {metrics?.timestamp ? new Date(metrics.timestamp).toLocaleString() : 'N/A'}
+                            </Col>
+                        </Row>
                         {metrics?.metrics && Object.entries(metrics.metrics).map(([nodeIp, nodeData]) => 
                             renderNodeMetrics(nodeIp, nodeData)
                         )}
                     </>
                 )}
             </Card>
+
+            <Modal
+                title={chartModal.title}
+                open={chartModal.visible}
+                onCancel={() => setChartModal({ ...chartModal, visible: false })}
+                footer={null}
+                width={800}
+            >
+                <MetricsChart 
+                    data={chartModal.data} 
+                    title={chartModal.title}
+                    suffix={chartModal.suffix}
+                />
+            </Modal>
         </Space>
     );
 };

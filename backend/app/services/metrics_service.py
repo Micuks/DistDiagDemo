@@ -103,7 +103,8 @@ class MetricsService:
                 
                 extract_dir = pack_dir
                 try:
-                    cmd = f"unzip -o {zip_path} -d {extract_dir}"
+                    # hide unzip output
+                    cmd = f"unzip -o {zip_path} -d {extract_dir} > /dev/null 2>&1"
                     logger.debug(f"Extracting metrics data: {cmd}")
                     subprocess.run(cmd, shell=True, check=True)
                     metrics[node_ip] = await self._parse_node_metrics(extract_dir)
