@@ -1,10 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, Space, Table, message, Row, Col } from 'antd';
+import { Card, Button, Space, Table, message, Row, Col, Switch, Divider, Statistic, Progress } from 'antd';
 import { anomalyService } from '../services/anomalyService';
 
 const AnomalyControlPanel = () => {
     const [activeAnomalies, setActiveAnomalies] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [collectTrainingData, setCollectTrainingData] = useState(false);
+    const [isCollectingNormal, setIsCollectingNormal] = useState(false);
+    const [trainingStats, setTrainingStats] = useState(null);
 
     const anomalyOptions = [
         { id: 'cpu_stress', name: 'CPU Stress' },
@@ -26,8 +29,8 @@ const AnomalyControlPanel = () => {
         },
         {
             title: 'Start Time',
-            dataIndex: 'startTime',
-            key: 'startTime',
+            dataIndex: 'start_time',
+            key: 'start_time',
         },
         {
             title: 'Status',
@@ -44,7 +47,7 @@ const AnomalyControlPanel = () => {
                     onClick={() => handleAnomalyToggle(record.type)}
                     loading={loading}
                 >
-                    Stop
+                    Clear
                 </Button>
             ),
         },
@@ -58,11 +61,11 @@ const AnomalyControlPanel = () => {
         try {
             setLoading(true);
             if (isAnomalyActive(anomalyType)) {
-                await anomalyService.stopAnomaly(anomalyType);
-                message.success(`Stopped ${anomalyType}`);
+                await anomalyService.stopAnomaly(anomalyType, collectTrainingData);
+                message.success(`Cleared ${anomalyType}`);
             } else {
-                await anomalyService.startAnomaly(anomalyType);
-                message.success(`Started ${anomalyType}`);
+                await anomalyService.startAnomaly(anomalyType, collectTrainingData);
+                message.success(`Injected ${anomalyType}`);
             }
             const anomalies = await anomalyService.getActiveAnomalies();
             setActiveAnomalies(anomalies);
@@ -79,12 +82,30 @@ const AnomalyControlPanel = () => {
             await anomalyService.stopAllAnomalies();
             const anomalies = await anomalyService.getActiveAnomalies();
             setActiveAnomalies(anomalies);
-            message.success('All anomalies stopped');
+            message.success('All anomalies cleared');
         } catch (err) {
-            message.error(err.message || 'Failed to stop all anomalies');
+            message.error(err.message || 'Failed to clear all anomalies');
         } finally {
             setLoading(false);
         }
+    };
+
+    const handleNormalCollection = async () => {
+        setLoading(true);
+        try {
+            if (!isCollectingNormal) {
+                await anomalyService.startNormalCollection();
+                message.success('Started collecting normal state data');
+            } else {
+                await anomalyService.stopNormalCollection();
+                message.success('Stopped collecting normal state data');
+                await fetchTrainingStats();
+            }
+            setIsCollectingNormal(!isCollectingNormal);
+        } catch (error) {
+            message.error('Failed to manage normal state collection');
+        }
+        setLoading(false);
     };
 
     useEffect(() => {
@@ -103,9 +124,101 @@ const AnomalyControlPanel = () => {
         return () => clearInterval(intervalId);
     }, []);
 
+    useEffect(() => {
+        fetchTrainingStats();
+    }, []);
+
+    const fetchTrainingStats = async () => {
+        try {
+            const stats = await anomalyService.getTrainingStats();
+            setTrainingStats(stats);
+        } catch (error) {
+            console.error('Error fetching training stats:', error);
+        }
+    };
+
     return (
-        <Card title="Anomaly Control" style={{ marginBottom: 16 }}>
+        <Card title="Anomaly Control Panel">
             <Space direction="vertical" style={{ width: '100%' }}>
+                <Row gutter={16}>
+                    <Col span={12}>
+                        <Switch
+                            checked={collectTrainingData}
+                            onChange={setCollectTrainingData}
+                            checkedChildren="Training Data Collection ON"
+                            unCheckedChildren="Training Data Collection OFF"
+                        />
+                    </Col>
+                    <Col span={12}>
+                        <Button
+                            type={isCollectingNormal ? 'danger' : 'primary'}
+                            onClick={handleNormalCollection}
+                            loading={loading}
+                        >
+                            {isCollectingNormal ? 'Stop Normal Collection' : 'Start Normal Collection'}
+                        </Button>
+                    </Col>
+                </Row>
+
+                {trainingStats && (
+                    <>
+                        <Divider>Training Dataset Statistics</Divider>
+                        <Row gutter={16}>
+                            <Col span={8}>
+                                <Statistic title="Total Samples" value={trainingStats.total_samples} />
+                            </Col>
+                            <Col span={8}>
+                                <Statistic title="Normal Samples" value={trainingStats.stats.normal} />
+                            </Col>
+                            <Col span={8}>
+                                <Statistic title="Anomaly Samples" value={trainingStats.stats.anomaly} />
+                            </Col>
+                        </Row>
+                        <Row style={{ marginTop: '16px' }}>
+                            <Col span={24}>
+                                <div>Dataset Balance</div>
+                                <Progress
+                                    percent={Math.round(trainingStats.normal_ratio * 100)}
+                                    success={{ percent: Math.round(trainingStats.anomaly_ratio * 100) }}
+                                    format={() => `${Math.round(trainingStats.normal_ratio * 100)}% Normal / ${Math.round(trainingStats.anomaly_ratio * 100)}% Anomaly`}
+                                    status={trainingStats.is_balanced ? 'success' : 'exception'}
+                                />
+                            </Col>
+                        </Row>
+
+                        <Divider>Model Training</Divider>
+                        <Row gutter={[16, 16]}>
+                            <Col span={24}>
+                                <Space>
+                                    <Button
+                                        type="primary"
+                                        onClick={async () => {
+                                            try {
+                                                setLoading(true);
+                                                await anomalyService.trainModel();
+                                                message.success('Model trained successfully');
+                                            } catch (error) {
+                                                message.error('Failed to train model: ' + error.message);
+                                            } finally {
+                                                setLoading(false);
+                                            }
+                                        }}
+                                        loading={loading}
+                                        disabled={!trainingStats?.is_balanced}
+                                    >
+                                        Train Model
+                                    </Button>
+                                    {!trainingStats?.is_balanced && (
+                                        <span style={{ color: '#ff4d4f' }}>
+                                            Dataset must be balanced before training
+                                        </span>
+                                    )}
+                                </Space>
+                            </Col>
+                        </Row>
+                    </>
+                )}
+
                 <Row gutter={[16, 16]}>
                     {anomalyOptions.map((option) => (
                         <Col span={6} key={option.id}>
@@ -116,7 +229,7 @@ const AnomalyControlPanel = () => {
                                 loading={loading}
                                 style={{ width: '100%' }}
                             >
-                                {isAnomalyActive(option.id) ? `Stop ${option.name}` : `Start ${option.name}`}
+                                {isAnomalyActive(option.id) ? `Clear ${option.name}` : `Inject ${option.name}`}
                             </Button>
                         </Col>
                     ))}
@@ -131,7 +244,7 @@ const AnomalyControlPanel = () => {
                             loading={loading}
                             style={{ marginTop: 16 }}
                         >
-                            Stop All Anomalies
+                            Clear All Anomalies
                         </Button>
                         <Table 
                             columns={columns} 

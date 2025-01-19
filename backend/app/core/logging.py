@@ -34,7 +34,7 @@ def setup_logging():
         maxBytes=10*1024*1024,  # 10MB
         backupCount=5
     )
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(detailed_formatter)
 
     # Workload specific log file
@@ -44,7 +44,7 @@ def setup_logging():
         maxBytes=10*1024*1024,  # 10MB
         backupCount=5
     )
-    workload_handler.setLevel(logging.INFO)
+    workload_handler.setLevel(logging.DEBUG)
     workload_handler.setFormatter(detailed_formatter)
 
     # Configure workload logger specifically
@@ -59,6 +59,17 @@ def setup_logging():
     # Set levels for specific loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
+    
+    # Set specific loggers to DEBUG level
+    logging.getLogger('app.services.training_service').setLevel(logging.DEBUG)
+    logging.getLogger('app.services.metrics_service').setLevel(logging.INFO)
+    logging.getLogger('app.services.k8s_service').setLevel(logging.INFO)
+    logging.getLogger('app.services.diagnosis_service').setLevel(logging.INFO)
+    logging.getLogger('app.api').setLevel(logging.INFO)
+
+    # Quiet some noisy loggers
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('kubernetes').setLevel(logging.WARNING)
     
     # Log startup information
     logger.info("Logging system initialized")

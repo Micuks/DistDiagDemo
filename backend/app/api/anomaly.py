@@ -1,11 +1,16 @@
-from fastapi import APIRouter, HTTPException
-from typing import List, Dict
+from fastapi import APIRouter, HTTPException, BackgroundTasks
+from typing import List, Dict, Optional
 from datetime import datetime
 import asyncio
+from pydantic import BaseModel
 from app.services.k8s_service import K8sService
 from app.services.metrics_service import MetricsService
 from app.services.diagnosis_service import DiagnosisService
+from app.services.training_service import training_service
 from app.schemas.anomaly import AnomalyRequest, MetricsResponse, AnomalyRankResponse, ActiveAnomalyResponse
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 k8s_service = K8sService()
@@ -29,41 +34,51 @@ async def retry_with_backoff(func, max_retries=3, initial_delay=1):
     
     raise last_exception
 
-@router.post("/start")
-async def start_anomaly(request: AnomalyRequest):
-    """Start an anomaly experiment in the OceanBase cluster"""
+class AnomalyRequest(BaseModel):
+    type: str
+    node: Optional[str] = None
+    collect_training_data: Optional[bool] = False
+
+@router.post("/inject")
+async def inject_anomaly(request: AnomalyRequest):
+    """Inject an anomaly into the OceanBase cluster"""
     try:
-        # Apply the chaos mesh experiment with retry logic
-        async def start_experiment():
-            return await k8s_service.apply_chaos_experiment(request.type)
-            
-        await retry_with_backoff(start_experiment)
-        return {"status": "success", "message": f"Started {request.type} anomaly"}
+        # Start collecting training data if requested
+        if request.collect_training_data:
+            training_service.start_collection(request.type, request.node)
+            logger.info(f"Started collecting training data for {request.type} anomaly on {request.node}")
+
+        # Inject the anomaly
+        await k8s_service.apply_chaos_experiment(request.type)
+        return {"status": "success", "message": f"Injected {request.type} anomaly"}
     except Exception as e:
+        logger.error(f"Failed to inject anomaly: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/stop")
-async def stop_anomaly(request: AnomalyRequest = None):
-    """Stop specific or all running anomaly experiments"""
+@router.post("/clear")
+async def clear_anomaly(request: AnomalyRequest):
+    """Clear an anomaly from the OceanBase cluster"""
     try:
-        if request and request.type:
-            # Delete specific chaos mesh experiment
-            await k8s_service.delete_chaos_experiment(request.type)
-            return {"status": "success", "message": f"Stopped {request.type} anomaly"}
-        else:
-            # Delete all chaos mesh experiments
-            await k8s_service.delete_all_chaos_experiments()
-            return {"status": "success", "message": "Stopped all anomalies"}
+        # Stop collecting training data if it was being collected
+        if request.collect_training_data:
+            training_service.stop_collection()
+            logger.info("Stopped collecting training data")
+
+        # Clear the anomaly
+        await k8s_service.delete_chaos_experiment(request.type)
+        return {"status": "success", "message": f"Cleared {request.type} anomaly"}
     except Exception as e:
+        logger.error(f"Failed to clear anomaly: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/active", response_model=List[ActiveAnomalyResponse])
 async def get_active_anomalies():
-    """Get list of currently active anomalies"""
+    """Get list of active anomalies in the OceanBase cluster"""
     try:
         active_anomalies = await k8s_service.get_active_anomalies()
         return active_anomalies
     except Exception as e:
+        logger.error(f"Failed to get active anomalies: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/metrics", response_model=List[MetricsResponse])
@@ -88,10 +103,10 @@ async def get_anomaly_ranks():
     """Get ranked anomalies from the OceanBase cluster"""
     try:
         # Fetch latest metrics
-        metrics = await metrics_service.get_system_metrics()
+        metrics = metrics_service.get_metrics()
         
         # Get anomaly ranks from diagnosis service
-        ranked_anomalies = await diagnosis_service.analyze_metrics(metrics)
+        ranked_anomalies = diagnosis_service.analyze_metrics(metrics.get('metrics', {}))
         
         # Convert to response format
         return [
@@ -103,18 +118,59 @@ async def get_anomaly_ranks():
             ) for anomaly in ranked_anomalies
         ]
     except Exception as e:
+        logger.error(f"Failed to get anomaly ranks: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/train")
 async def train_model():
-    """Train the anomaly detection model with historical data"""
+    """Train the anomaly detection model with collected data"""
     try:
-        # Fetch historical metrics with labels
-        training_data = await metrics_service.get_training_metrics()
-        
+        # Get training data
+        X, y = training_service.get_training_data()
+        if len(X) == 0 or len(y) == 0:
+            raise ValueError("No training data available")
+            
         # Train the model
-        diagnosis_service.train(training_data)
-        
+        diagnosis_service.train(X, y)
         return {"status": "success", "message": "Model trained successfully"}
     except Exception as e:
+        logger.error(f"Failed to train model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/normal/start")
+async def start_normal_collection():
+    """Start collecting normal state metrics data for training."""
+    try:
+        training_service.start_normal_collection()
+        return {"status": "success", "message": "Started collecting normal state data"}
+    except Exception as e:
+        logger.error(f"Failed to start normal state collection: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/normal/stop")
+async def stop_normal_collection():
+    """Stop collecting normal state metrics data and save it."""
+    try:
+        training_service.stop_normal_collection()
+        return {"status": "success", "message": "Stopped collecting normal state data"}
+    except Exception as e:
+        logger.error(f"Failed to stop normal state collection: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/training/stats")
+async def get_training_stats():
+    """Get statistics about the collected training data."""
+    try:
+        stats = training_service.get_dataset_stats()
+        is_balanced = training_service.is_dataset_balanced()
+        return {
+            "status": "success",
+            "stats": stats,
+            "is_balanced": is_balanced,
+            "total_samples": stats["normal"] + stats["anomaly"],
+            "normal_ratio": stats["normal"] / (stats["normal"] + stats["anomaly"]) if stats["normal"] + stats["anomaly"] > 0 else 0,
+            "anomaly_ratio": stats["anomaly"] / (stats["normal"] + stats["anomaly"]) if stats["normal"] + stats["anomaly"] > 0 else 0
+        }
+    except Exception as e:
+        logger.error(f"Failed to get training stats: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

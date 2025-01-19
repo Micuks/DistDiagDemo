@@ -8,6 +8,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 import threading
 import logging
+from ..services.training_service import training_service
 
 logger = logging.getLogger(__name__)
 
@@ -30,45 +31,58 @@ class MetricsService:
         self.collection_thread = None
         self.collection_interval = 5  # seconds
         self.use_obdiag = True  # Flag to control collection method
+        self.event_loop = None
 
     def start_collection(self):
-        """Start collecting metrics in a background thread."""
-        if not self.collection_active:
-            self.collection_active = True
-            self.collection_thread = threading.Thread(target=self._collect_metrics_loop)
-            self.collection_thread.start()
-            logger.info("Started metrics collection")
+        """Start collecting metrics in a separate thread."""
+        if self.collection_thread and self.collection_thread.is_alive():
+            logger.warning("Metrics collection already running")
+            return
+
+        self.collection_active = True
+        self.collection_thread = threading.Thread(target=self._collect_metrics_loop)
+        self.collection_thread.start()
+        logger.info("Started metrics collection")
 
     def stop_collection(self):
         """Stop collecting metrics."""
-        if self.collection_active:
-            self.collection_active = False
-            if self.collection_thread and self.collection_thread.is_alive():
-                self.collection_thread.join(timeout=5)
-                if self.collection_thread.is_alive():
-                    logger.warning("Metrics collection thread did not stop gracefully")
-            logger.info("Stopped metrics collection")
+        logger.info("Stopping metrics collection")
+        self.collection_active = False
+        if self.collection_thread:
+            self.collection_thread.join()
+            self.collection_thread = None
+        logger.info("Stopped metrics collection")
 
     def _collect_metrics_loop(self):
         """Continuously collect metrics while collection is active."""
         logger.info("Starting metrics collection loop")
+        
+        # Create event loop for this thread
+        self.event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.event_loop)
+        
         while self.collection_active:
             try:
                 if self.use_obdiag:
                     try:
-                        asyncio.run(self._collect_obdiag_metrics())
+                        self.event_loop.run_until_complete(self._collect_obdiag_metrics())
                     except Exception as e:
                         logger.error(f"Error collecting metrics with obdiag: {e}")
                         logger.info("Falling back to psutil collection")
                         self._collect_psutil_metrics()
                 else:
                     self._collect_psutil_metrics()
+                
                 time.sleep(self.collection_interval)
             except Exception as e:
                 logger.error(f"Error collecting metrics: {e}")
                 if not self.collection_active:  # Break the loop if collection is stopped
                     break
                 time.sleep(self.collection_interval)  # Wait before retrying
+                
+        # Clean up event loop
+        self.event_loop.close()
+        self.event_loop = None
         logger.info("Metrics collection loop ended")
 
     async def _collect_obdiag_metrics(self):
@@ -124,6 +138,12 @@ class MetricsService:
             logger.warning("No metrics were collected from any nodes")
         else:
             logger.info(f"Successfully collected metrics from nodes: {list(metrics.keys())}")
+            # Add metrics to training service if metrics were collected
+            try:
+                training_service.add_metrics(metrics)
+                logger.debug("Successfully sent metrics to training service")
+            except Exception as e:
+                logger.error(f"Failed to send metrics to training service: {e}")
 
         self.metrics = metrics
         self.timestamp = timestamp
@@ -148,6 +168,13 @@ class MetricsService:
         
         self.metrics = metrics
         self.timestamp = datetime.now().isoformat()
+
+        # Add metrics to training service
+        try:
+            training_service.add_metrics(metrics)
+            logger.debug("Successfully sent psutil metrics to training service")
+        except Exception as e:
+            logger.error(f"Failed to send psutil metrics to training service: {e}")
 
     async def _parse_node_metrics(self, node_dir: str) -> Dict[str, Any]:
         """Parse metrics from node directory"""
@@ -650,6 +677,49 @@ class MetricsService:
             "timestamp": current_timestamp,
             "metrics": simplified_metrics
         }
+
+    def get_system_metrics(self) -> Dict:
+        """Get current system metrics from the latest collected data"""
+        try:
+            # Get the latest metrics for localhost or the first available node
+            node_metrics = None
+            for node, metrics in self.metrics.items():
+                if node == "localhost" or node_metrics is None:
+                    node_metrics = metrics
+                    break
+
+            if not node_metrics:
+                return {
+                    'cpu_usage': 0.0,
+                    'memory_usage': 0.0,
+                    'disk_usage': 0.0
+                }
+
+            # Extract CPU usage
+            cpu_usage = float(node_metrics.get('cpu', {}).get('util', {}).get('latest', 0))
+
+            # Extract memory usage
+            memory_usage = float(node_metrics.get('memory', {}).get('util', {}).get('latest', 0))
+
+            # Extract disk usage from IO metrics
+            disk_usage = float(node_metrics.get('io', {}).get('aggregated', {}).get('util', {}).get('latest', 0))
+
+            metrics = {
+                'cpu_usage': round(cpu_usage, 1),
+                'memory_usage': round(memory_usage, 1),
+                'disk_usage': round(disk_usage, 1)
+            }
+
+            logger.debug(f"System metrics: {metrics}")
+            return metrics
+
+        except Exception as e:
+            logger.error(f"Error getting system metrics: {e}")
+            return {
+                'cpu_usage': 0.0,
+                'memory_usage': 0.0,
+                'disk_usage': 0.0
+            }
 
     def get_detailed_metrics(self, node_ip: str = None, category: str = None) -> Dict[str, Any]:
         """Get detailed metrics with historical data for specific node and category."""
