@@ -41,11 +41,25 @@ class K8sService:
 
     async def wait_for_deletion(self, anomaly_type: str, timeout: int = 30):
         """Wait for an experiment to be fully deleted"""
+        # Increase timeout for disk_stress experiments
+        if anomaly_type == "disk_stress":
+            timeout = 120  # 2 minutes for disk stress
+
         start_time = datetime.now()
-        while (datetime.now() - start_time).seconds < timeout:
+        retry_delay = 2
+        max_retries = timeout // retry_delay
+
+        for _ in range(max_retries):
             if await self.verify_experiment_deleted(anomaly_type):
+                logger.info(f"Successfully verified deletion of {anomaly_type} experiment")
                 return True
-            await asyncio.sleep(2)
+            
+            # Exponential backoff with a cap
+            retry_delay = min(retry_delay * 1.5, 10)
+            logger.debug(f"Experiment {anomaly_type} still exists, waiting {retry_delay} seconds...")
+            await asyncio.sleep(retry_delay)
+
+        logger.error(f"Timeout waiting for {anomaly_type} experiment deletion after {timeout} seconds")
         return False
 
     async def delete_chaos_experiment(self, anomaly_type: str):
@@ -55,6 +69,21 @@ class K8sService:
             name = f"ob-{anomaly_type.replace('_', '-')}"
             
             try:
+                # For disk stress, try to get the experiment first to check its status
+                if anomaly_type == "disk_stress":
+                    try:
+                        experiment = self.custom_api.get_namespaced_custom_object(
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=plural,
+                            name=name
+                        )
+                        logger.info(f"Found existing {anomaly_type} experiment, status: {experiment.get('status', {})}")
+                    except ApiException as e:
+                        if e.status != 404:  # Log any error other than Not Found
+                            logger.warning(f"Error checking {anomaly_type} experiment status: {e}")
+
                 self.custom_api.delete_namespaced_custom_object(
                     group="chaos-mesh.org",
                     version="v1alpha1",
@@ -64,7 +93,10 @@ class K8sService:
                 )
                 # Wait for the deletion to complete
                 if not await self.wait_for_deletion(anomaly_type):
-                    raise Exception(f"Timeout waiting for {anomaly_type} experiment deletion")
+                    if anomaly_type == "disk_stress":
+                        logger.warning("Disk stress experiment deletion timed out, but continuing...")
+                    else:
+                        raise Exception(f"Timeout waiting for {anomaly_type} experiment deletion")
             except ApiException as e:
                 if e.status != 404:  # Ignore 404 Not Found errors
                     raise e

@@ -35,19 +35,23 @@ class MetricsService:
         """Start collecting metrics in a background thread."""
         if not self.collection_active:
             self.collection_active = True
-            self.collection_thread = threading.Thread(target=self._collect_metrics_loop, daemon=True)
+            self.collection_thread = threading.Thread(target=self._collect_metrics_loop)
             self.collection_thread.start()
             logger.info("Started metrics collection")
 
     def stop_collection(self):
         """Stop collecting metrics."""
-        self.collection_active = False
-        if self.collection_thread:
-            self.collection_thread.join(timeout=5)
+        if self.collection_active:
+            self.collection_active = False
+            if self.collection_thread and self.collection_thread.is_alive():
+                self.collection_thread.join(timeout=5)
+                if self.collection_thread.is_alive():
+                    logger.warning("Metrics collection thread did not stop gracefully")
             logger.info("Stopped metrics collection")
 
     def _collect_metrics_loop(self):
         """Continuously collect metrics while collection is active."""
+        logger.info("Starting metrics collection loop")
         while self.collection_active:
             try:
                 if self.use_obdiag:
@@ -62,6 +66,10 @@ class MetricsService:
                 time.sleep(self.collection_interval)
             except Exception as e:
                 logger.error(f"Error collecting metrics: {e}")
+                if not self.collection_active:  # Break the loop if collection is stopped
+                    break
+                time.sleep(self.collection_interval)  # Wait before retrying
+        logger.info("Metrics collection loop ended")
 
     async def _collect_obdiag_metrics(self):
         """Collect metrics using obdiag"""

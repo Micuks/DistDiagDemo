@@ -16,11 +16,13 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    metrics_service.start_collection()
-    yield
-    # Shutdown
-    metrics_service.stop_collection()
+    try:
+        # Startup
+        metrics_service.start_collection()
+        yield
+    finally:
+        # Shutdown - ensure metrics collection is always stopped
+        metrics_service.stop_collection()
 
 app = FastAPI(    
     title="DistDiagDemo API",
