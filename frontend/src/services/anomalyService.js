@@ -97,7 +97,23 @@ export const anomalyService = {
   getTrainingStats: async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/api/anomaly/training/stats`);
-      return response.data;
+      const stats = response.data;
+      
+      // Calculate additional metrics
+      const total = stats.stats.normal + stats.stats.anomaly;
+      stats.total_samples = total;
+      stats.normal_ratio = total > 0 ? stats.stats.normal / total : 0;
+      stats.anomaly_ratio = total > 0 ? stats.stats.anomaly / total : 0;
+      
+      // Calculate anomaly type percentages
+      stats.anomaly_type_percentages = {};
+      if (stats.stats.anomaly > 0) {
+        Object.entries(stats.stats.anomaly_types).forEach(([type, count]) => {
+          stats.anomaly_type_percentages[type] = count / stats.stats.anomaly;
+        });
+      }
+      
+      return stats;
     } catch (error) {
       console.error('Error fetching training stats:', error);
       throw error;

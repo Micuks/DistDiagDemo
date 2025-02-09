@@ -44,7 +44,13 @@ class DistDiagnosis:
     def __init__(self, num_classifier=1, classes_for_each_node=None, node_num=1):
         self.num_classifier = num_classifier
         self.node_num = node_num
-        self.classes = classes_for_each_node if classes_for_each_node else [0, 1]
+        # Define default anomaly types if not provided
+        if not classes_for_each_node:
+            classes_for_each_node = ['cpu', 'memory', 'io', 'network']
+        self.classes = classes_for_each_node
+        # Map network_delay to network category
+        if 'network_delay' in self.classes and 'network' not in self.classes:
+            self.classes[self.classes.index('network_delay')] = 'network'
         # Initialize classifiers with proper number based on classes
         self.clf_list = []
         for _ in range(len(self.classes)):

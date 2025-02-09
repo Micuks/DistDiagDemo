@@ -43,6 +43,15 @@ class TrainingService:
         self.is_collecting_normal = False
         self.collection_start_time = None
         
+        # Add dataset balance tracking
+        self.normal_samples = 0
+        self.anomaly_samples = 0
+        self.pre_anomaly_buffer = []
+        self.post_anomaly_buffer = []
+        self.pre_anomaly_duration = 60  # seconds
+        self.post_anomaly_duration = 60  # seconds
+        self.balance_threshold = 0.3  # 30% threshold for balance
+        
         # Add lock for thread safety
         self._lock = threading.Lock()
         
@@ -70,16 +79,47 @@ class TrainingService:
         
     def start_collection(self, anomaly_type: str, node: str):
         """Start collecting training data for an anomaly case"""
-        self.collection_start_time = datetime.now().isoformat()
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        self.current_case = f"case_{anomaly_type}_{node}_{timestamp}"
-        self.current_anomaly = {
-            "type": anomaly_type,
-            "node": node,
-            "start_time": self.collection_start_time
-        }
-        self.metrics_buffer = []
-        logger.info(f"Started collecting training data for {self.current_case} at {self.collection_start_time}")
+        with self._lock:
+            # Validate node parameter
+            if not node:
+                logger.warning("No node specified for anomaly collection. Using default node.")
+                node = "default"  # Use a default node if none specified
+                
+            self.collection_start_time = datetime.now().isoformat()
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            self.current_case = f"case_{anomaly_type}_{node}_{timestamp}"
+            self.current_anomaly = {
+                "type": anomaly_type,
+                "node": node,
+                "start_time": self.collection_start_time
+            }
+            
+            # Clear buffers
+            self.metrics_buffer = []
+            self.pre_anomaly_buffer = []
+            self.post_anomaly_buffer = []
+            
+            # Start collecting pre-anomaly normal data
+            self.is_collecting_normal = True
+            logger.info(f"Started collecting pre-anomaly normal data for {self.current_case} at {self.collection_start_time}")
+            
+            # Schedule switch to anomaly collection after pre_anomaly_duration
+            threading.Timer(self.pre_anomaly_duration, self._switch_to_anomaly_collection).start()
+        
+    def _switch_to_anomaly_collection(self):
+        """Switch from pre-anomaly to anomaly data collection"""
+        with self._lock:
+            if not self.current_case:
+                return
+                
+            # Save pre-anomaly data as normal
+            if self.pre_anomaly_buffer:
+                self.normal_samples += len(self.pre_anomaly_buffer)
+                self._save_normal_data(self.pre_anomaly_buffer, "pre_anomaly")
+                
+            # Switch to anomaly collection
+            self.is_collecting_normal = False
+            logger.info(f"Switched to anomaly data collection for {self.current_case}")
         
     def start_normal_collection(self):
         """Start collecting normal state data"""
@@ -191,7 +231,7 @@ class TrainingService:
                 logger.warning("No active collection")
                 return
                 
-            if not self.metrics_buffer:
+            if not self.metrics_buffer and not self.pre_anomaly_buffer:
                 logger.warning("No metrics collected")
                 self.current_case = None
                 self.current_anomaly = None
@@ -207,10 +247,44 @@ class TrainingService:
                 # Create temporary directory
                 os.makedirs(temp_dir, exist_ok=True)
                 
-                # Save metrics data
-                metrics_file = os.path.join(temp_dir, "metrics.json")
-                with open(metrics_file, "w") as f:
-                    json.dump(self.metrics_buffer, f, indent=2)
+                # Start collecting post-anomaly normal data
+                self.is_collecting_normal = True
+                logger.info("Started collecting post-anomaly normal data")
+                
+                # Schedule final save after post-anomaly collection
+                threading.Timer(self.post_anomaly_duration, self._finalize_collection, args=[temp_dir, case_dir]).start()
+                
+            except Exception as e:
+                logger.error(f"Failed to prepare for post-anomaly collection: {str(e)}")
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+                self._clear_collection_state()
+                raise
+                
+    def _finalize_collection(self, temp_dir: str, case_dir: str):
+        """Finalize collection by saving all data"""
+        with self._lock:
+            try:
+                # Save pre-anomaly data
+                if self.pre_anomaly_buffer:
+                    pre_anomaly_file = os.path.join(temp_dir, "pre_anomaly_metrics.json")
+                    with open(pre_anomaly_file, "w") as f:
+                        json.dump(self.pre_anomaly_buffer, f, indent=2)
+                    self.normal_samples += len(self.pre_anomaly_buffer)
+                    
+                # Save anomaly data
+                if self.metrics_buffer:
+                    metrics_file = os.path.join(temp_dir, "metrics.json")
+                    with open(metrics_file, "w") as f:
+                        json.dump(self.metrics_buffer, f, indent=2)
+                    self.anomaly_samples += len(self.metrics_buffer)
+                    
+                # Save post-anomaly data
+                if self.post_anomaly_buffer:
+                    post_anomaly_file = os.path.join(temp_dir, "post_anomaly_metrics.json")
+                    with open(post_anomaly_file, "w") as f:
+                        json.dump(self.post_anomaly_buffer, f, indent=2)
+                    self.normal_samples += len(self.post_anomaly_buffer)
                     
                 # Save anomaly label
                 label_file = os.path.join(temp_dir, "label.json")
@@ -218,31 +292,49 @@ class TrainingService:
                     json.dump(self.current_anomaly, f, indent=2)
                     
                 # Verify files were written correctly
-                if not os.path.exists(metrics_file) or os.path.getsize(metrics_file) == 0:
-                    raise Exception("Failed to write metrics file or file is empty")
-                if not os.path.exists(label_file) or os.path.getsize(label_file) == 0:
-                    raise Exception("Failed to write label file or file is empty")
+                files_to_check = [
+                    ("metrics.json", self.metrics_buffer),
+                    ("pre_anomaly_metrics.json", self.pre_anomaly_buffer),
+                    ("post_anomaly_metrics.json", self.post_anomaly_buffer),
+                    ("label.json", None)
+                ]
+                
+                for filename, data in files_to_check:
+                    filepath = os.path.join(temp_dir, filename)
+                    if (data and not os.path.exists(filepath)) or \
+                       (os.path.exists(filepath) and os.path.getsize(filepath) == 0):
+                        raise Exception(f"Failed to write {filename} or file is empty")
                     
                 # Atomically move the temporary directory to the final location
                 if os.path.exists(case_dir):
                     shutil.rmtree(case_dir)
                 shutil.move(temp_dir, case_dir)
                 
-                logger.info(f"Successfully saved training data for {self.current_case}:")
-                logger.info(f"  - Metrics file: {metrics_file} ({os.path.getsize(metrics_file)} bytes)")
-                logger.info(f"  - Label file: {label_file} ({os.path.getsize(label_file)} bytes)")
+                logger.info(f"Successfully saved all data for {self.current_case}:")
+                logger.info(f"  - Pre-anomaly samples: {len(self.pre_anomaly_buffer)}")
+                logger.info(f"  - Anomaly samples: {len(self.metrics_buffer)}")
+                logger.info(f"  - Post-anomaly samples: {len(self.post_anomaly_buffer)}")
+                logger.info(f"  - Total normal samples: {self.normal_samples}")
+                logger.info(f"  - Total anomaly samples: {self.anomaly_samples}")
+                
             except Exception as e:
                 logger.error(f"Failed to save training data: {str(e)}")
                 if os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir)
                 raise
             finally:
-                # Always clear the state
-                self.current_case = None
-                self.current_anomaly = None
-                self.metrics_buffer = []
-                self.collection_start_time = None
-                logger.info("Cleared collection state")
+                self._clear_collection_state()
+                
+    def _clear_collection_state(self):
+        """Clear all collection state variables"""
+        self.current_case = None
+        self.current_anomaly = None
+        self.metrics_buffer = []
+        self.pre_anomaly_buffer = []
+        self.post_anomaly_buffer = []
+        self.collection_start_time = None
+        self.is_collecting_normal = False
+        logger.info("Cleared collection state")
         
     def add_metrics(self, metrics: Dict[str, Any]):
         """Add metrics to current collection"""
@@ -262,78 +354,82 @@ class TrainingService:
             logger.debug(f"Collection mode: {'normal' if self.is_collecting_normal else 'anomaly'}")
             logger.debug(f"Number of nodes in metrics: {len(metrics)}")
 
-            # Process all historical data points
-            for node_ip, node_data in metrics.items():
-                logger.debug(f"Processing metrics for node: {node_ip}")
-                
-                # Get all timestamps from CPU data to use as reference
-                timestamps = []
-                if 'cpu' in node_data and 'util' in node_data['cpu']:
-                    timestamps = list(node_data['cpu']['util'].keys())
-                    timestamps.remove('latest')  # Remove 'latest' key
-                elif 'cpu' in node_data:
-                    # Handle psutil format which might only have 'latest'
-                    timestamps = ['latest']
-                
-                if not timestamps:
-                    logger.warning(f"No timestamps found in metrics for node {node_ip}")
-                    continue
-
-                # Process each timestamp
-                for timestamp in timestamps:
-                    filtered_metrics = {}
-                    try:
-                        filtered_node_data = {}
-                        for category, category_data in node_data.items():
-                            if category == 'io':
-                                # Handle IO metrics
-                                filtered_node_data[category] = {
-                                    'aggregated': {
-                                        metric: {
-                                            'value': data.get(timestamp, data.get('latest', 0))
-                                        }
-                                        for metric, data in category_data['aggregated'].items()
-                                    }
-                                }
-                            else:
-                                # For other categories
-                                filtered_node_data[category] = {
-                                    metric: {
-                                        'value': data.get(timestamp, data.get('latest', 0))
-                                    }
-                                    for metric, data in category_data.items()
-                                }
-                        filtered_metrics[node_ip] = filtered_node_data
-
-                        metric_entry = {
-                            "timestamp": timestamp if timestamp != 'latest' else datetime.now().isoformat(),
-                            "metrics": filtered_metrics
-                        }
-
-                        if self.is_collecting_normal:
-                            self.normal_state_buffer.append(metric_entry)
-                        else:
-                            self.metrics_buffer.append(metric_entry)
-
-                    except Exception as e:
-                        logger.error(f"Error processing metrics for timestamp {timestamp}: {str(e)}")
-                        continue
-
-            # Log collection progress
+            # Process metrics based on collection phase
+            processed_metrics = self._process_raw_metrics(metrics)
+            
             if self.is_collecting_normal:
-                logger.info(f"Total normal state data points collected: {len(self.normal_state_buffer)}")
-            else:
-                logger.info(f"Total anomaly data points collected: {len(self.metrics_buffer)}")
+                if self.current_anomaly:  # Pre-anomaly collection
+                    self.pre_anomaly_buffer.extend(processed_metrics)
+                    logger.debug(f"Added {len(processed_metrics)} metrics to pre-anomaly buffer")
+                else:  # Normal state collection
+                    self.normal_state_buffer.extend(processed_metrics)
+                    logger.debug(f"Added {len(processed_metrics)} metrics to normal state buffer")
+            else:  # Anomaly collection
+                self.metrics_buffer.extend(processed_metrics)
+                logger.debug(f"Added {len(processed_metrics)} metrics to anomaly buffer")
+        
+    def _process_raw_metrics(self, metrics: Dict[str, Any]) -> List[Dict]:
+        """Process raw metrics into a list of timestamped metrics"""
+        processed_metrics = []
+        
+        for node_ip, node_data in metrics.items():
+            # Get all timestamps from CPU data to use as reference
+            timestamps = []
+            if 'cpu' in node_data and 'util' in node_data['cpu']:
+                timestamps = list(node_data['cpu']['util'].keys())
+                timestamps.remove('latest')  # Remove 'latest' key
+            elif 'cpu' in node_data:
+                # Handle psutil format which might only have 'latest'
+                timestamps = ['latest']
+            
+            if not timestamps:
+                logger.warning(f"No timestamps found in metrics for node {node_ip}")
+                continue
+
+            # Process each timestamp
+            for timestamp in timestamps:
+                try:
+                    filtered_metrics = {
+                        "timestamp": timestamp,
+                        "node": node_ip,
+                        "metrics": {}
+                    }
+                    
+                    for category, category_data in node_data.items():
+                        if category == 'io':
+                            # Handle IO metrics
+                            filtered_metrics["metrics"][category] = {
+                                'aggregated': {
+                                    metric: data.get(timestamp, data.get('latest', 0))
+                                    for metric, data in category_data['aggregated'].items()
+                                }
+                            }
+                        else:
+                            # For other categories
+                            filtered_metrics["metrics"][category] = {
+                                metric: data.get(timestamp, data.get('latest', 0))
+                                for metric, data in category_data.items()
+                            }
+                            
+                    processed_metrics.append(filtered_metrics)
+                except Exception as e:
+                    logger.error(f"Error processing metrics for node {node_ip} at timestamp {timestamp}: {str(e)}")
+                    continue
+                    
+        return processed_metrics
         
     def get_dataset_stats(self) -> Dict[str, int]:
-        """Get statistics about the collected dataset"""
-        stats = {"normal": 0, "anomaly": 0}
-        anomaly_stats = {
-            "cpu": 0,
-            "memory": 0,
-            "io": 0,
-            "network": 0,
-            "unknown": 0
+        """Get statistics about the collected training data"""
+        stats = {
+            "normal": self.normal_samples,
+            "anomaly": self.anomaly_samples,
+            "anomaly_types": {
+                "cpu": 0,
+                "memory": 0,
+                "io": 0,
+                "network": 0,
+                "unknown": 0
+            }
         }
         
         if not os.path.exists(self.data_dir):
@@ -346,33 +442,65 @@ class TrainingService:
                 
             label_file = os.path.join(case_path, "label.json")
             metrics_file = os.path.join(case_path, "metrics.json")
+            pre_anomaly_file = os.path.join(case_path, "pre_anomaly_metrics.json")
+            post_anomaly_file = os.path.join(case_path, "post_anomaly_metrics.json")
             
-            if not os.path.exists(label_file) or not os.path.exists(metrics_file):
-                logger.warning(f"Incomplete case directory {case_dir}: missing {'label' if not os.path.exists(label_file) else 'metrics'} file")
+            if not os.path.exists(label_file):
+                logger.warning(f"Missing label file in {case_dir}")
                 continue
                 
             try:
                 with open(label_file) as f:
                     label_data = json.load(f)
-                with open(metrics_file) as f:
-                    metrics_data = json.load(f)
                     
-                if label_data.get("type") == "normal":
-                    stats["normal"] += len(metrics_data)
-                else:
-                    stats["anomaly"] += len(metrics_data)
-                    # Count specific anomaly types
-                    anomaly_type = label_data.get("type", "unknown")
-                    base_type = anomaly_type.replace("_stress", "")
-                    if base_type in anomaly_stats:
-                        anomaly_stats[base_type] += len(metrics_data)
-                    else:
-                        anomaly_stats["unknown"] += len(metrics_data)
+                # Count normal samples from pre and post anomaly data
+                if os.path.exists(pre_anomaly_file):
+                    with open(pre_anomaly_file) as f:
+                        pre_anomaly_data = json.load(f)
+                        stats["normal"] += len(pre_anomaly_data)
+                        
+                if os.path.exists(post_anomaly_file):
+                    with open(post_anomaly_file) as f:
+                        post_anomaly_data = json.load(f)
+                        stats["normal"] += len(post_anomaly_data)
+                        
+                # Count normal and anomaly samples
+                if os.path.exists(metrics_file):
+                    with open(metrics_file) as f:
+                        metrics_data = json.load(f)
+                        samples_count = len(metrics_data)
+                        
+                        # Count specific anomaly types
+                        anomaly_type = label_data.get("type", "unknown")
+                        # Map network_delay to network category
+                        base_type = anomaly_type.replace("_stress", "")
+                        if base_type == "network_delay":
+                            base_type = "network"
+                        if base_type in stats["anomaly_types"]:
+                            stats["anomaly_types"][base_type] += samples_count
+                            stats["anomaly"] += samples_count
+                        elif base_type == "normal":
+                            stats["normal"] += samples_count
+                        else:
+                            logger.error(f"Metrics file {metrics_file} got unknown Anomaly type: {base_type}")
+                            stats["anomaly_types"]["unknown"] += samples_count
+                        logger.info(f"Metrics file {metrics_file}'s Anomaly type: {base_type}")
+                            
             except Exception as e:
                 logger.error(f"Error reading case {case_dir}: {str(e)}")
                 
+        # Calculate ratios
+        total = stats["normal"] + stats["anomaly"]
+        if total > 0:
+            stats["normal_ratio"] = stats["normal"] / total
+            stats["anomaly_ratio"] = stats["anomaly"] / total
+            stats["is_balanced"] = abs(stats["normal_ratio"] - stats["anomaly_ratio"]) <= self.balance_threshold
+        else:
+            stats["normal_ratio"] = 0
+            stats["anomaly_ratio"] = 0
+            stats["is_balanced"] = False
+            
         logger.info(f"Dataset statistics: {stats}")
-        logger.info(f"Anomaly type distribution: {anomaly_stats}")
         return stats
         
     def is_dataset_balanced(self, threshold: float = 0.3) -> bool:
@@ -407,37 +535,56 @@ class TrainingService:
                 continue
                 
             try:
-                # Load metrics
-                metrics_file = os.path.join(case_path, "metrics.json")
+                # Load label file first to determine data type
                 label_file = os.path.join(case_path, "label.json")
-                
-                if not os.path.exists(metrics_file) or not os.path.exists(metrics_file):
-                    logger.warning(f"Skipping incomplete case directory {case_dir}")
+                if not os.path.exists(label_file):
+                    logger.warning(f"Missing label file in {case_dir}")
                     continue
                     
-                with open(metrics_file) as f:
-                    metrics_data = json.load(f)
                 with open(label_file) as f:
                     label_data = json.load(f)
                     
-                # Process metrics into features
-                features = self._process_metrics(metrics_data)
-                if features is not None:
-                    X.extend(features)  # Extend instead of append since features is a list of feature vectors
-                    # Create label vector (all zeros for normal state)
-                    if label_data.get("type") == "normal":
-                        y.extend([np.zeros(4) for _ in range(len(features))])  # 4 anomaly types
-                    else:
-                        y.extend([self._create_label_vector(label_data) for _ in range(len(features))])
-                    
-                    logger.info(f"Processed {len(features)} samples from {case_dir}")
-                else:
-                    logger.warning(f"No valid features extracted from {case_dir}")
-                    
+                # Process pre-anomaly data as normal
+                pre_anomaly_file = os.path.join(case_path, "pre_anomaly_metrics.json")
+                if os.path.exists(pre_anomaly_file):
+                    with open(pre_anomaly_file) as f:
+                        pre_anomaly_data = json.load(f)
+                        features = self._process_metrics(pre_anomaly_data)
+                        if features is not None:
+                            X.extend(features)
+                            y.extend([np.zeros(4) for _ in range(len(features))])  # Normal state
+                            logger.info(f"Processed {len(features)} pre-anomaly samples from {case_dir}")
+                            
+                # Process anomaly data
+                metrics_file = os.path.join(case_path, "metrics.json")
+                if os.path.exists(metrics_file):
+                    with open(metrics_file) as f:
+                        metrics_data = json.load(f)
+                        features = self._process_metrics(metrics_data)
+                        if features is not None:
+                            X.extend(features)
+                            y.extend([self._create_label_vector(label_data) for _ in range(len(features))])
+                            logger.info(f"Processed {len(features)} anomaly samples from {case_dir}")
+                            
+                # Process post-anomaly data as normal
+                post_anomaly_file = os.path.join(case_path, "post_anomaly_metrics.json")
+                if os.path.exists(post_anomaly_file):
+                    with open(post_anomaly_file) as f:
+                        post_anomaly_data = json.load(f)
+                        features = self._process_metrics(post_anomaly_data)
+                        if features is not None:
+                            X.extend(features)
+                            y.extend([np.zeros(4) for _ in range(len(features))])  # Normal state
+                            logger.info(f"Processed {len(features)} post-anomaly samples from {case_dir}")
+                            
             except Exception as e:
                 logger.error(f"Error loading training data from {case_dir}: {str(e)}")
                 continue
                 
+        if not X or not y:
+            logger.warning("No valid training data found")
+            return [], []
+            
         logger.info(f"Total samples loaded: {len(X)}")
         return np.array(X), np.array(y)
 
@@ -520,7 +667,10 @@ class TrainingService:
             'io': 2,
             'io_stress': 2,
             'network': 3,
-            'network_stress': 3
+            'network_stress': 3,
+            'network_delay': 3,  # Add network_delay type
+            'disk': 2,  # Map disk to io category
+            'disk_stress': 2
         }
         
         label_vector = np.zeros(4)  # 4 basic types: cpu, memory, io, network
@@ -528,6 +678,7 @@ class TrainingService:
         anomaly_type = label_data.get("type")
         if anomaly_type in anomaly_types:
             label_vector[anomaly_types[anomaly_type]] = 1
+            logger.debug(f"Created label vector for anomaly type {anomaly_type}: {label_vector}")
         else:
             logger.warning(f"Unknown anomaly type: {anomaly_type}")
             

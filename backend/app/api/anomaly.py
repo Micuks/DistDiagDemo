@@ -43,14 +43,36 @@ class AnomalyRequest(BaseModel):
 async def inject_anomaly(request: AnomalyRequest):
     """Inject an anomaly into the OceanBase cluster"""
     try:
+        # Validate anomaly type
+        valid_types = ["cpu_stress", "memory_stress", "io_stress", "network_stress", "network_delay"]
+        if request.type not in valid_types:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid anomaly type. Valid types: {valid_types}"
+            )
+            
+        # Get target node if not specified
+        if not request.node:
+            # Get first available node or use a default
+            nodes = await k8s_service.get_nodes()
+            request.node = nodes[0] if nodes else "default"
+            logger.info(f"No node specified, using node: {request.node}")
+            
         # Start collecting training data if requested
         if request.collect_training_data:
+            # This will automatically start pre-anomaly data collection
             training_service.start_collection(request.type, request.node)
             logger.info(f"Started collecting training data for {request.type} anomaly on {request.node}")
-
-        # Inject the anomaly
-        await k8s_service.apply_chaos_experiment(request.type)
-        return {"status": "success", "message": f"Injected {request.type} anomaly"}
+            
+        # Inject the anomaly after pre-anomaly collection starts
+        await retry_with_backoff(
+            lambda: k8s_service.inject_anomaly(request.type, request.node)
+        )
+        
+        return {
+            "status": "success", 
+            "message": f"Injected {request.type} anomaly on node {request.node}"
+        }
     except Exception as e:
         logger.error(f"Failed to inject anomaly: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -59,14 +81,21 @@ async def inject_anomaly(request: AnomalyRequest):
 async def clear_anomaly(request: AnomalyRequest):
     """Clear an anomaly from the OceanBase cluster"""
     try:
+        # Clear the anomaly first
+        await retry_with_backoff(
+            lambda: k8s_service.clear_anomaly(request.type, request.node)
+        )
+        
         # Stop collecting training data if it was being collected
+        # This will automatically start post-anomaly data collection
         if request.collect_training_data:
             training_service.stop_collection()
-            logger.info("Stopped collecting training data")
-
-        # Clear the anomaly
-        await k8s_service.delete_chaos_experiment(request.type)
-        return {"status": "success", "message": f"Cleared {request.type} anomaly"}
+            logger.info(f"Stopped collecting training data for {request.type} anomaly on {request.node}")
+            
+        return {
+            "status": "success", 
+            "message": f"Cleared {request.type} anomaly from node {request.node}"
+        }
     except Exception as e:
         logger.error(f"Failed to clear anomaly: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

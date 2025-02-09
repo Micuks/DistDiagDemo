@@ -64,7 +64,7 @@ def setup_logging():
     logging.getLogger('app.services.training_service').setLevel(logging.DEBUG)
     logging.getLogger('app.services.metrics_service').setLevel(logging.INFO)
     logging.getLogger('app.services.k8s_service').setLevel(logging.INFO)
-    logging.getLogger('app.services.diagnosis_service').setLevel(logging.INFO)
+    logging.getLogger('app.services.diagnosis_service').setLevel(logging.DEBUG)
     logging.getLogger('app.api').setLevel(logging.INFO)
 
     # Quiet some noisy loggers

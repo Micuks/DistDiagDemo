@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, Space, Table, message, Row, Col, Switch, Divider, Statistic, Progress } from 'antd';
+import { Card, Button, Space, Table, message, Row, Col, Switch, Divider, Statistic, Progress, Alert, Tag } from 'antd';
 import { anomalyService } from '../services/anomalyService';
 
 const AnomalyControlPanel = () => {
@@ -21,21 +21,32 @@ const AnomalyControlPanel = () => {
             title: 'Type',
             dataIndex: 'type',
             key: 'type',
+            render: (type) => {
+                const option = anomalyOptions.find(opt => opt.id === type);
+                return option ? option.name : type;
+            }
         },
         {
-            title: 'Target',
-            dataIndex: 'target',
-            key: 'target',
+            title: 'Target Node',
+            dataIndex: 'node',
+            key: 'node',
+            render: (node) => node || 'Default'
         },
         {
             title: 'Start Time',
             dataIndex: 'start_time',
             key: 'start_time',
+            render: (time) => new Date(time).toLocaleString()
         },
         {
             title: 'Status',
             dataIndex: 'status',
             key: 'status',
+            render: (status) => (
+                <Tag color={status === 'active' ? 'green' : 'red'}>
+                    {status.toUpperCase()}
+                </Tag>
+            )
         },
         {
             title: 'Action',
@@ -64,11 +75,15 @@ const AnomalyControlPanel = () => {
                 await anomalyService.stopAnomaly(anomalyType, collectTrainingData);
                 message.success(`Cleared ${anomalyType}`);
             } else {
-                await anomalyService.startAnomaly(anomalyType, collectTrainingData);
-                message.success(`Injected ${anomalyType}`);
+                const response = await anomalyService.startAnomaly(anomalyType, collectTrainingData);
+                message.success(`${response.message}`);  // Use server response message
             }
             const anomalies = await anomalyService.getActiveAnomalies();
             setActiveAnomalies(anomalies);
+            // Refresh training stats after anomaly state change
+            if (collectTrainingData) {
+                await fetchTrainingStats();
+            }
         } catch (err) {
             message.error(err.message || 'Failed to toggle anomaly');
         } finally {
@@ -144,7 +159,12 @@ const AnomalyControlPanel = () => {
                     <Col span={12}>
                         <Switch
                             checked={collectTrainingData}
-                            onChange={setCollectTrainingData}
+                            onChange={(checked) => {
+                                setCollectTrainingData(checked);
+                                if (checked) {
+                                    message.info('Training data will be collected for anomaly injections');
+                                }
+                            }}
                             checkedChildren="Training Data Collection ON"
                             unCheckedChildren="Training Data Collection OFF"
                         />
@@ -186,10 +206,29 @@ const AnomalyControlPanel = () => {
                             </Col>
                         </Row>
 
+                        <Row style={{ marginTop: '16px' }}>
+                            <Col span={24}>
+                                <div>Anomaly Type Distribution</div>
+                                {Object.entries(trainingStats.stats.anomaly_types).map(([type, count]) => (
+                                    <div key={type} style={{ marginBottom: '8px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                            <span>{type.toUpperCase()}</span>
+                                            <span>{count} samples</span>
+                                        </div>
+                                        <Progress
+                                            percent={Math.round((count / trainingStats.stats.anomaly) * 100)}
+                                            size="small"
+                                            status={count > 0 ? 'active' : 'exception'}
+                                        />
+                                    </div>
+                                ))}
+                            </Col>
+                        </Row>
+
                         <Divider>Model Training</Divider>
                         <Row gutter={[16, 16]}>
                             <Col span={24}>
-                                <Space>
+                                <Space direction="vertical" style={{ width: '100%' }}>
                                     <Button
                                         type="primary"
                                         onClick={async () => {
@@ -209,9 +248,21 @@ const AnomalyControlPanel = () => {
                                         Train Model
                                     </Button>
                                     {!trainingStats?.is_balanced && (
-                                        <span style={{ color: '#ff4d4f' }}>
-                                            Dataset must be balanced before training
-                                        </span>
+                                        <Alert
+                                            message="Dataset Not Balanced"
+                                            description={
+                                                <div>
+                                                    <p>The dataset must be balanced before training. Current status:</p>
+                                                    <ul>
+                                                        <li>Normal data: {Math.round(trainingStats.normal_ratio * 100)}%</li>
+                                                        <li>Anomaly data: {Math.round(trainingStats.anomaly_ratio * 100)}%</li>
+                                                        <li>Required: Difference should be within 30%</li>
+                                                    </ul>
+                                                </div>
+                                            }
+                                            type="warning"
+                                            showIcon
+                                        />
                                     )}
                                 </Space>
                             </Col>
