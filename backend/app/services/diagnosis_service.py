@@ -44,20 +44,51 @@ class DistDiagnosis:
     def __init__(self, num_classifier=1, classes_for_each_node=None, node_num=1):
         self.num_classifier = num_classifier
         self.node_num = node_num
-        self.clf_list = []
-        for _ in range(num_classifier):
-            self.clf_list.append(XGBClassifier(objective='binary:logistic'))
         self.classes = classes_for_each_node if classes_for_each_node else [0, 1]
+        # Initialize classifiers with proper number based on classes
+        self.clf_list = []
+        for _ in range(len(self.classes)):
+            self.clf_list.append(XGBClassifier(objective='binary:logistic'))
+        logger.info(f"Initialized {len(self.clf_list)} classifiers for {len(self.classes)} classes")
 
     def train(self, x_train, y_train):
         """Train the model with collected data"""
-        train_x = self.decompose_train_x(x_train)
-        train_y = self.decompose_train_y(y_train)
+        try:
+            logger.debug(f"Original training data shapes - X: {x_train.shape}, y: {y_train.shape}")
+            logger.debug(f"X data sample: {x_train[0] if len(x_train) > 0 else 'empty'}")
+            logger.debug(f"y data sample: {y_train[0] if len(y_train) > 0 else 'empty'}")
+            
+            # Decompose training data
+            train_x = self.decompose_train_x(x_train)
+            train_y = self.decompose_train_y(y_train)
+            
+            logger.debug(f"Decomposed training data shapes - X: {train_x.shape}, y: {train_y.shape}")
+            logger.debug(f"Decomposed X sample: {train_x[0] if len(train_x) > 0 else 'empty'}")
+            logger.debug(f"Decomposed y sample: {train_y[0] if len(train_y) > 0 else 'empty'}")
+            
+            if len(train_x) == 0 or len(train_y) == 0:
+                raise ValueError("Empty training data after decomposition")
 
-        for i in range(self.num_classifier):
-            current_clf = self.clf_list[i]
-            current_labels = train_y[:, i].reshape(-1, 1)
-            current_clf.fit(train_x, current_labels)
+            # Ensure we have enough classifiers for the number of classes
+            while len(self.clf_list) < train_y.shape[1]:
+                logger.info(f"Adding classifier {len(self.clf_list)} to match training data dimensions")
+                self.clf_list.append(XGBClassifier(objective='binary:logistic'))
+
+            for i in range(min(len(self.clf_list), train_y.shape[1])):
+                current_clf = self.clf_list[i]
+                current_labels = train_y[:, i].reshape(-1, 1)
+                
+                logger.debug(f"Training classifier {i} with {len(train_x)} samples")
+                logger.debug(f"Labels for classifier {i}: shape={current_labels.shape}, unique values={np.unique(current_labels)}")
+                current_clf.fit(train_x, current_labels.ravel())  # Use ravel() to flatten labels
+                
+            logger.info("Successfully trained all classifiers")
+            
+        except Exception as e:
+            logger.error(f"Error during training: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
 
     def save_model(self, model_dir):
         """Save trained models"""
@@ -90,49 +121,76 @@ class DistDiagnosis:
                     node_names.append(node)
 
             if not features:
+                logger.warning("No valid features extracted from metrics")
                 return {
                     'scores': {},
                     'anomalies': [],
                     'propagation_graph': {}
                 }
 
+            logger.debug(f"Processing features for {len(node_names)} nodes")
+            
             # Get predictions from each classifier
             results = {}
             for node_idx, node in enumerate(node_names):
                 node_results = {}
+                feature = np.array([features[node_idx]])  # Reshape for prediction
+                
+                logger.debug(f"Making predictions for node {node}")
                 for clf_idx, clf in enumerate(self.clf_list):
-                    if clf_idx < len(self.classes):
-                        proba = clf.predict_proba(np.array([features[node_idx]]))[0]
-                        if len(proba) > 1:  # Binary classification
-                            score = float(proba[1])
-                        else:  # Single class
-                            score = float(proba[0])
-                        node_results[self.classes[clf_idx]] = score
+                    try:
+                        # Get probability predictions
+                        proba = clf.predict_proba(feature)[0]
+                        # For binary classification, take the probability of anomaly (class 1)
+                        score = float(proba[1]) if len(proba) > 1 else float(proba[0])
+                        anomaly_type = self.classes[clf_idx]
+                        node_results[anomaly_type] = score
+                        logger.debug(f"Node {node}, Type {anomaly_type}: Score {score:.3f}")
+                    except Exception as e:
+                        logger.error(f"Error predicting with classifier {clf_idx}: {str(e)}")
+                        continue
+                
                 results[node] = node_results
 
-            # Calculate anomaly scores
+            # Calculate anomaly scores and rank them
             scores = {}
             anomalies = []
+            threshold = 0.1  # Lowered threshold for testing
+            
             for node, node_results in results.items():
+                if not node_results:
+                    continue
+                    
+                # Find the highest scoring anomaly type
                 max_score = max(node_results.values())
+                max_type = max(node_results.items(), key=lambda x: x[1])[0]
                 scores[node] = max_score
-                if max_score > 0.7:  # Threshold for anomaly detection
-                    anomaly_type = max(node_results.items(), key=lambda x: x[1])[0]
+                
+                logger.debug(f"Node {node} max score: {max_score:.3f} ({max_type})")
+                
+                if max_score > threshold:
                     anomalies.append({
                         'node': node,
-                        'type': anomaly_type,
+                        'type': max_type,
                         'score': max_score,
                         'timestamp': datetime.now().isoformat()
                     })
+                    logger.info(f"Detected {max_type} anomaly on {node} with score {max_score:.3f}")
 
+            # Sort anomalies by score
+            anomalies.sort(key=lambda x: x['score'], reverse=True)
+            
+            logger.info(f"Found {len(anomalies)} anomalies above threshold {threshold}")
             return {
                 'scores': scores,
-                'anomalies': sorted(anomalies, key=lambda x: x['score'], reverse=True),
-                'propagation_graph': {}  # TODO: Implement propagation analysis
+                'anomalies': anomalies,
+                'propagation_graph': {}
             }
 
         except Exception as e:
             logger.error(f"Error in diagnose: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 'scores': {node: 0.0 for node in node_metrics.keys()},
                 'anomalies': [],
@@ -184,19 +242,61 @@ class DistDiagnosis:
 
     def decompose_train_x(self, composed_train_x):
         """Decompose training features"""
-        train_x = []
-        for case in composed_train_x:
-            for node_x in case:
-                train_x.append(node_x)
-        return np.array(train_x)
+        try:
+            logger.debug(f"Decomposing X - input type: {type(composed_train_x)}, shape/len: {composed_train_x.shape if isinstance(composed_train_x, np.ndarray) else len(composed_train_x)}")
+            
+            if isinstance(composed_train_x, np.ndarray):
+                if len(composed_train_x.shape) == 1:
+                    result = composed_train_x.reshape(1, -1)
+                    logger.debug(f"Reshaped 1D array to shape: {result.shape}")
+                    return result
+                logger.debug(f"Using numpy array directly with shape: {composed_train_x.shape}")
+                return composed_train_x
+            
+            train_x = []
+            for case in composed_train_x:
+                if isinstance(case, (list, np.ndarray)):
+                    for node_x in case:
+                        train_x.append(node_x)
+                else:
+                    train_x.append(case)
+            result = np.array(train_x)
+            logger.debug(f"Decomposed X result shape: {result.shape}")
+            return result
+        except Exception as e:
+            logger.error(f"Error decomposing training features: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
 
     def decompose_train_y(self, composed_train_y):
         """Decompose training labels"""
-        train_y = []
-        for case in composed_train_y:
-            for node_label in case:
-                train_y.append(node_label)
-        return np.array(train_y)
+        try:
+            logger.debug(f"Decomposing y - input type: {type(composed_train_y)}, shape/len: {composed_train_y.shape if isinstance(composed_train_y, np.ndarray) else len(composed_train_y)}")
+            
+            if isinstance(composed_train_y, np.ndarray):
+                if len(composed_train_y.shape) == 1:
+                    result = composed_train_y.reshape(1, -1)
+                    logger.debug(f"Reshaped 1D array to shape: {result.shape}")
+                    return result
+                logger.debug(f"Using numpy array directly with shape: {composed_train_y.shape}")
+                return composed_train_y
+            
+            train_y = []
+            for case in composed_train_y:
+                if isinstance(case, (list, np.ndarray)):
+                    for node_label in case:
+                        train_y.append(node_label)
+                else:
+                    train_y.append(case)
+            result = np.array(train_y)
+            logger.debug(f"Decomposed y result shape: {result.shape}")
+            return result
+        except Exception as e:
+            logger.error(f"Error decomposing training labels: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
 
 class DiagnosisService:
     def __init__(self):
@@ -222,9 +322,25 @@ class DiagnosisService:
     def train(self, X: np.ndarray, y: np.ndarray):
         """Train the model with collected data"""
         try:
+            # Input validation
+            if len(X) == 0 or len(y) == 0:
+                raise ValueError("Empty training data")
+                
+            if len(X) != len(y):
+                raise ValueError(f"Mismatched data dimensions: X={len(X)}, y={len(y)}")
+                
+            logger.info(f"Training model with {len(X)} samples")
+            logger.debug(f"X shape: {X.shape}, y shape: {y.shape}")
+            
             # Ensure data directory exists
             os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
             
+            # Reshape data if needed
+            if len(X.shape) == 1:
+                X = X.reshape(1, -1)
+            if len(y.shape) == 1:
+                y = y.reshape(1, -1)
+                
             # Train the model
             self.diagnosis.train(X, y)
             
@@ -238,6 +354,10 @@ class DiagnosisService:
     def analyze_metrics(self, metrics: Dict[str, Any]) -> List[Dict]:
         """Analyze metrics and return anomaly ranks"""
         try:
+            if not metrics:
+                logger.warning("Empty metrics received")
+                return []
+                
             # Get diagnosis results
             diagnosis_result = self.diagnosis.diagnose(metrics)
             

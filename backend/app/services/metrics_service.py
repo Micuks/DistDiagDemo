@@ -424,13 +424,13 @@ class MetricsService:
                 if len(lines) > 3:
                     # Update indices based on actual tsar output format
                     net_indices = {
-                        "bytin": 1,    # KB/s
-                        "bytout": 2,   # KB/s
-                        "pktin": 3,    # packets/s
-                        "pktout": 4,   # packets/s
-                        "pkterr": 5,   # packets/s
-                        "pktdrp": 6,   # packets/s
-                    }
+                            "bytin": 1,    # KB/s
+                            "bytout": 2,   # KB/s
+                            "pktin": 3,    # packets/s
+                            "pktout": 4,   # packets/s
+                            "pkterr": 5,   # packets/s
+                            "pktdrp": 6,   # packets/s
+                        }
                     try:
                         metrics["network"] = self._parse_time_series_data(lines, net_indices)
                         # Convert bytin/bytout from KB/s to B/s for frontend
