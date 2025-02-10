@@ -8,6 +8,7 @@ const AnomalyControlPanel = () => {
     const [collectTrainingData, setCollectTrainingData] = useState(false);
     const [isCollectingNormal, setIsCollectingNormal] = useState(false);
     const [trainingStats, setTrainingStats] = useState(null);
+    const [isAutoBalancing, setIsAutoBalancing] = useState(false);
 
     const anomalyOptions = [
         { id: 'cpu_stress', name: 'CPU Stress' },
@@ -123,6 +124,35 @@ const AnomalyControlPanel = () => {
         setLoading(false);
     };
 
+    const handleAutoBalance = async () => {
+        try {
+            setIsAutoBalancing(true);
+            await anomalyService.autoBalanceDataset();
+            message.success('Auto-balance process started');
+            
+            // Start polling for updates
+            const pollInterval = setInterval(async () => {
+                const stats = await anomalyService.getTrainingStats();
+                setTrainingStats(stats);
+                if (stats.is_balanced) {
+                    clearInterval(pollInterval);
+                    setIsAutoBalancing(false);
+                    message.success('Dataset is now balanced');
+                }
+            }, 5000);
+            
+            // Stop polling after 30 minutes
+            setTimeout(() => {
+                clearInterval(pollInterval);
+                setIsAutoBalancing(false);
+            }, 30 * 60 * 1000);
+            
+        } catch (error) {
+            message.error('Failed to start auto-balance: ' + error.message);
+            setIsAutoBalancing(false);
+        }
+    };
+
     useEffect(() => {
         const fetchAnomalies = async () => {
             try {
@@ -156,7 +186,7 @@ const AnomalyControlPanel = () => {
         <Card title="Anomaly Control Panel">
             <Space direction="vertical" style={{ width: '100%' }}>
                 <Row gutter={16}>
-                    <Col span={12}>
+                    <Col span={8}>
                         <Switch
                             checked={collectTrainingData}
                             onChange={(checked) => {
@@ -169,13 +199,23 @@ const AnomalyControlPanel = () => {
                             unCheckedChildren="Training Data Collection OFF"
                         />
                     </Col>
-                    <Col span={12}>
+                    <Col span={8}>
                         <Button
                             type={isCollectingNormal ? 'danger' : 'primary'}
                             onClick={handleNormalCollection}
                             loading={loading}
                         >
                             {isCollectingNormal ? 'Stop Normal Collection' : 'Start Normal Collection'}
+                        </Button>
+                    </Col>
+                    <Col span={8}>
+                        <Button
+                            type="primary"
+                            onClick={handleAutoBalance}
+                            loading={isAutoBalancing}
+                            disabled={isCollectingNormal}
+                        >
+                            {isAutoBalancing ? 'Auto-Balancing...' : 'Auto-Balance Dataset'}
                         </Button>
                     </Col>
                 </Row>

@@ -9,6 +9,7 @@ from app.services.diagnosis_service import DiagnosisService
 from app.services.training_service import training_service
 from app.schemas.anomaly import AnomalyRequest, MetricsResponse, AnomalyRankResponse, ActiveAnomalyResponse
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -202,4 +203,15 @@ async def get_training_stats():
         }
     except Exception as e:
         logger.error(f"Failed to get training stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/training/auto_balance")
+async def auto_balance_dataset():
+    """Start auto-balancing the training dataset."""
+    try:
+        # Start auto-balance in a background thread
+        threading.Thread(target=training_service.auto_balance_dataset).start()
+        return {"status": "success", "message": "Auto-balance process started"}
+    except Exception as e:
+        logger.error(f"Failed to start auto-balance: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

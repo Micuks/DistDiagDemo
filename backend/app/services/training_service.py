@@ -519,6 +519,48 @@ class TrainingService:
         logger.info(f"Dataset balance check: normal_ratio={normal_ratio:.2f}, anomaly_ratio={anomaly_ratio:.2f}, is_balanced={is_balanced}")
         return is_balanced
 
+    def auto_balance_dataset(self):
+        """Automatically balance the dataset by collecting required data"""
+        logger.info("Starting auto-balance process")
+        
+        # Get current stats
+        stats = self.get_dataset_stats()
+        total = stats["normal"] + stats["anomaly"]
+        
+        if total == 0:
+            # If no data, start with normal collection
+            logger.info("No data available. Starting with normal collection")
+            self.start_normal_collection()
+            return
+            
+        # Calculate ratios
+        normal_ratio = stats["normal"] / total if total > 0 else 0
+        anomaly_ratio = stats["anomaly"] / total if total > 0 else 0
+        
+        # Check normal vs anomaly balance first
+        if abs(normal_ratio - anomaly_ratio) > self.balance_threshold:
+            if normal_ratio < anomaly_ratio:
+                logger.info("Normal samples underrepresented. Starting normal collection")
+                self.start_normal_collection()
+            else:
+                # Find least represented anomaly type
+                anomaly_types = stats["anomaly_types"]
+                min_type = min(anomaly_types.items(), key=lambda x: x[1])[0]
+                logger.info(f"Anomaly type {min_type} underrepresented. Starting collection")
+                self.start_collection(min_type, None)  # Let the system choose the node
+        else:
+            # Balance anomaly types
+            anomaly_types = stats["anomaly_types"]
+            avg_anomaly_count = stats["anomaly"] / len(anomaly_types)
+            
+            # Find most underrepresented type
+            min_type = min(anomaly_types.items(), key=lambda x: x[1])[0]
+            if anomaly_types[min_type] < avg_anomaly_count * 0.7:  # Allow 30% variance
+                logger.info(f"Anomaly type {min_type} below average. Starting collection")
+                self.start_collection(min_type, None)
+            else:
+                logger.info("Dataset is well balanced")
+
     def get_training_data(self) -> tuple:
         """Get all training data for model training"""
         if not os.path.exists(self.data_dir):

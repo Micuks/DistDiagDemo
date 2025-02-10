@@ -128,5 +128,15 @@ export const anomalyService = {
       console.error('Error training model:', error);
       throw error;
     }
+  },
+
+  autoBalanceDataset: async () => {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/api/anomaly/training/auto_balance`);
+      return response.data;
+    } catch (error) {
+      console.error('Error starting auto-balance:', error);
+      throw error;
+    }
   }
 }; 
