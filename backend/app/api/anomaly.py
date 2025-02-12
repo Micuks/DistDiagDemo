@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Response
 from typing import List, Dict, Optional
 from datetime import datetime
 import asyncio
@@ -10,6 +10,16 @@ from app.services.training_service import training_service
 from app.schemas.anomaly import AnomalyRequest, MetricsResponse, AnomalyRankResponse, ActiveAnomalyResponse
 import logging
 import threading
+from fastapi_cache import FastAPICache
+from fastapi_cache.decorator import cache
+from fastapi_cache.backends.redis import RedisBackend
+from redis import asyncio as aioredis
+from sse_starlette.sse import EventSourceResponse
+import json
+from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi_cache.coder import JsonCoder
+from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -44,35 +54,22 @@ class AnomalyRequest(BaseModel):
 async def inject_anomaly(request: AnomalyRequest):
     """Inject an anomaly into the OceanBase cluster"""
     try:
-        # Validate anomaly type
-        valid_types = ["cpu_stress", "memory_stress", "io_stress", "network_stress", "network_delay"]
-        if request.type not in valid_types:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid anomaly type. Valid types: {valid_types}"
-            )
-            
-        # Get target node if not specified
-        if not request.node:
-            # Get first available node or use a default
-            nodes = await k8s_service.get_nodes()
-            request.node = nodes[0] if nodes else "default"
-            logger.info(f"No node specified, using node: {request.node}")
-            
+        # Clear cache for active anomalies
+        FastAPICache.clear_all()
+        
+        # Inject the anomaly
+        await retry_with_backoff(
+            lambda: k8s_service.apply_chaos_experiment(request.type)
+        )
+        
         # Start collecting training data if requested
         if request.collect_training_data:
-            # This will automatically start pre-anomaly data collection
             training_service.start_collection(request.type, request.node)
             logger.info(f"Started collecting training data for {request.type} anomaly on {request.node}")
             
-        # Inject the anomaly after pre-anomaly collection starts
-        await retry_with_backoff(
-            lambda: k8s_service.inject_anomaly(request.type, request.node)
-        )
-        
         return {
             "status": "success", 
-            "message": f"Injected {request.type} anomaly on node {request.node}"
+            "message": f"Injected {request.type} anomaly into node {request.node}"
         }
     except Exception as e:
         logger.error(f"Failed to inject anomaly: {str(e)}")
@@ -82,9 +79,12 @@ async def inject_anomaly(request: AnomalyRequest):
 async def clear_anomaly(request: AnomalyRequest):
     """Clear an anomaly from the OceanBase cluster"""
     try:
+        # Clear cache for active anomalies
+        FastAPICache.clear_all()
+        
         # Clear the anomaly first
         await retry_with_backoff(
-            lambda: k8s_service.clear_anomaly(request.type, request.node)
+            lambda: k8s_service.delete_chaos_experiment(request.type)
         )
         
         # Stop collecting training data if it was being collected
@@ -106,59 +106,68 @@ async def get_active_anomalies():
     """Get list of active anomalies in the OceanBase cluster"""
     try:
         active_anomalies = await k8s_service.get_active_anomalies()
-        return active_anomalies
+        response = jsonable_encoder(active_anomalies)
+        return JSONResponse(
+            content=response,
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
     except Exception as e:
         logger.error(f"Failed to get active anomalies: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/metrics", response_model=List[MetricsResponse])
-async def get_metrics():
-    """Get system metrics from the OceanBase cluster"""
-    try:
-        # Fetch metrics from Prometheus
-        metrics = await metrics_service.get_system_metrics()
-        return [
-            MetricsResponse(
-                timestamp=entry["timestamp"],
-                cpu=entry["cpu"],
-                memory=entry["memory"],
-                network=entry["network"]
-            ) for entry in metrics
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
 
 @router.get("/ranks", response_model=List[AnomalyRankResponse])
-async def get_anomaly_ranks():
-    """Get ranked anomalies from the OceanBase cluster"""
+@cache(expire=5)
+async def get_anomaly_ranks(response: Response):
+    """Get ranked list of potential anomalies"""
     try:
-        # Fetch latest metrics
         metrics = metrics_service.get_metrics()
+        if not metrics or not metrics.get("metrics"):
+            return JSONResponse(
+                content=[],
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true"
+                }
+            )
+            
+        ranks = diagnosis_service.analyze_metrics(metrics["metrics"])
+        return JSONResponse(
+            content=ranks,
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
         
-        # Get anomaly ranks from diagnosis service
-        ranked_anomalies = diagnosis_service.analyze_metrics(metrics.get('metrics', {}))
-        
-        # Convert to response format
-        return [
-            AnomalyRankResponse(
-                timestamp=anomaly["timestamp"],
-                node=anomaly["node"],
-                type=anomaly["type"],
-                score=anomaly["score"]
-            ) for anomaly in ranked_anomalies
-        ]
     except Exception as e:
         logger.error(f"Failed to get anomaly ranks: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
 
 @router.post("/train")
 async def train_model():
-    """Train the anomaly detection model with collected data"""
+    """Train the anomaly detection model."""
     try:
         # Get training data
         X, y = training_service.get_training_data()
         if len(X) == 0 or len(y) == 0:
-            raise ValueError("No training data available")
+            raise HTTPException(status_code=400, detail="No training data available")
             
         # Train the model
         diagnosis_service.train(X, y)
@@ -169,20 +178,20 @@ async def train_model():
 
 @router.post("/normal/start")
 async def start_normal_collection():
-    """Start collecting normal state metrics data for training."""
+    """Start collecting normal state data"""
     try:
         training_service.start_normal_collection()
-        return {"status": "success", "message": "Started collecting normal state data"}
+        return {"status": "success", "message": "Started normal state data collection"}
     except Exception as e:
         logger.error(f"Failed to start normal state collection: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/normal/stop")
 async def stop_normal_collection():
-    """Stop collecting normal state metrics data and save it."""
+    """Stop collecting normal state data"""
     try:
         training_service.stop_normal_collection()
-        return {"status": "success", "message": "Stopped collecting normal state data"}
+        return {"status": "success", "message": "Stopped normal state data collection"}
     except Exception as e:
         logger.error(f"Failed to stop normal state collection: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -191,19 +200,50 @@ async def stop_normal_collection():
 async def get_training_stats():
     """Get statistics about the collected training data."""
     try:
-        stats = training_service.get_dataset_stats()
+        try:
+            stats = await asyncio.wait_for(training_service.get_dataset_stats(), timeout=20)
+        except asyncio.TimeoutError:
+            logger.warning("Dataset stats computation timed out")
+            stats = training_service._stats_cache
+        
+        if not stats:
+            return JSONResponse(
+                status_code=404,
+                content={"status": "error", "message": "No training data available"},
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true",
+                }
+            )
+            
         is_balanced = training_service.is_dataset_balanced()
-        return {
+        total = stats.get("normal", 0) + stats.get("anomaly", 0)
+        
+        response = {
             "status": "success",
             "stats": stats,
             "is_balanced": is_balanced,
-            "total_samples": stats["normal"] + stats["anomaly"],
-            "normal_ratio": stats["normal"] / (stats["normal"] + stats["anomaly"]) if stats["normal"] + stats["anomaly"] > 0 else 0,
-            "anomaly_ratio": stats["anomaly"] / (stats["normal"] + stats["anomaly"]) if stats["normal"] + stats["anomaly"] > 0 else 0
+            "total_samples": total,
+            "normal_ratio": stats.get("normal", 0) / total if total > 0 else 0,
+            "anomaly_ratio": stats.get("anomaly", 0) / total if total > 0 else 0
         }
+        return JSONResponse(
+            content=jsonable_encoder(response),
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
     except Exception as e:
         logger.error(f"Failed to get training stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
 
 @router.post("/training/auto_balance")
 async def auto_balance_dataset():
@@ -214,4 +254,33 @@ async def auto_balance_dataset():
         return {"status": "success", "message": "Auto-balance process started"}
     except Exception as e:
         logger.error(f"Failed to start auto-balance: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/stream")
+async def anomaly_stream():
+    """Stream anomaly updates using Server-Sent Events"""
+    async def event_generator():
+        last_data = None
+        while True:
+            try:
+                # Get current anomalies directly from the service's state
+                current_data = list(k8s_service.active_anomalies.values())
+                
+                # Only send if data changed
+                if current_data != last_data:
+                    last_data = current_data
+                    yield {
+                        "event": "anomaly_update",
+                        "data": json.dumps(current_data),
+                        "retry": 3000  # Retry connection after 3s if dropped
+                    }
+                
+                # Check every second
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in anomaly stream: {str(e)}")
+                # Add small delay on error
+                await asyncio.sleep(1)
+                continue
+
+    return EventSourceResponse(event_generator()) 

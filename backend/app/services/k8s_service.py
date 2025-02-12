@@ -2,11 +2,30 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 import logging
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime
 import asyncio
+import time
+from functools import lru_cache, wraps
+from async_lru import alru_cache
 
 logger = logging.getLogger(__name__)
+
+def timed_lru_cache(seconds: int, maxsize: int = 128):
+    def wrapper_decorator(func):
+        func = lru_cache(maxsize=maxsize)(func)
+        func.lifetime = seconds
+        func.expiration = time.time() + seconds
+
+        @wraps(func)
+        def wrapped_func(*args, **kwargs):
+            if time.time() >= func.expiration:
+                func.cache_clear()
+                func.expiration = time.time() + func.lifetime
+            return func(*args, **kwargs)
+
+        return wrapped_func
+    return wrapper_decorator
 
 class K8sService:
     def __init__(self):
@@ -19,28 +38,58 @@ class K8sService:
         self.custom_api = client.CustomObjectsApi()
         self.namespace = os.getenv('OCEANBASE_NAMESPACE', 'oceanbase')
         self.active_anomalies = {}  # Track active anomalies with timestamps
+        self._experiment_cache = {}  # Cache for experiment status
+        self.CACHE_TTL = 5  # Cache TTL in seconds
+        self._last_cache_update = None
 
+    def _should_update_cache(self) -> bool:
+        """Check if cache needs to be updated"""
+        return (
+            not self._last_cache_update or
+            time.time() - self._last_cache_update > self.CACHE_TTL
+        )
+
+    @alru_cache(maxsize=100, ttl=5)
     async def verify_experiment_deleted(self, anomaly_type: str) -> bool:
-        """Verify that an experiment has been fully deleted"""
+        """Verify that an experiment has been fully deleted with caching"""
         try:
+            if anomaly_type in self._experiment_cache:
+                cache_entry = self._experiment_cache[anomaly_type]
+                if time.time() - cache_entry['timestamp'] < self.CACHE_TTL:
+                    return cache_entry['deleted']
+
             plural = self._get_experiment_plural(anomaly_type)
             name = f"ob-{anomaly_type.replace('_', '-')}"
             
-            self.custom_api.get_namespaced_custom_object(
-                group="chaos-mesh.org",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural=plural,
-                name=name
-            )
-            return False  # If we get here, the object still exists
-        except ApiException as e:
-            if e.status == 404:  # Not found means it's deleted
-                return True
-            raise e
+            try:
+                self.custom_api.get_namespaced_custom_object(
+                    group="chaos-mesh.org",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural=plural,
+                    name=name
+                )
+                # Cache the result
+                self._experiment_cache[anomaly_type] = {
+                    'deleted': False,
+                    'timestamp': time.time()
+                }
+                return False  # If we get here, the object still exists
+            except ApiException as e:
+                if e.status == 404:  # Not found means it's deleted
+                    # Cache the result
+                    self._experiment_cache[anomaly_type] = {
+                        'deleted': True,
+                        'timestamp': time.time()
+                    }
+                    return True
+                raise e
+        except Exception as e:
+            logger.error(f"Error verifying experiment deletion: {str(e)}")
+            return False
 
     async def wait_for_deletion(self, anomaly_type: str, timeout: int = 30):
-        """Wait for an experiment to be fully deleted"""
+        """Wait for an experiment to be fully deleted with exponential backoff"""
         # Increase timeout for disk_stress experiments
         if anomaly_type == "disk_stress":
             timeout = 120  # 2 minutes for disk stress
@@ -63,10 +112,14 @@ class K8sService:
         return False
 
     async def delete_chaos_experiment(self, anomaly_type: str):
-        """Delete a specific chaos mesh experiment"""
+        """Delete a specific chaos mesh experiment with optimized retries"""
         try:
             plural = self._get_experiment_plural(anomaly_type)
             name = f"ob-{anomaly_type.replace('_', '-')}"
+            
+            # Clear cache entry for this experiment
+            if anomaly_type in self._experiment_cache:
+                del self._experiment_cache[anomaly_type]
             
             try:
                 # For disk stress, try to get the experiment first to check its status
@@ -111,24 +164,42 @@ class K8sService:
             raise Exception(f"Failed to delete chaos experiment: {str(e)}")
 
     async def delete_all_chaos_experiments(self):
-        """Delete all running chaos mesh experiments"""
+        """Delete all running chaos mesh experiments in parallel"""
         try:
-            # Clear active anomalies tracking
+            # Clear active anomalies tracking and cache
             self.active_anomalies = {}
+            self._experiment_cache = {}
             
-            # Delete all types of chaos experiments
+            # Delete all types of chaos experiments in parallel
             experiment_types = ["cpu_stress", "memory_stress", "network_delay", "disk_stress"]
-            for exp_type in experiment_types:
-                await self.delete_chaos_experiment(exp_type)
+            tasks = [self.delete_chaos_experiment(exp_type) for exp_type in experiment_types]
+            await asyncio.gather(*tasks)
             
             logger.info(f"Deleted all chaos experiments in namespace {self.namespace}")
         except Exception as e:
             logger.error(f"Failed to delete chaos experiments: {str(e)}")
             raise Exception(f"Failed to delete chaos experiments: {str(e)}")
 
+    @alru_cache(maxsize=1, ttl=5)
     async def get_active_anomalies(self):
-        """Get list of currently active anomalies"""
-        return list(self.active_anomalies.values())
+        """Get list of currently active anomalies with caching"""
+        try:
+            if self._should_update_cache():
+                # Create new list to avoid modifying cached data
+                current_anomalies = list(self.active_anomalies.values())
+                # Check each anomaly's status
+                for anomaly in list(self.active_anomalies.keys()):
+                    is_deleted = await self.verify_experiment_deleted(anomaly)
+                    if is_deleted:
+                        del self.active_anomalies[anomaly]
+                
+                self._last_cache_update = time.time()
+                return current_anomalies
+            
+            return list(self.active_anomalies.values())
+        except Exception as e:
+            logger.error(f"Failed to get active anomalies: {str(e)}")
+            return []
 
     def _get_experiment_template(self, anomaly_type: str) -> Dict[str, Any]:
         """Get the appropriate chaos mesh experiment template"""
@@ -233,8 +304,9 @@ class K8sService:
         else:
             raise ValueError(f"Unsupported anomaly type: {anomaly_type}")
 
+    @timed_lru_cache(seconds=60, maxsize=10)
     def _get_experiment_plural(self, anomaly_type: str) -> str:
-        """Get the plural form of the experiment type for the API"""
+        """Get the plural form of the experiment type for the API with caching"""
         if anomaly_type in ["cpu_stress", "memory_stress"]:
             return "stresschaos"
         elif anomaly_type == "network_delay":
@@ -242,10 +314,10 @@ class K8sService:
         elif anomaly_type == "disk_stress":
             return "iochaos"
         else:
-            raise ValueError(f"Unsupported anomaly type: {anomaly_type}") 
+            raise ValueError(f"Unsupported anomaly type: {anomaly_type}")
 
     async def apply_chaos_experiment(self, anomaly_type: str):
-        """Apply a chaos mesh experiment based on the anomaly type"""
+        """Apply a chaos mesh experiment based on the anomaly type with optimized retries"""
         experiment = self._get_experiment_template(anomaly_type)
         
         try:
@@ -254,7 +326,7 @@ class K8sService:
             
             # Create new experiment with retry logic
             max_retries = 5  # Increased from 3
-            retry_delay = 2  # Increased initial delay
+            retry_delay = 2
             
             for attempt in range(max_retries):
                 try:
@@ -288,7 +360,20 @@ class K8sService:
                 "type": anomaly_type,
                 "target": experiment["spec"]["selector"]["labelSelectors"]["ref-obcluster"]
             }
+            
+            # Clear cache for this experiment type
+            if anomaly_type in self._experiment_cache:
+                del self._experiment_cache[anomaly_type]
+            
             logger.info(f"Created {anomaly_type} experiment in namespace {self.namespace}")
         except Exception as e:
             logger.error(f"Failed to create chaos experiment: {str(e)}")
-            raise Exception(f"Failed to create chaos experiment: {str(e)}") 
+            raise Exception(f"Failed to create chaos experiment: {str(e)}")
+
+    def invalidate_cache(self):
+        """Invalidate all caches"""
+        self._experiment_cache = {}
+        self._last_cache_update = None
+        self.verify_experiment_deleted.cache_clear()
+        self.get_active_anomalies.cache_clear()
+        self._get_experiment_plural.cache_clear() 

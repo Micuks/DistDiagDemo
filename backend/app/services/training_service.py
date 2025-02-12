@@ -1,17 +1,50 @@
 import os
 import json
 import logging
+import concurrent.futures
 from datetime import datetime
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
 import shutil
 import threading
+from functools import lru_cache, wraps
+import time
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import functools
+from async_lru import alru_cache
+import ijson
+from collections import defaultdict
+import mmap
 
 logger = logging.getLogger(__name__)
+
+def timed_lru_cache(seconds: int, maxsize: int = 128):
+    def wrapper_decorator(func):
+        func = lru_cache(maxsize=maxsize)(func)
+        func.lifetime = seconds
+        func.expiration = time.time() + seconds
+
+        @wraps(func)
+        def wrapped_func(*args, **kwargs):
+            if time.time() >= func.expiration:
+                func.cache_clear()
+                func.expiration = time.time() + func.lifetime
+            return func(*args, **kwargs)
+
+        return wrapped_func
+    return wrapper_decorator
 
 class TrainingService:
     _instance = None
     _lock = threading.Lock()
+    _stats_cache = None
+    _last_stats_update = None
+    STATS_CACHE_TTL = 60  # Cache TTL in seconds
+    _stats_executor = ThreadPoolExecutor(max_workers=1)
+    _stats_lock = asyncio.Lock()
+    _request_lock = asyncio.Lock()
+    _last_request_time = 0
 
     def __new__(cls):
         if cls._instance is None:
@@ -55,10 +88,22 @@ class TrainingService:
         # Add lock for thread safety
         self._lock = threading.Lock()
         
+        # Initialize cache
+        self._stats_cache = None
+        self._last_stats_update = None
+        
         # Log existing data
         self._log_existing_data()
         
         self._initialized = True
+        
+        async def warmup_cache(self):
+            async with self._stats_lock:
+                if not self.get_dataset_stats.cache_info().hits:
+                    await self.get_dataset_stats()
+        
+        # Start background cache maintenance
+        self._cache_task = asyncio.create_task(self._maintain_cache())
         
     def _log_existing_data(self):
         """Log information about existing training data"""
@@ -105,6 +150,9 @@ class TrainingService:
             
             # Schedule switch to anomaly collection after pre_anomaly_duration
             threading.Timer(self.pre_anomaly_duration, self._switch_to_anomaly_collection).start()
+            
+            # Start background cache maintenance
+            self._cache_task = asyncio.create_task(self._maintain_cache())
         
     def _switch_to_anomaly_collection(self):
         """Switch from pre-anomaly to anomaly data collection"""
@@ -418,106 +466,177 @@ class TrainingService:
                     
         return processed_metrics
         
-    def get_dataset_stats(self) -> Dict[str, int]:
-        """Get statistics about the collected training data"""
-        stats = {
-            "normal": self.normal_samples,
-            "anomaly": self.anomaly_samples,
-            "anomaly_types": {
-                "cpu": 0,
-                "memory": 0,
-                "io": 0,
-                "network": 0,
-                "unknown": 0
+    def _should_update_stats_cache(self) -> bool:
+        """Check if stats cache needs to be updated"""
+        return (
+            self._stats_cache is None
+            or self._last_stats_update is None
+            or time.time() - self._last_stats_update > self.STATS_CACHE_TTL
+        )
+
+    @alru_cache(maxsize=1, ttl=60)
+    async def get_dataset_stats(self) -> Dict[str, int]:
+        """Get dataset statistics with async-computed cache"""
+        async with self._request_lock:
+            now = time.time()
+            if now - self._last_request_time < 5:  # 5s coalescing window
+                return self._stats_cache
+            self._last_request_time = now
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self._stats_executor,
+                self._compute_dataset_stats
+            )
+    
+    def _compute_dataset_stats(self):
+        """Get statistics about the collected training data with caching"""
+        if not self._should_update_stats_cache():
+            logger.debug("Returning cached stats")
+            return self._stats_cache
+
+        logger.info("Calculating fresh dataset statistics")
+        with self._lock:
+            stats = {
+                "normal": self.normal_samples,
+                "anomaly": self.anomaly_samples,
+                "anomaly_types": {
+                    "cpu": 0,
+                    "memory": 0,
+                    "io": 0,
+                    "network": 0,
+                    "unknown": 0
+                }
             }
-        }
-        
-        if not os.path.exists(self.data_dir):
+            
+            if not os.path.exists(self.data_dir):
+                self._stats_cache = stats
+                self._last_stats_update = time.time()
+                return stats
+
+            # Parallel processing with timeout
+            case_stats = []
+            futures = []
+            with ThreadPoolExecutor(max_workers=32) as executor:
+                for case_dir in os.listdir(self.data_dir):
+                    case_path = os.path.join(self.data_dir, case_dir)
+                    if not os.path.isdir(case_path):
+                        continue
+                        
+                    futures.append(
+                        executor.submit(self._process_case_stats, case_path)
+                    )
+
+                for future in concurrent.futures.as_completed(futures, timeout=15):
+                    try:
+                        case_stat = future.result()
+                        if case_stat:
+                            case_stats.append(case_stat)
+                    except Exception as e:
+                        logger.warning(f"Skipping case due to error: {str(e)}")
+
+            # Aggregate stats from all cases
+            for case_stat in case_stats:
+                stats["normal"] += case_stat["normal"]
+                stats["anomaly"] += case_stat["anomaly"]
+                for anomaly_type, count in case_stat["anomaly_types"].items():
+                    stats["anomaly_types"][anomaly_type] += count
+
+            # Calculate ratios
+            total = stats["normal"] + stats["anomaly"]
+            if total > 0:
+                stats["normal_ratio"] = stats["normal"] / total
+                stats["anomaly_ratio"] = stats["anomaly"] / total
+                stats["is_balanced"] = abs(stats["normal_ratio"] - stats["anomaly_ratio"]) <= self.balance_threshold
+            else:
+                stats["normal_ratio"] = 0
+                stats["anomaly_ratio"] = 0
+                stats["is_balanced"] = False
+
+            # Update cache
+            self._stats_cache = stats
+            self._last_stats_update = time.time()
+            logger.info(f"Updated dataset statistics cache: {stats}")
             return stats
-            
-        for case_dir in os.listdir(self.data_dir):
-            case_path = os.path.join(self.data_dir, case_dir)
-            if not os.path.isdir(case_path):
-                continue
-                
+
+    def _process_case_stats(self, case_path: str) -> Optional[Dict]:
+        """Process case statistics with optimized file reading"""
+        try:
+            case_stat = {
+                "normal": 0,
+                "anomaly": 0,
+                "anomaly_types": defaultdict(int)
+            }
+
+            # Process metrics files with streaming for large files
+            for prefix in ["", "pre_anomaly_", "post_anomaly_"]:
+                metrics_file = os.path.join(case_path, f"{prefix}metrics.json")
+                if not os.path.exists(metrics_file):
+                    continue
+                    
+                file_size = os.path.getsize(metrics_file)
+                if file_size > 10_000_000:  # 10MB threshold
+                    with open(metrics_file, "rb") as f:
+                        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+                        for _ in ijson.items(mm, 'item'):
+                            if prefix:
+                                case_stat["normal"] += 1
+                            else:
+                                case_stat["anomaly"] += 1
+                        mm.close()
+                else:
+                    with open(metrics_file) as f:
+                        data = json.load(f)
+                        count = len(data) if isinstance(data, list) else 1
+                        if prefix:
+                            case_stat["normal"] += count
+                        else:
+                            case_stat["anomaly"] += count
+
+            # Process label data
             label_file = os.path.join(case_path, "label.json")
-            metrics_file = os.path.join(case_path, "metrics.json")
-            pre_anomaly_file = os.path.join(case_path, "pre_anomaly_metrics.json")
-            post_anomaly_file = os.path.join(case_path, "post_anomaly_metrics.json")
-            
-            if not os.path.exists(label_file):
-                logger.warning(f"Missing label file in {case_dir}")
-                continue
-                
-            try:
+            if os.path.exists(label_file):
                 with open(label_file) as f:
                     label_data = json.load(f)
-                    
-                # Count normal samples from pre and post anomaly data
-                if os.path.exists(pre_anomaly_file):
-                    with open(pre_anomaly_file) as f:
-                        pre_anomaly_data = json.load(f)
-                        stats["normal"] += len(pre_anomaly_data)
-                        
-                if os.path.exists(post_anomaly_file):
-                    with open(post_anomaly_file) as f:
-                        post_anomaly_data = json.load(f)
-                        stats["normal"] += len(post_anomaly_data)
-                        
-                # Count normal and anomaly samples
-                if os.path.exists(metrics_file):
-                    with open(metrics_file) as f:
-                        metrics_data = json.load(f)
-                        samples_count = len(metrics_data)
-                        
-                        # Count specific anomaly types
-                        anomaly_type = label_data.get("type", "unknown")
-                        # Map network_delay to network category
-                        base_type = anomaly_type.replace("_stress", "")
-                        if base_type == "network_delay":
-                            base_type = "network"
-                        if base_type in stats["anomaly_types"]:
-                            stats["anomaly_types"][base_type] += samples_count
-                            stats["anomaly"] += samples_count
-                        elif base_type == "normal":
-                            stats["normal"] += samples_count
-                        else:
-                            logger.error(f"Metrics file {metrics_file} got unknown Anomaly type: {base_type}")
-                            stats["anomaly_types"]["unknown"] += samples_count
-                        logger.info(f"Metrics file {metrics_file}'s Anomaly type: {base_type}")
-                            
-            except Exception as e:
-                logger.error(f"Error reading case {case_dir}: {str(e)}")
-                
-        # Calculate ratios
-        total = stats["normal"] + stats["anomaly"]
-        if total > 0:
-            stats["normal_ratio"] = stats["normal"] / total
-            stats["anomaly_ratio"] = stats["anomaly"] / total
-            stats["is_balanced"] = abs(stats["normal_ratio"] - stats["anomaly_ratio"]) <= self.balance_threshold
-        else:
-            stats["normal_ratio"] = 0
-            stats["anomaly_ratio"] = 0
-            stats["is_balanced"] = False
-            
-        logger.info(f"Dataset statistics: {stats}")
-        return stats
-        
+                    anomaly_type = label_data.get("type", "unknown")
+                    base_type = anomaly_type.replace("_stress", "")
+                    if "network_delay" in base_type:
+                        base_type = "network"
+                    if base_type in ["cpu", "memory", "io", "network", "unknown"]:
+                        case_stat["anomaly_types"][base_type] = case_stat["anomaly"]
+
+            return case_stat
+        except Exception as e:
+            logger.error(f"Error processing case stats for {case_path}: {str(e)}")
+            return None
+
+    def invalidate_stats_cache(self):
+        """Invalidate the stats cache to force recalculation"""
+        self._stats_cache = None
+        self._last_stats_update = None
+        self.get_dataset_stats.cache_clear()
+
     def is_dataset_balanced(self, threshold: float = 0.3) -> bool:
         """Check if the dataset is balanced within the threshold"""
-        stats = self.get_dataset_stats()
-        total = stats["normal"] + stats["anomaly"]
-        
-        if total == 0:
-            logger.warning("No training data available")
-            return False
+        try:
+            stats = self.get_dataset_stats()
+            if not stats:
+                logger.warning("No training data available")
+                return False
+                
+            total = stats.get("normal", 0) + stats.get("anomaly", 0)
+            if total == 0:
+                logger.warning("No training samples available")
+                return False
+                
+            normal_ratio = stats.get("normal", 0) / total
+            anomaly_ratio = stats.get("anomaly", 0) / total
             
-        normal_ratio = stats["normal"] / total
-        anomaly_ratio = stats["anomaly"] / total
-        
-        is_balanced = abs(normal_ratio - anomaly_ratio) <= threshold
-        logger.info(f"Dataset balance check: normal_ratio={normal_ratio:.2f}, anomaly_ratio={anomaly_ratio:.2f}, is_balanced={is_balanced}")
-        return is_balanced
+            is_balanced = abs(normal_ratio - anomaly_ratio) <= threshold
+            logger.info(f"Dataset balance check: normal_ratio={normal_ratio:.2f}, anomaly_ratio={anomaly_ratio:.2f}, is_balanced={is_balanced}")
+            return is_balanced
+        except Exception as e:
+            logger.error(f"Error checking dataset balance: {str(e)}")
+            return False
 
     def auto_balance_dataset(self):
         """Automatically balance the dataset by collecting required data"""
@@ -725,6 +844,11 @@ class TrainingService:
             logger.warning(f"Unknown anomaly type: {anomaly_type}")
             
         return label_vector
+
+    async def _maintain_cache(self):
+        while True:
+            await self.get_dataset_stats()
+            await asyncio.sleep(30)  # Refresh every 30s
 
 # Create singleton instance
 training_service = TrainingService() 

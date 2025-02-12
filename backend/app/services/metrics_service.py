@@ -8,13 +8,33 @@ from typing import Dict, Any, List
 from datetime import datetime
 import threading
 import logging
+from functools import lru_cache, wraps
 from ..services.training_service import training_service
 
 logger = logging.getLogger(__name__)
 
+def timed_lru_cache(seconds: int, maxsize: int = 128):
+    def wrapper_decorator(func):
+        func = lru_cache(maxsize=maxsize)(func)
+        func.lifetime = seconds
+        func.expiration = time.time() + seconds
+
+        @wraps(func)
+        def wrapped_func(*args, **kwargs):
+            if time.time() >= func.expiration:
+                func.cache_clear()
+                func.expiration = time.time() + func.lifetime
+            return func(*args, **kwargs)
+
+        return wrapped_func
+    return wrapper_decorator
+
 class MetricsService:
     _instance = None
     _lock = threading.Lock()
+    _metrics_cache = {}
+    _last_collection = None
+    CACHE_TTL = 30  # Cache time to live in seconds
 
     def __new__(cls):
         if cls._instance is None:
@@ -32,6 +52,8 @@ class MetricsService:
         self.collection_interval = 5  # seconds
         self.use_obdiag = True  # Flag to control collection method
         self.event_loop = None
+        self._metrics_cache = {}
+        self._last_collection = None
 
     def start_collection(self):
         """Start collecting metrics in a separate thread."""
@@ -643,8 +665,9 @@ class MetricsService:
             }
         }
 
+    @timed_lru_cache(seconds=30, maxsize=1)
     def get_metrics(self) -> Dict[str, Any]:
-        """Get the latest collected metrics."""
+        """Get the latest collected metrics with caching."""
         current_timestamp = self.timestamp
         if current_timestamp and len(current_timestamp) == 14:  # Format: YYYYMMDDHHMMSS
             try:
@@ -678,8 +701,9 @@ class MetricsService:
             "metrics": simplified_metrics
         }
 
+    @timed_lru_cache(seconds=30, maxsize=1)
     def get_system_metrics(self) -> Dict:
-        """Get current system metrics from the latest collected data"""
+        """Get current system metrics from the latest collected data with caching"""
         try:
             # Get the latest metrics for localhost or the first available node
             node_metrics = None
@@ -721,8 +745,9 @@ class MetricsService:
                 'disk_usage': 0.0
             }
 
+    @timed_lru_cache(seconds=30, maxsize=100)
     def get_detailed_metrics(self, node_ip: str = None, category: str = None) -> Dict[str, Any]:
-        """Get detailed metrics with historical data for specific node and category."""
+        """Get detailed metrics with historical data for specific node and category with caching."""
         if not node_ip or not category or node_ip not in self.metrics:
             return {"error": "Invalid node_ip or category"}
 
