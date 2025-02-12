@@ -15,6 +15,10 @@ const Navigation = () => {
             label: 'Control Panel'
         },
         {
+            key: '/training',
+            label: 'Model Training'
+        },
+        {
             key: '/metrics',
             label: 'System Metrics'
         },

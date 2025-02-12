@@ -1,142 +1,96 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://10.101.168.97:8001';
+const API_BASE_URL = import.meta.env.REACT_APP_API_BASE_URL || 'http://10.101.168.97:8001';
+const MAX_RETRIES = 3;
 
-export const anomalyService = {
-  startAnomaly: async (anomalyType, collectTrainingData = false) => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/api/anomaly/inject`, {
-        type: anomalyType,
-        collect_training_data: collectTrainingData
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Error injecting anomaly:', error);
-      throw error;
-    }
-  },
-
-  stopAnomaly: async (anomalyType, collectTrainingData = false) => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/api/anomaly/clear`, {
-        type: anomalyType,
-        collect_training_data: collectTrainingData
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Error clearing anomaly:', error);
-      throw error;
-    }
-  },
-
-  stopAllAnomalies: async () => {
-    try {
-      // Get active anomalies first
-      const activeAnomalies = await anomalyService.getActiveAnomalies();
-      // Clear each anomaly
-      await Promise.all(activeAnomalies.map(anomaly => 
-        anomalyService.stopAnomaly(anomaly.type)
-      ));
-      return { status: 'success', message: 'All anomalies cleared' };
-    } catch (error) {
-      console.error('Error clearing all anomalies:', error);
-      throw error;
-    }
-  },
-
-  getActiveAnomalies: async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/api/anomaly/active`);
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching active anomalies:', error);
-      throw error;
-    }
-  },
-
-  getMetrics: async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/api/metrics`);
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching metrics:', error);
-      throw error;
-    }
-  },
-
-  getAnomalyRanks: async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/api/anomaly/ranks`);
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching anomaly ranks:', error);
-      throw error;
-    }
-  },
-
-  startNormalCollection: async () => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/api/anomaly/normal/start`);
-      return response.data;
-    } catch (error) {
-      console.error('Error starting normal state collection:', error);
-      throw error;
-    }
-  },
-
-  stopNormalCollection: async () => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/api/anomaly/normal/stop`);
-      return response.data;
-    } catch (error) {
-      console.error('Error stopping normal state collection:', error);
-      throw error;
-    }
-  },
-
-  getTrainingStats: async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/api/anomaly/training/stats`);
-      const stats = response.data;
-      
-      // Calculate additional metrics
-      const total = stats.stats.normal + stats.stats.anomaly;
-      stats.total_samples = total;
-      stats.normal_ratio = total > 0 ? stats.stats.normal / total : 0;
-      stats.anomaly_ratio = total > 0 ? stats.stats.anomaly / total : 0;
-      
-      // Calculate anomaly type percentages
-      stats.anomaly_type_percentages = {};
-      if (stats.stats.anomaly > 0) {
-        Object.entries(stats.stats.anomaly_types).forEach(([type, count]) => {
-          stats.anomaly_type_percentages[type] = count / stats.stats.anomaly;
+class AnomalyService {
+    constructor() {
+        this.client = axios.create({
+            baseURL: API_BASE_URL,
+            timeout: 30000, // 30s timeout
         });
-      }
-      
-      return stats;
-    } catch (error) {
-      console.error('Error fetching training stats:', error);
-      throw error;
+        
+        // Add response interceptor for error handling
+        this.client.interceptors.response.use(
+            response => response.data,
+            error => this._handleError(error)
+        );
     }
-  },
 
-  trainModel: async () => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/api/anomaly/train`);
-      return response.data;
-    } catch (error) {
-      console.error('Error training model:', error);
-      throw error;
+    async _handleError(error) {
+        if (error.response) {
+            // Server responded with error
+            throw new Error(error.response.data.detail || 'Server error');
+        } else if (error.request) {
+            // Request made but no response
+            throw new Error('No response from server');
+        } else {
+            // Request setup error
+            throw new Error('Failed to make request');
+        }
     }
-  },
 
-  autoBalanceDataset: async () => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/api/anomaly/training/auto_balance`);
-      return response.data;
-    } catch (error) {
-      console.error('Error starting auto-balance:', error);
-      throw error;
+    async _retryableRequest(request, retries = 0) {
+        try {
+            return await request();
+        } catch (error) {
+            if (retries < MAX_RETRIES) {
+                // Exponential backoff
+                const delay = Math.min(1000 * Math.pow(2, retries), 10000);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                return this._retryableRequest(request, retries + 1);
+            }
+            throw error;
+        }
     }
-  }
-}; 
+
+    async getActiveAnomalies() {
+        return this._retryableRequest(() => 
+            this.client.get('/api/anomaly/active')
+        );
+    }
+
+    async startAnomaly(type, params = {}) {
+        return this._retryableRequest(() => 
+            this.client.post(`/api/anomaly/${type}/start`, params)
+        );
+    }
+
+    async stopAnomaly(type) {
+        return this._retryableRequest(() => 
+            this.client.post(`/api/anomaly/${type}/stop`)
+        );
+    }
+
+    async stopAllAnomalies() {
+        return this._retryableRequest(() => 
+            this.client.post('/api/anomaly/stop-all')
+        );
+    }
+
+    async getTrainingStats() {
+        return this._retryableRequest(() => 
+            this.client.get('/api/anomaly/training/stats')
+        );
+    }
+
+    async startTrainingDataCollection() {
+        return this._retryableRequest(() => 
+            this.client.post('/api/anomaly/training/start')
+        );
+    }
+
+    async stopTrainingDataCollection() {
+        return this._retryableRequest(() => 
+            this.client.post('/api/anomaly/training/stop')
+        );
+    }
+
+    async getAnomalyRanks() {
+        return this._retryableRequest(() => 
+            this.client.get('/api/anomaly/ranks')
+        );
+    }
+}
+
+export const anomalyService = new AnomalyService(); 
