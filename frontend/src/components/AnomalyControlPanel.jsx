@@ -156,7 +156,9 @@ const AnomalyControlPanel = () => {
     useEffect(() => {
         const fetchAnomalies = async () => {
             try {
+                const startTime = Date.now();
                 const anomalies = await anomalyService.getActiveAnomalies();
+                console.log("fetching active anomalies costs time: ", Date.now() - startTime);
                 setActiveAnomalies(anomalies);
             } catch (err) {
                 message.error(err.message || 'Failed to fetch active anomalies');
@@ -175,7 +177,9 @@ const AnomalyControlPanel = () => {
 
     const fetchTrainingStats = async () => {
         try {
+            const startTime = Date.now();
             const stats = await anomalyService.getTrainingStats();
+            console.log("fetching training stats costs time: ", Date.now() - startTime);
             setTrainingStats(stats);
         } catch (error) {
             console.error('Error fetching training stats:', error);
