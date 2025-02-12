@@ -247,6 +247,15 @@ class TrainingService:
                 if os.path.exists(case_dir):
                     shutil.rmtree(case_dir)
                 shutil.move(temp_dir, case_dir)
+
+                # Save metadata for normal case
+                self._save_case_metadata(
+                    case_dir,
+                    0,  # No pre-anomaly for normal case
+                    len(self.normal_state_buffer),  # All samples are normal
+                    0,  # No post-anomaly for normal case
+                    "normal"  # Explicitly mark as normal
+                )
                     
                 logger.info(f"Successfully saved normal state data:")
                 logger.info(f"  - Metrics file: {metrics_file} ({os.path.getsize(metrics_file)} bytes)")
@@ -309,6 +318,23 @@ class TrainingService:
                 self._clear_collection_state()
                 raise
                 
+    def _save_case_metadata(self, case_path: str, pre_anomaly_count: int, anomaly_count: int, post_anomaly_count: int, anomaly_type: str) -> None:
+        """Save case metadata for faster stats computation"""
+        is_normal = anomaly_type == "normal"
+        metadata = {
+            "counts": {
+                "normal": pre_anomaly_count + post_anomaly_count if not is_normal else anomaly_count,
+                "anomaly": anomaly_count if not is_normal else 0
+            },
+            "type": "normal" if is_normal else "anomaly",
+            "anomaly_type": "normal" if is_normal else anomaly_type.replace("_stress", "").replace("network_delay", "network"),
+            "timestamp": datetime.now().isoformat()
+        }
+        metadata_path = os.path.join(case_path, "metadata.json")
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f)
+            logger.debug(f"Saved metadata for case {case_path}: {metadata}")
+
     def _finalize_collection(self, temp_dir: str, case_dir: str):
         """Finalize collection by saving all data"""
         with self._lock:
@@ -357,6 +383,15 @@ class TrainingService:
                 if os.path.exists(case_dir):
                     shutil.rmtree(case_dir)
                 shutil.move(temp_dir, case_dir)
+                
+                # Save metadata for faster stats computation
+                self._save_case_metadata(
+                    case_dir,
+                    len(self.pre_anomaly_buffer),
+                    len(self.metrics_buffer),
+                    len(self.post_anomaly_buffer),
+                    self.current_anomaly["type"] or "unknown"
+                )
                 
                 logger.info(f"Successfully saved all data for {self.current_case}:")
                 logger.info(f"  - Pre-anomaly samples: {len(self.pre_anomaly_buffer)}")
@@ -476,20 +511,43 @@ class TrainingService:
 
     @alru_cache(maxsize=1, ttl=60)
     async def get_dataset_stats(self) -> Dict[str, int]:
-        """Get dataset statistics with async-computed cache"""
+        """Get dataset statistics with optimized async computation"""
         async with self._request_lock:
             now = time.time()
+            
+            # Return cached results for frequent requests
             if now - self._last_request_time < 5:  # 5s coalescing window
-                return self._stats_cache
+                if self._stats_cache:
+                    return self._stats_cache
+            
             self._last_request_time = now
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                self._stats_executor,
-                self._compute_dataset_stats
-            )
-    
+
+            # Use background task for computation
+            try:
+                loop = asyncio.get_event_loop()
+                stats = await asyncio.wait_for(
+                    loop.run_in_executor(self._stats_executor, self._compute_dataset_stats),
+                    timeout=20  # 20s timeout
+                )
+                return stats
+            except asyncio.TimeoutError:
+                logger.warning("Stats computation timed out, returning cached data")
+                return self._stats_cache or {
+                    "normal": 0,
+                    "anomaly": 0,
+                    "anomaly_types": {},
+                    "total_samples": 0,
+                    "normal_ratio": 0,
+                    "anomaly_ratio": 0,
+                    "is_balanced": False,
+                    "error": "Computation timed out"
+                }
+            except Exception as e:
+                logger.error(f"Error computing stats: {str(e)}")
+                raise
+
     def _compute_dataset_stats(self):
-        """Get statistics about the collected training data with caching"""
+        """Get statistics about the collected training data with optimized caching"""
         if not self._should_update_stats_cache():
             logger.debug("Returning cached stats")
             return self._stats_cache
@@ -497,15 +555,13 @@ class TrainingService:
         logger.info("Calculating fresh dataset statistics")
         with self._lock:
             stats = {
-                "normal": self.normal_samples,
-                "anomaly": self.anomaly_samples,
-                "anomaly_types": {
-                    "cpu": 0,
-                    "memory": 0,
-                    "io": 0,
-                    "network": 0,
-                    "unknown": 0
-                }
+                "normal": 0,
+                "anomaly": 0,
+                "anomaly_types": defaultdict(int),
+                "total_samples": 0,
+                "normal_ratio": 0,
+                "anomaly_ratio": 0,
+                "is_balanced": False
             }
             
             if not os.path.exists(self.data_dir):
@@ -513,88 +569,120 @@ class TrainingService:
                 self._last_stats_update = time.time()
                 return stats
 
-            # Parallel processing with timeout
+            # Process in smaller batches to avoid memory issues
+            case_dirs = [d for d in os.listdir(self.data_dir) if os.path.isdir(os.path.join(self.data_dir, d))]
+            batch_size = 50  # Process 50 cases at a time
             case_stats = []
-            futures = []
-            with ThreadPoolExecutor(max_workers=32) as executor:
-                for case_dir in os.listdir(self.data_dir):
-                    case_path = os.path.join(self.data_dir, case_dir)
-                    if not os.path.isdir(case_path):
-                        continue
-                        
-                    futures.append(
-                        executor.submit(self._process_case_stats, case_path)
-                    )
 
-                for future in concurrent.futures.as_completed(futures, timeout=15):
-                    try:
-                        case_stat = future.result()
-                        if case_stat:
-                            case_stats.append(case_stat)
-                    except Exception as e:
-                        logger.warning(f"Skipping case due to error: {str(e)}")
+            for i in range(0, len(case_dirs), batch_size):
+                batch = case_dirs[i:i + batch_size]
+                futures = []
+
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    for case_dir in batch:
+                        case_path = os.path.join(self.data_dir, case_dir)
+                        futures.append(
+                            executor.submit(self._process_case_stats, case_path)
+                        )
+
+                    for future in concurrent.futures.as_completed(futures, timeout=10):
+                        try:
+                            case_stat = future.result()
+                            if case_stat:
+                                case_stats.append(case_stat)
+                        except Exception as e:
+                            logger.warning(f"Error processing case batch: {str(e)}")
 
             # Aggregate stats from all cases
             for case_stat in case_stats:
                 stats["normal"] += case_stat["normal"]
                 stats["anomaly"] += case_stat["anomaly"]
-                for anomaly_type, count in case_stat["anomaly_types"].items():
+                for anomaly_type, count in case_stat.get("anomaly_types", {}).items():
                     stats["anomaly_types"][anomaly_type] += count
 
-            # Calculate ratios
+            # Calculate ratios and balance
             total = stats["normal"] + stats["anomaly"]
+            stats["total_samples"] = total
+            
             if total > 0:
                 stats["normal_ratio"] = stats["normal"] / total
                 stats["anomaly_ratio"] = stats["anomaly"] / total
                 stats["is_balanced"] = abs(stats["normal_ratio"] - stats["anomaly_ratio"]) <= self.balance_threshold
-            else:
-                stats["normal_ratio"] = 0
-                stats["anomaly_ratio"] = 0
-                stats["is_balanced"] = False
 
-            # Update cache
+            # Update cache with timestamp
+            stats["last_updated"] = time.time()
             self._stats_cache = stats
             self._last_stats_update = time.time()
             logger.info(f"Updated dataset statistics cache: {stats}")
             return stats
 
     def _process_case_stats(self, case_path: str) -> Optional[Dict]:
-        """Process case statistics with optimized file reading"""
+        """Process case statistics with metadata optimization"""
         try:
+            # Try to use metadata file first
+            metadata_path = os.path.join(case_path, "metadata.json")
+            if os.path.exists(metadata_path):
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
+                    if metadata.get("type") == "normal":
+                        return {
+                            "normal": metadata["counts"]["normal"],
+                            "anomaly": 0,
+                            "anomaly_types": {}
+                        }
+                    return {
+                        "normal": metadata["counts"]["normal"],
+                        "anomaly": metadata["counts"]["anomaly"],
+                        "anomaly_types": {
+                            metadata["anomaly_type"]: metadata["counts"]["anomaly"]
+                        }
+                    }
+
+            # Fall back to original processing if no metadata
             case_stat = {
                 "normal": 0,
                 "anomaly": 0,
                 "anomaly_types": defaultdict(int)
             }
 
-            # Process metrics files with streaming for large files
+            # First check if this is a normal case by reading label.json
+            label_file = os.path.join(case_path, "label.json")
+            is_normal_case = False
+            if os.path.exists(label_file):
+                with open(label_file) as f:
+                    label_data = json.load(f)
+                    is_normal_case = label_data.get("type") == "normal"
+
+            # Process metrics files with optimized reading
             for prefix in ["", "pre_anomaly_", "post_anomaly_"]:
                 metrics_file = os.path.join(case_path, f"{prefix}metrics.json")
                 if not os.path.exists(metrics_file):
                     continue
-                    
+
+                # Use line counting for large files
                 file_size = os.path.getsize(metrics_file)
                 if file_size > 10_000_000:  # 10MB threshold
-                    with open(metrics_file, "rb") as f:
+                    count = 0
+                    with open(metrics_file, 'rb') as f:
                         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-                        for _ in ijson.items(mm, 'item'):
-                            if prefix:
-                                case_stat["normal"] += 1
-                            else:
-                                case_stat["anomaly"] += 1
+                        for line in iter(mm.readline, b''):
+                            if b'{' in line:
+                                count += 1
                         mm.close()
+                    count = count // 2  # Adjust for JSON array structure
                 else:
                     with open(metrics_file) as f:
                         data = json.load(f)
                         count = len(data) if isinstance(data, list) else 1
-                        if prefix:
-                            case_stat["normal"] += count
-                        else:
-                            case_stat["anomaly"] += count
 
-            # Process label data
-            label_file = os.path.join(case_path, "label.json")
-            if os.path.exists(label_file):
+                # For normal cases, all samples are normal regardless of prefix
+                if is_normal_case or prefix:
+                    case_stat["normal"] += count
+                else:
+                    case_stat["anomaly"] += count
+
+            # Process label data for anomaly type if not a normal case
+            if not is_normal_case and os.path.exists(label_file):
                 with open(label_file) as f:
                     label_data = json.load(f)
                     anomaly_type = label_data.get("type", "unknown")
@@ -603,6 +691,24 @@ class TrainingService:
                         base_type = "network"
                     if base_type in ["cpu", "memory", "io", "network", "unknown"]:
                         case_stat["anomaly_types"][base_type] = case_stat["anomaly"]
+
+            # Save metadata for future use
+            if is_normal_case:
+                self._save_case_metadata(
+                    case_path,
+                    0,  # No pre-anomaly for normal case
+                    case_stat["normal"],  # All samples are normal
+                    0,  # No post-anomaly for normal case
+                    "normal"  # Explicitly mark as normal
+                )
+            else:
+                self._save_case_metadata(
+                    case_path,
+                    case_stat["normal"] // 2,  # Split between pre and post
+                    case_stat["anomaly"],
+                    case_stat["normal"] // 2,
+                    list(case_stat["anomaly_types"].keys())[0] if case_stat["anomaly_types"] else "unknown"
+                )
 
             return case_stat
         except Exception as e:

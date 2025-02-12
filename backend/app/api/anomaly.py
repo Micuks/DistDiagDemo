@@ -215,18 +215,21 @@ async def get_training_stats():
                     "Access-Control-Allow-Credentials": "true",
                 }
             )
-            
-        is_balanced = training_service.is_dataset_balanced()
-        total = stats.get("normal", 0) + stats.get("anomaly", 0)
-        
+
+        # Use the stats directly from the service without modification
         response = {
             "status": "success",
-            "stats": stats,
-            "is_balanced": is_balanced,
-            "total_samples": total,
-            "normal_ratio": stats.get("normal", 0) / total if total > 0 else 0,
-            "anomaly_ratio": stats.get("anomaly", 0) / total if total > 0 else 0
+            "stats": {
+                "normal": stats["normal"],  # Use direct access instead of .get()
+                "anomaly": stats["anomaly"],
+                "anomaly_types": stats["anomaly_types"],
+                "total_samples": stats["total_samples"],
+                "normal_ratio": stats["normal_ratio"],
+                "anomaly_ratio": stats["anomaly_ratio"],
+                "is_balanced": stats["is_balanced"]
+            }
         }
+        
         return JSONResponse(
             content=jsonable_encoder(response),
             headers={

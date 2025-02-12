@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin } from 'antd';
+import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message } from 'antd';
 import { anomalyService } from '../services/anomalyService';
 
 const ModelTrainingPanel = () => {
@@ -39,8 +39,8 @@ const ModelTrainingPanel = () => {
 
     const fetchTrainingStats = async () => {
         try {
-            const stats = await anomalyService.getTrainingStats();
-            setTrainingStats(stats);
+            const response = await anomalyService.getTrainingStats();
+            setTrainingStats(response.stats);  // Store just the stats object
         } catch (error) {
             console.error('Failed to fetch training stats:', error);
         }
@@ -90,13 +90,13 @@ const ModelTrainingPanel = () => {
                                     <Col span={8}>
                                         <Statistic
                                             title="Normal Samples"
-                                            value={trainingStats.normal_samples}
+                                            value={trainingStats.normal}
                                         />
                                     </Col>
                                     <Col span={8}>
                                         <Statistic
                                             title="Anomaly Samples"
-                                            value={trainingStats.anomaly_samples}
+                                            value={trainingStats.anomaly}
                                         />
                                     </Col>
                                     <Col span={8}>
@@ -108,8 +108,8 @@ const ModelTrainingPanel = () => {
                                 </Row>
                                 <Divider />
                                 <Progress
-                                    percent={Math.round((trainingStats.normal_samples / trainingStats.total_samples) * 100)}
-                                    success={{ percent: Math.round((trainingStats.anomaly_samples / trainingStats.total_samples) * 100) }}
+                                    percent={Math.round(trainingStats.normal_ratio * 100)}
+                                    success={{ percent: Math.round(trainingStats.anomaly_ratio * 100) }}
                                     format={() => 'Data Distribution'}
                                 />
                                 {trainingStats.is_balanced ? (

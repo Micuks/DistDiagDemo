@@ -12,6 +12,8 @@ from fastapi_cache.backends.redis import RedisBackend
 from redis import asyncio as aioredis
 from fastapi_cache.coder import JsonCoder
 import logging
+import json
+from typing import Union, Any
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,10 +24,18 @@ setup_logging()
 # Initialize logger
 logger = logging.getLogger(__name__)
 
+# Custom JsonCoder that handles both bytes and strings
+class SafeJsonCoder(JsonCoder):
+    @classmethod
+    def decode(cls, value: Union[str, bytes]) -> Any:
+        if isinstance(value, bytes):
+            return json.loads(value.decode())
+        return json.loads(value)
+
 # Initialize Redis with connection test
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost')
 try:
-    redis = aioredis.from_url(REDIS_URL, encoding="utf8", decode_responses=True)
+    redis = aioredis.from_url(REDIS_URL, encoding="utf8")
     # Test connection
     # await redis.ping()
 except Exception as e:
@@ -34,7 +44,7 @@ except Exception as e:
     FastAPICache.init(RedisBackend(None), prefix="dummy-cache")  # Prevent cache errors
 
 # Initialize FastAPI Cache BEFORE creating the app
-FastAPICache.init(RedisBackend(redis), prefix="fastapi-cache")
+FastAPICache.init(RedisBackend(redis), prefix="fastapi-cache", coder=SafeJsonCoder)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,7 +57,7 @@ async def lifespan(app: FastAPI):
                 RedisBackend(redis),
                 prefix="fastapi-cache",
                 key_builder=None,
-                coder=JsonCoder
+                coder=SafeJsonCoder
             )
             logger.info("FastAPI cache initialized with Redis backend")
         else:
