@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message } from 'antd';
 import { anomalyService } from '../services/anomalyService';
+import { useAnomalyData } from '../hooks/useAnomalyData';
 
 const ModelTrainingPanel = () => {
     const [loading, setLoading] = useState(false);
@@ -8,15 +9,74 @@ const ModelTrainingPanel = () => {
     const [isCollectingNormal, setIsCollectingNormal] = useState(false);
     const [trainingStats, setTrainingStats] = useState(null);
     const [isAutoBalancing, setIsAutoBalancing] = useState(false);
+    const { data: activeAnomalies = [] } = useAnomalyData();
+    const [collectionStatus, setCollectionStatus] = useState({
+        isCollecting: false,
+        currentType: null
+    });
 
-    const handleNormalCollection = async () => {
+    // Fetch collection status periodically
+    useEffect(() => {
+        const fetchStatus = async () => {
+            try {
+                const status = await anomalyService.getCollectionStatus();
+                setCollectionStatus({
+                    isCollecting: status.is_collecting_normal || status.is_collecting_anomaly,
+                    currentType: status.current_type
+                });
+            } catch (error) {
+                console.error('Failed to fetch collection status:', error);
+            }
+        };
+        
+        fetchStatus();
+        const interval = setInterval(fetchStatus, 5000);
+        return () => clearInterval(interval);
+    }, []);
+
+    // Fetch training stats periodically
+    useEffect(() => {
+        fetchTrainingStats();
+        const interval = setInterval(fetchTrainingStats, 5000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const handleCollectionToggle = async () => {
         try {
             setLoading(true);
-            await anomalyService.toggleNormalCollection(!isCollectingNormal);
-            setIsCollectingNormal(!isCollectingNormal);
-            message.success(`${!isCollectingNormal ? 'Started' : 'Stopped'} collecting normal data`);
+            if (collectionStatus.isCollecting) {
+                // Stop collection based on current type
+                if (collectionStatus.currentType === 'normal') {
+                    await anomalyService.stopNormalCollection();
+                } else {
+                    // For anomaly, stop collection on the active anomaly
+                    const activeAnomaly = activeAnomalies[0];
+                    if (activeAnomaly) {
+                        await anomalyService.stopAnomaly(activeAnomaly.type);
+                    }
+                }
+            } else {
+                // Start collection based on presence of anomalies
+                if (activeAnomalies.length > 0) {
+                    const activeAnomaly = activeAnomalies[0];
+                    await anomalyService.startAnomaly(activeAnomaly.type, {
+                        node: activeAnomaly.node,
+                        collect_training_data: true
+                    });
+                } else {
+                    await anomalyService.startNormalCollection();
+                }
+            }
+            
+            // Refresh status after toggle
+            const newStatus = await anomalyService.getCollectionStatus();
+            setCollectionStatus({
+                isCollecting: newStatus.is_collecting_normal || newStatus.is_collecting_anomaly,
+                currentType: newStatus.current_type
+            });
+            message.success(`${collectionStatus.isCollecting ? 'Stopped' : 'Started'} data collection`);
         } catch (error) {
-            message.error('Failed to toggle normal data collection');
+            message.error('Failed to toggle data collection');
             console.error(error);
         } finally {
             setLoading(false);
@@ -46,12 +106,6 @@ const ModelTrainingPanel = () => {
         }
     };
 
-    useEffect(() => {
-        fetchTrainingStats();
-        const interval = setInterval(fetchTrainingStats, 5000);
-        return () => clearInterval(interval);
-    }, []);
-
     return (
         <div>
             <Row gutter={[16, 16]}>
@@ -60,11 +114,16 @@ const ModelTrainingPanel = () => {
                         <Space direction="vertical" style={{ width: '100%' }}>
                             <div>
                                 <Switch
-                                    checked={isCollectingNormal}
-                                    onChange={handleNormalCollection}
+                                    checked={collectionStatus.isCollecting}
+                                    onChange={handleCollectionToggle}
                                     loading={loading}
+                                    disabled={loading}
                                 />
-                                <span style={{ marginLeft: 8 }}>Collect Normal Data</span>
+                                <span style={{ marginLeft: 8 }}>
+                                    {collectionStatus.isCollecting 
+                                        ? `Collecting ${collectionStatus.currentType} data` 
+                                        : 'Start data collection'}
+                                </span>
                             </div>
                             <div>
                                 <Switch

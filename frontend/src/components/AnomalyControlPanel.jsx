@@ -67,9 +67,9 @@ const AnomalyControlPanel = () => {
     };
 
     const handleAnomalyToggle = async (anomalyType) => {
+        let isActive = isAnomalyActive(anomalyType);
         try {
             setLoading(true);
-            const isActive = isAnomalyActive(anomalyType);
             if (isActive) {
                 await anomalyService.stopAnomaly(anomalyType);
                 message.success(`Stopped ${anomalyType} anomaly`);
@@ -79,7 +79,7 @@ const AnomalyControlPanel = () => {
             }
             refetch();
         } catch (error) {
-            message.error(`Failed to ${isActive ? 'stop' : 'start'} anomaly`);
+            message.error(`Failed to ${isActive ? 'stop' : 'start'} anomaly: ${error.message}`);
             console.error(error);
         } finally {
             setLoading(false);

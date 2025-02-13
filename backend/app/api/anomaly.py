@@ -45,6 +45,26 @@ async def retry_with_backoff(func, max_retries=3, initial_delay=1):
     
     raise last_exception
 
+async def clear_caches():
+    """Clear all caches including Redis and K8s service caches"""
+    try:
+        # Get the Redis backend from FastAPICache
+        backend = FastAPICache.get_backend()
+        if backend and hasattr(backend, '_redis'):
+            # Clear all keys with our prefix
+            redis = backend._redis
+            if redis:
+                keys = await redis.keys(f"{FastAPICache.get_prefix()}*")
+                if keys:
+                    await redis.delete(*keys)
+                logger.debug("Cleared Redis cache")
+    except Exception as e:
+        logger.warning(f"Failed to clear Redis cache: {str(e)}")
+    
+    # Clear K8s service cache
+    k8s_service.invalidate_cache()
+    logger.debug("Cleared K8s service cache")
+
 class AnomalyRequest(BaseModel):
     type: str
     node: Optional[str] = None
@@ -54,8 +74,8 @@ class AnomalyRequest(BaseModel):
 async def inject_anomaly(request: AnomalyRequest):
     """Inject an anomaly into the OceanBase cluster"""
     try:
-        # Clear cache for active anomalies
-        FastAPICache.clear_all()
+        # Clear all caches
+        await clear_caches()
         
         # Inject the anomaly
         await retry_with_backoff(
@@ -79,8 +99,8 @@ async def inject_anomaly(request: AnomalyRequest):
 async def clear_anomaly(request: AnomalyRequest):
     """Clear an anomaly from the OceanBase cluster"""
     try:
-        # Clear cache for active anomalies
-        FastAPICache.clear_all()
+        # Clear all caches
+        await clear_caches()
         
         # Clear the anomaly first
         await retry_with_backoff(
@@ -195,6 +215,34 @@ async def stop_normal_collection():
     except Exception as e:
         logger.error(f"Failed to stop normal state collection: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/collection-status")
+async def get_collection_status():
+    """Get current data collection status"""
+    try:
+        is_normal = training_service.is_collecting_normal and not training_service.current_anomaly
+        is_anomaly = training_service.current_anomaly is not None
+        return JSONResponse(
+            content={
+                "is_collecting_normal": is_normal,
+                "is_collecting_anomaly": is_anomaly,
+                "current_type": "normal" if is_normal else "anomaly" if is_anomaly else None
+            },
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to get collection status: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
 
 @router.get("/training/stats")
 async def get_training_stats():

@@ -52,9 +52,7 @@ export const workloadService = {
 
   getActiveWorkloads: async () => {
     try {
-      const startTime = Date.now();
       const response = await axios.get(`${API_BASE_URL}/api/workload/active`);
-      console.log("Fetching active workloads costs time: ", Date.now() - startTime);
       const workloads = response.data || [];
       
       // Extract system metrics from the first workload if available

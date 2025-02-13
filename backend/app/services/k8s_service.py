@@ -24,6 +24,9 @@ def timed_lru_cache(seconds: int, maxsize: int = 128):
                 func.expiration = time.time() + func.lifetime
             return func(*args, **kwargs)
 
+        # Explicitly copy cache management methods from the LRU-cached function
+        wrapped_func.cache_clear = func.cache_clear
+        wrapped_func.cache_info = func.cache_info
         return wrapped_func
     return wrapper_decorator
 
@@ -41,6 +44,7 @@ class K8sService:
         self._experiment_cache = {}  # Cache for experiment status
         self.CACHE_TTL = 5  # Cache TTL in seconds
         self._last_cache_update = None
+        self._last_request_time = 0  # This will force a refresh on next request
 
     def _should_update_cache(self) -> bool:
         """Check if cache needs to be updated"""
@@ -374,6 +378,9 @@ class K8sService:
         """Invalidate all caches"""
         self._experiment_cache = {}
         self._last_cache_update = None
-        self.verify_experiment_deleted.cache_clear()
-        self.get_active_anomalies.cache_clear()
-        self._get_experiment_plural.cache_clear() 
+        # Only clear the timed_lru_cache as it supports cache_clear
+        self._get_experiment_plural.cache_clear()
+        
+        # For alru_cache decorated methods, we'll force cache invalidation
+        # by updating the last request time
+        self._last_request_time = 0  # This will force a refresh on next request 

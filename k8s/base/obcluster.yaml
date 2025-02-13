@@ -27,22 +27,9 @@ spec:
       value: "2"
   observer:
     image: oceanbase/oceanbase-cloud-native:4.2.5.1-101000092024120918
-    command:
-      - /bin/bash
-      - -c
-      - |
-        # Install tsar
-        apt-get update && \
-        apt-get install -y git build-essential libpcre3-dev && \
-        cd /tmp && \
-        git clone https://github.com/alibaba/tsar.git && \
-        cd tsar && \
-        make && \
-        make install && \
-        chmod -R 755 /usr/local/bin/tsar /usr/local/tsar /etc/tsar
     resource:
       cpu: 2
-      memory: 16Gi
+      memory: 10Gi
     storage:
       dataStorage:
         storageClass: local-path
@@ -53,13 +40,6 @@ spec:
       logStorage:
         storageClass: local-path
         size: 20Gi
-      extraVolumes:
-        - name: tsar-tools
-          persistentVolumeClaim:
-            claimName: tsar-tools-pvc
-      extraVolumeMounts:
-        - name: tsar-tools
-          mountPath: /shared
   monitor:
     image: oceanbase/obagent:4.2.2-100000042024011120
     resource:

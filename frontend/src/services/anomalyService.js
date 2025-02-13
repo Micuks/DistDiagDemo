@@ -52,20 +52,31 @@ class AnomalyService {
 
     async startAnomaly(type, params = {}) {
         return this._retryableRequest(() => 
-            this.client.post(`/api/anomaly/${type}/start`, params)
+            this.client.post('/api/anomaly/inject', {
+                type: type,
+                node: params.node || null,
+                collect_training_data: params.collect_training_data || false
+            })
         );
     }
 
     async stopAnomaly(type) {
         return this._retryableRequest(() => 
-            this.client.post(`/api/anomaly/${type}/stop`)
+            this.client.post('/api/anomaly/clear', {
+                type: type,
+                collect_training_data: false
+            })
         );
     }
 
     async stopAllAnomalies() {
-        return this._retryableRequest(() => 
-            this.client.post('/api/anomaly/stop-all')
-        );
+        // Get active anomalies first
+        const activeAnomalies = await this.getActiveAnomalies();
+        // Stop each anomaly
+        for (const anomaly of activeAnomalies) {
+            await this.stopAnomaly(anomaly.type);
+        }
+        return { status: "success", message: "All anomalies stopped" };
     }
 
     async getTrainingStats() {
@@ -89,6 +100,24 @@ class AnomalyService {
     async getAnomalyRanks() {
         return this._retryableRequest(() => 
             this.client.get('/api/anomaly/ranks')
+        );
+    }
+
+    async getCollectionStatus() {
+        return this._retryableRequest(() => 
+            this.client.get('/api/anomaly/collection-status')
+        );
+    }
+
+    async startNormalCollection() {
+        return this._retryableRequest(() => 
+            this.client.post('/api/anomaly/normal/start')
+        );
+    }
+
+    async stopNormalCollection() {
+        return this._retryableRequest(() => 
+            this.client.post('/api/anomaly/normal/stop')
         );
     }
 }

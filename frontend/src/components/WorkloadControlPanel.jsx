@@ -54,10 +54,10 @@ const WorkloadControlPanel = () => {
         },
     ];
 
-    const handleStartWorkload = async (workloadType) => {
+    const handleStartWorkload = async (workloadType, threads = 4) => {
         try {
             setLoading(true);
-            await workloadService.startWorkload(workloadType);
+            await workloadService.startWorkload(workloadType, threads);
             message.success(`Started ${workloadType} workload`);
             await fetchActiveWorkloads();
         } catch (err) {
