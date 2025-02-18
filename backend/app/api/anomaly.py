@@ -69,6 +69,9 @@ class AnomalyRequest(BaseModel):
     type: str
     node: Optional[str] = None
     collect_training_data: Optional[bool] = False
+    pre_collect: Optional[bool] = True
+    post_collect: Optional[bool] = True
+    save_post_data: Optional[bool] = True
 
 @router.post("/inject")
 async def inject_anomaly(request: AnomalyRequest):
@@ -77,22 +80,52 @@ async def inject_anomaly(request: AnomalyRequest):
         # Clear all caches
         await clear_caches()
         
-        # Inject the anomaly
-        await retry_with_backoff(
-            lambda: k8s_service.apply_chaos_experiment(request.type)
-        )
-        
-        # Start collecting training data if requested
+        # Start collecting training data first if requested
+        # This ensures data collection is ready before the anomaly is injected
         if request.collect_training_data:
-            training_service.start_collection(request.type, request.node)
-            logger.info(f"Started collecting training data for {request.type} anomaly on {request.node}")
+            try:
+                await training_service.start_collection(
+                    request.type, 
+                    request.node,
+                    pre_collect=request.pre_collect,
+                    post_collect=request.post_collect
+                )
+                logger.info(f"Started collecting training data for {request.type} anomaly on {request.node}")
+            except Exception as e:
+                logger.error(f"Failed to start data collection: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to start data collection: {str(e)}"
+                )
+        
+        # Inject the anomaly
+        try:
+            await retry_with_backoff(
+                lambda: k8s_service.apply_chaos_experiment(request.type)
+            )
+            logger.info(f"Successfully injected {request.type} anomaly")
+        except Exception as e:
+            # If anomaly injection fails and we started collection, stop it
+            if request.collect_training_data:
+                try:
+                    training_service.stop_collection()
+                except Exception as stop_error:
+                    logger.error(f"Failed to stop collection after failed injection: {str(stop_error)}")
+            
+            logger.error(f"Failed to inject anomaly: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to inject anomaly: {str(e)}"
+            )
             
         return {
             "status": "success", 
             "message": f"Injected {request.type} anomaly into node {request.node}"
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to inject anomaly: {str(e)}")
+        logger.error(f"Unexpected error in inject_anomaly: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/clear")
@@ -108,9 +141,8 @@ async def clear_anomaly(request: AnomalyRequest):
         )
         
         # Stop collecting training data if it was being collected
-        # This will automatically start post-anomaly data collection
         if request.collect_training_data:
-            training_service.stop_collection()
+            training_service.stop_anomaly_collection(save_post_data=request.save_post_data)
             logger.info(f"Stopped collecting training data for {request.type} anomaly on {request.node}")
             
         return {
@@ -200,7 +232,7 @@ async def train_model():
 async def start_normal_collection():
     """Start collecting normal state data"""
     try:
-        training_service.start_normal_collection()
+        await training_service.start_normal_collection()
         return {"status": "success", "message": "Started normal state data collection"}
     except Exception as e:
         logger.error(f"Failed to start normal state collection: {str(e)}")
@@ -210,7 +242,7 @@ async def start_normal_collection():
 async def stop_normal_collection():
     """Stop collecting normal state data"""
     try:
-        training_service.stop_normal_collection()
+        await training_service.stop_normal_collection()
         return {"status": "success", "message": "Stopped normal state data collection"}
     except Exception as e:
         logger.error(f"Failed to stop normal state collection: {str(e)}")
@@ -220,14 +252,25 @@ async def stop_normal_collection():
 async def get_collection_status():
     """Get current data collection status"""
     try:
-        is_normal = training_service.is_collecting_normal and not training_service.current_anomaly
-        is_anomaly = training_service.current_anomaly is not None
-        return JSONResponse(
-            content={
+        async with training_service._lock:  # Use async lock to ensure atomic access
+            is_normal = training_service.is_collecting_normal and not training_service.current_anomaly
+            is_anomaly = training_service.current_anomaly is not None
+            
+            status = {
                 "is_collecting_normal": is_normal,
                 "is_collecting_anomaly": is_anomaly,
-                "current_type": "normal" if is_normal else "anomaly" if is_anomaly else None
-            },
+                "current_type": "normal" if is_normal else training_service.current_anomaly["type"] if is_anomaly else None,
+                "collection_options": {
+                    "pre_collect": training_service.current_anomaly.get("pre_collect", True) if is_anomaly else False,
+                    "post_collect": training_service.current_anomaly.get("post_collect", True) if is_anomaly else False
+                } if is_anomaly else None,
+                "collection_phase": "pre_anomaly" if is_anomaly and training_service.is_collecting_normal else
+                                  "anomaly" if is_anomaly else
+                                  "normal" if is_normal else None
+            }
+        
+        return JSONResponse(
+            content=status,
             headers={
                 "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
@@ -300,8 +343,8 @@ async def get_training_stats():
 async def auto_balance_dataset():
     """Start auto-balancing the training dataset."""
     try:
-        # Start auto-balance in a background thread
-        threading.Thread(target=training_service.auto_balance_dataset).start()
+        # Run auto-balance directly since it's now async
+        await training_service.auto_balance_dataset()
         return {"status": "success", "message": "Auto-balance process started"}
     except Exception as e:
         logger.error(f"Failed to start auto-balance: {str(e)}")

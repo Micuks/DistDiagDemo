@@ -12,9 +12,9 @@ const WorkloadControlPanel = () => {
     });
 
     const workloadOptions = [
-        { id: 'sysbench', name: 'Sysbench OLTP' },
+        { id: 'sysbench', name: 'Sysbench OLTP(ERR: open cursors exceeded)' },
         { id: 'tpcc', name: 'TPC-C' },
-        { id: 'tpch', name: 'TPC-H' }
+        { id: 'tpch', name: 'TPC-H(not implemented)' }
     ];
 
     const columns = [

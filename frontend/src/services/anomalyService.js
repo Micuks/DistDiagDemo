@@ -120,6 +120,36 @@ class AnomalyService {
             this.client.post('/api/anomaly/normal/stop')
         );
     }
+
+    async getDetailedMetrics(metricType, duration) {
+        return this._retryableRequest(() => 
+            this.client.post('/api/metrics/detailed', {
+                metric_type: metricType,
+                duration: duration
+            })
+        ).then(response => response.data);
+    }
+
+    async startAnomalyCollection(type, node, options = {}) {
+        return this._retryableRequest(() => 
+            this.client.post('/api/anomaly/inject', {
+                type: type,
+                node: node || null,
+                collect_training_data: true,
+                pre_collect: options.preCollect,
+                post_collect: options.postCollect
+            })
+        );
+    }
+
+    async stopAnomalyCollection(savePostData = true) {
+        return this._retryableRequest(() => 
+            this.client.post('/api/anomaly/clear', {
+                collect_training_data: true,
+                save_post_data: savePostData
+            })
+        );
+    }
 }
 
 export const anomalyService = new AnomalyService(); 

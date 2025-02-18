@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Space, Card, Row, Col, Statistic, Spin, Select, Modal, Button } from 'antd';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { fetchMetrics, fetchDetailedMetrics } from '../services/metricsService';
+import { anomalyService } from '../services/anomalyService';
+import { message } from 'antd';
 
 const { Option } = Select;
 
@@ -101,6 +103,7 @@ const MetricsPanel = () => {
             }
         } catch (error) {
             console.error('Error fetching detailed metrics:', error);
+            message.error('Failed to load detailed metrics');
             setChartModal(prev => ({
                 ...prev,
                 loading: false

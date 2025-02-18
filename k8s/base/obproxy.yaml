@@ -45,7 +45,7 @@ spec:
             - name: OB_CLUSTER
               value: obcluster
             - name: RS_LIST
-              value: "10.244.1.29:2881;10.244.2.29:2881;10.244.3.35:2881"
+              value: "10.244.1.12:2881;10.244.2.15:2881;10.244.3.18:2881"
             - name: PROXYRO_PASSWORD
               valueFrom: 
                 secretKeyRef:

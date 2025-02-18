@@ -37,7 +37,7 @@ def timed_lru_cache(seconds: int, maxsize: int = 128):
 
 class TrainingService:
     _instance = None
-    _lock = threading.Lock()
+    _lock = None  # Will be initialized in __init__
     _stats_cache = None
     _last_stats_update = None
     STATS_CACHE_TTL = 60  # Cache TTL in seconds
@@ -48,7 +48,7 @@ class TrainingService:
 
     def __new__(cls):
         if cls._instance is None:
-            with cls._lock:
+            with threading.Lock():  # Use threading.Lock only for singleton creation
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
                     cls._instance._initialized = False
@@ -58,6 +58,9 @@ class TrainingService:
         if self._initialized:
             return
             
+        # Initialize asyncio lock
+        self._lock = asyncio.Lock()
+        
         # Get data directory from environment variable or use default
         self.data_dir = os.getenv('TRAINING_DATA_DIR', 'data/training')
         
@@ -84,13 +87,6 @@ class TrainingService:
         self.pre_anomaly_duration = 60  # seconds
         self.post_anomaly_duration = 60  # seconds
         self.balance_threshold = 0.3  # 30% threshold for balance
-        
-        # Add lock for thread safety
-        self._lock = threading.Lock()
-        
-        # Initialize cache
-        self._stats_cache = None
-        self._last_stats_update = None
         
         # Log existing data
         self._log_existing_data()
@@ -122,9 +118,9 @@ class TrainingService:
                 logger.info(f"    Metrics file: {metrics_size} bytes")
                 logger.info(f"    Label file: {'Present' if has_label else 'Missing'}")
         
-    def start_collection(self, anomaly_type: str, node: str):
+    async def start_collection(self, anomaly_type: str, node: str, pre_collect: bool = True, post_collect: bool = True):
         """Start collecting training data for an anomaly case"""
-        with self._lock:
+        async with self._lock:
             # Validate node parameter
             if not node:
                 logger.warning("No node specified for anomaly collection. Using default node.")
@@ -136,7 +132,9 @@ class TrainingService:
             self.current_anomaly = {
                 "type": anomaly_type,
                 "node": node,
-                "start_time": self.collection_start_time
+                "start_time": self.collection_start_time,
+                "pre_collect": pre_collect,
+                "post_collect": post_collect
             }
             
             # Clear buffers
@@ -144,284 +142,135 @@ class TrainingService:
             self.pre_anomaly_buffer = []
             self.post_anomaly_buffer = []
             
-            # Start collecting pre-anomaly normal data
-            self.is_collecting_normal = True
-            logger.info(f"Started collecting pre-anomaly normal data for {self.current_case} at {self.collection_start_time}")
-            
-            # Schedule switch to anomaly collection after pre_anomaly_duration
-            threading.Timer(self.pre_anomaly_duration, self._switch_to_anomaly_collection).start()
+            # Start collecting pre-anomaly normal data if requested
+            self.is_collecting_normal = pre_collect
+            if pre_collect:
+                logger.info(f"Started collecting pre-anomaly normal data for {self.current_case} at {self.collection_start_time}")
+                # Use asyncio.create_task for the timer instead of threading.Timer
+                asyncio.create_task(self._schedule_switch_to_anomaly(self.pre_anomaly_duration))
+            else:
+                logger.info(f"Skipping pre-anomaly data collection for {self.current_case}")
+                # Switch to anomaly collection immediately
+                await self._switch_to_anomaly_collection()
             
             # Start background cache maintenance
             self._cache_task = asyncio.create_task(self._maintain_cache())
-        
-    def _switch_to_anomaly_collection(self):
+
+    async def _schedule_switch_to_anomaly(self, delay: float):
+        """Schedule the switch to anomaly collection after a delay"""
+        await asyncio.sleep(delay)
+        await self._switch_to_anomaly_collection()
+
+    async def _switch_to_anomaly_collection(self):
         """Switch from pre-anomaly to anomaly data collection"""
-        with self._lock:
-            if not self.current_case:
-                return
-                
-            # Save pre-anomaly data as normal
-            if self.pre_anomaly_buffer:
-                self.normal_samples += len(self.pre_anomaly_buffer)
-                self._save_normal_data(self.pre_anomaly_buffer, "pre_anomaly")
-                
-            # Switch to anomaly collection
-            self.is_collecting_normal = False
-            logger.info(f"Switched to anomaly data collection for {self.current_case}")
-        
-    def start_normal_collection(self):
-        """Start collecting normal state data"""
-        with self._lock:
-            if self.is_collecting_normal:
-                logger.warning("Normal state collection already active")
-                return
-                
-            try:
-                # Set collection flags and create new case
-                self.collection_start_time = datetime.now().isoformat()
-                self.is_collecting_normal = True
-                self.normal_state_buffer = []
-                timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-                self.current_case = f"case_normal_{timestamp}"
-                
-                # Ensure data directory exists
-                case_dir = os.path.join(self.data_dir, self.current_case)
-                os.makedirs(os.path.dirname(case_dir), exist_ok=True)
-                
-                logger.info(f"Started collecting normal state data with case ID: {self.current_case}")
-                logger.info(f"Collection start time: {self.collection_start_time}")
-                logger.info(f"Data will be saved to: {case_dir}")
-                logger.debug(f"Current state - is_collecting_normal: {self.is_collecting_normal}, current_case: {self.current_case}")
-            except Exception as e:
-                logger.error(f"Failed to start normal collection: {str(e)}")
-                self.is_collecting_normal = False
-                self.current_case = None
-                self.collection_start_time = None
-                self.normal_state_buffer = []
-                raise
-        
-    def stop_normal_collection(self):
-        """Stop collecting normal state data and save it"""
-        with self._lock:
-            if not self.is_collecting_normal:
-                logger.warning("No active normal state collection")
-                return
-                
-            if not self.normal_state_buffer:
-                logger.warning("No metrics collected during normal state collection")
-                self.is_collecting_normal = False
-                self.current_case = None
-                self.collection_start_time = None
-                return
-                
-            case_dir = os.path.join(self.data_dir, self.current_case)
-            temp_dir = f"{case_dir}_temp"
-            save_successful = False
-            
-            try:
-                # Create data directory if it doesn't exist
-                os.makedirs(self.data_dir, exist_ok=True)
-                # Create a temporary directory for atomic save
-                os.makedirs(temp_dir, exist_ok=True)
-                
-                # Save metrics data
-                metrics_file = os.path.join(temp_dir, "metrics.json")
-                with open(metrics_file, "w") as f:
-                    json.dump(self.normal_state_buffer, f, indent=2)
+        try:
+            async with self._lock:
+                if not self.current_case:
+                    logger.warning("No active case when switching to anomaly collection")
+                    return
                     
-                # Save label indicating normal state
-                label_file = os.path.join(temp_dir, "label.json")
-                with open(label_file, "w") as f:
-                    json.dump({
-                        "type": "normal",
-                        "start_time": self.normal_state_buffer[0]["timestamp"]
-                    }, f, indent=2)
-                    
-                # Verify files were written correctly
-                if not os.path.exists(metrics_file) or os.path.getsize(metrics_file) == 0:
-                    raise Exception("Failed to write metrics file or file is empty")
-                if not os.path.exists(label_file) or os.path.getsize(label_file) == 0:
-                    raise Exception("Failed to write label file or file is empty")
-                    
-                # Atomically move the temporary directory to the final location
-                if os.path.exists(case_dir):
-                    shutil.rmtree(case_dir)
-                shutil.move(temp_dir, case_dir)
-
-                # Save metadata for normal case
-                self._save_case_metadata(
-                    case_dir,
-                    0,  # No pre-anomaly for normal case
-                    len(self.normal_state_buffer),  # All samples are normal
-                    0,  # No post-anomaly for normal case
-                    "normal"  # Explicitly mark as normal
-                )
-                    
-                logger.info(f"Successfully saved normal state data:")
-                logger.info(f"  - Metrics file: {metrics_file} ({os.path.getsize(metrics_file)} bytes)")
-                logger.info(f"  - Label file: {label_file} ({os.path.getsize(label_file)} bytes)")
-                save_successful = True
-                
-            except Exception as e:
-                logger.error(f"Failed to save normal state data: {str(e)}")
-                if os.path.exists(temp_dir):
-                    try:
-                        shutil.rmtree(temp_dir)
-                    except Exception as cleanup_error:
-                        logger.error(f"Failed to clean up temporary directory: {cleanup_error}")
-            finally:
-                # Always clear the state
-                self.is_collecting_normal = False
-                self.normal_state_buffer = []
-                self.current_case = None
-                self.collection_start_time = None
-                logger.info("Cleared normal collection state")
-                
-                # Only raise the exception if we failed to save AND had data to save
-                if not save_successful and len(self.normal_state_buffer) > 0:
-                    raise Exception("Failed to save normal state data")
-        
-    def stop_collection(self):
-        """Stop collecting training data and save the case"""
-        with self._lock:
-            if not self.current_case:
-                logger.warning("No active collection")
-                return
-                
-            if not self.metrics_buffer and not self.pre_anomaly_buffer:
-                logger.warning("No metrics collected")
-                self.current_case = None
-                self.current_anomaly = None
-                self.collection_start_time = None
-                return
-                
-            case_dir = os.path.join(self.data_dir, self.current_case)
-            temp_dir = f"{case_dir}_temp"
-            
-            try:
-                # Create data directory if it doesn't exist
-                os.makedirs(self.data_dir, exist_ok=True)
-                # Create temporary directory
-                os.makedirs(temp_dir, exist_ok=True)
-                
-                # Start collecting post-anomaly normal data
-                self.is_collecting_normal = True
-                logger.info("Started collecting post-anomaly normal data")
-                
-                # Schedule final save after post-anomaly collection
-                threading.Timer(self.post_anomaly_duration, self._finalize_collection, args=[temp_dir, case_dir]).start()
-                
-            except Exception as e:
-                logger.error(f"Failed to prepare for post-anomaly collection: {str(e)}")
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                self._clear_collection_state()
-                raise
-                
-    def _save_case_metadata(self, case_path: str, pre_anomaly_count: int, anomaly_count: int, post_anomaly_count: int, anomaly_type: str) -> None:
-        """Save case metadata for faster stats computation"""
-        is_normal = anomaly_type == "normal"
-        metadata = {
-            "counts": {
-                "normal": pre_anomaly_count + post_anomaly_count if not is_normal else anomaly_count,
-                "anomaly": anomaly_count if not is_normal else 0
-            },
-            "type": "normal" if is_normal else "anomaly",
-            "anomaly_type": "normal" if is_normal else anomaly_type.replace("_stress", "").replace("network_delay", "network"),
-            "timestamp": datetime.now().isoformat()
-        }
-        metadata_path = os.path.join(case_path, "metadata.json")
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f)
-            logger.debug(f"Saved metadata for case {case_path}: {metadata}")
-
-    def _finalize_collection(self, temp_dir: str, case_dir: str):
-        """Finalize collection by saving all data"""
-        with self._lock:
-            try:
-                # Save pre-anomaly data
+                # Save pre-anomaly data as normal
                 if self.pre_anomaly_buffer:
-                    pre_anomaly_file = os.path.join(temp_dir, "pre_anomaly_metrics.json")
-                    with open(pre_anomaly_file, "w") as f:
-                        json.dump(self.pre_anomaly_buffer, f, indent=2)
-                    self.normal_samples += len(self.pre_anomaly_buffer)
-                    
-                # Save anomaly data
-                if self.metrics_buffer:
-                    metrics_file = os.path.join(temp_dir, "metrics.json")
-                    with open(metrics_file, "w") as f:
-                        json.dump(self.metrics_buffer, f, indent=2)
-                    self.anomaly_samples += len(self.metrics_buffer)
-                    
-                # Save post-anomaly data
-                if self.post_anomaly_buffer:
-                    post_anomaly_file = os.path.join(temp_dir, "post_anomaly_metrics.json")
-                    with open(post_anomaly_file, "w") as f:
-                        json.dump(self.post_anomaly_buffer, f, indent=2)
-                    self.normal_samples += len(self.post_anomaly_buffer)
-                    
-                # Save anomaly label
-                label_file = os.path.join(temp_dir, "label.json")
-                with open(label_file, "w") as f:
-                    json.dump(self.current_anomaly, f, indent=2)
-                    
-                # Verify files were written correctly
-                files_to_check = [
-                    ("metrics.json", self.metrics_buffer),
-                    ("pre_anomaly_metrics.json", self.pre_anomaly_buffer),
-                    ("post_anomaly_metrics.json", self.post_anomaly_buffer),
-                    ("label.json", None)
-                ]
+                    try:
+                        self.normal_samples += len(self.pre_anomaly_buffer)
+                        await self._save_normal_data(self.pre_anomaly_buffer, "pre_anomaly")
+                        # Clear buffer after successful save
+                        self.pre_anomaly_buffer = []
+                    except Exception as save_error:
+                        logger.error(f"Failed to save pre-anomaly data: {str(save_error)}")
+                        # Don't clear buffer on error to allow retry
                 
-                for filename, data in files_to_check:
-                    filepath = os.path.join(temp_dir, filename)
-                    if (data and not os.path.exists(filepath)) or \
-                       (os.path.exists(filepath) and os.path.getsize(filepath) == 0):
-                        raise Exception(f"Failed to write {filename} or file is empty")
-                    
-                # Atomically move the temporary directory to the final location
-                if os.path.exists(case_dir):
-                    shutil.rmtree(case_dir)
-                shutil.move(temp_dir, case_dir)
+                # Switch to anomaly collection
+                self.is_collecting_normal = False
+                logger.info(f"Switched to anomaly data collection for {self.current_case}")
                 
-                # Save metadata for faster stats computation
-                self._save_case_metadata(
-                    case_dir,
-                    len(self.pre_anomaly_buffer),
-                    len(self.metrics_buffer),
-                    len(self.post_anomaly_buffer),
-                    self.current_anomaly["type"] or "unknown"
-                )
-                
-                logger.info(f"Successfully saved all data for {self.current_case}:")
-                logger.info(f"  - Pre-anomaly samples: {len(self.pre_anomaly_buffer)}")
-                logger.info(f"  - Anomaly samples: {len(self.metrics_buffer)}")
-                logger.info(f"  - Post-anomaly samples: {len(self.post_anomaly_buffer)}")
-                logger.info(f"  - Total normal samples: {self.normal_samples}")
-                logger.info(f"  - Total anomaly samples: {self.anomaly_samples}")
-                
-            except Exception as e:
-                logger.error(f"Failed to save training data: {str(e)}")
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                raise
-            finally:
-                self._clear_collection_state()
-                
-    def _clear_collection_state(self):
+        except Exception as e:
+            logger.error(f"Failed to switch to anomaly collection: {str(e)}")
+            # Clear collection state on critical error
+            await self._clear_collection_state()
+            raise
+
+    async def _clear_collection_state(self):
         """Clear all collection state variables"""
-        self.current_case = None
-        self.current_anomaly = None
-        self.metrics_buffer = []
-        self.pre_anomaly_buffer = []
-        self.post_anomaly_buffer = []
-        self.collection_start_time = None
-        self.is_collecting_normal = False
-        logger.info("Cleared collection state")
+        async with self._lock:
+            self.current_case = None
+            self.current_anomaly = None
+            self.metrics_buffer = []
+            self.pre_anomaly_buffer = []
+            self.post_anomaly_buffer = []
+            self.collection_start_time = None
+            self.is_collecting_normal = False
+            logger.info("Cleared collection state")
+
+    async def start_normal_collection(self):
+        """Start collecting normal state data"""
+        async with self._lock:
+            self.collection_start_time = datetime.now().isoformat()
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            self.current_case = f"case_normal_{timestamp}"
+            self.current_anomaly = None  # No anomaly for normal collection
+            
+            # Clear buffers
+            self.metrics_buffer = []
+            self.normal_state_buffer = []
+            self.pre_anomaly_buffer = []
+            self.post_anomaly_buffer = []
+            
+            # Set collection state
+            self.is_collecting_normal = True
+            logger.info(f"Started collecting normal state data for {self.current_case}")
+            
+            # Start background cache maintenance
+            self._cache_task = asyncio.create_task(self._maintain_cache())
+
+    async def stop_normal_collection(self):
+        """Stop collecting normal state data"""
+        async with self._lock:
+            if not self.is_collecting_normal or self.current_anomaly:
+                logger.warning("No active normal state collection to stop")
+                return
+                
+            # Save collected normal data
+            if self.normal_state_buffer:
+                try:
+                    self.normal_samples += len(self.normal_state_buffer)
+                    await self._save_normal_data(self.normal_state_buffer)
+                    self.normal_state_buffer = []
+                except Exception as e:
+                    logger.error(f"Failed to save normal state data: {str(e)}")
+                    raise
+            
+            # Clear collection state
+            await self._clear_collection_state()
+            logger.info("Stopped normal state data collection")
+
+    async def _save_normal_data(self, data: List[Dict], prefix: str = ""):
+        """Save normal state data to disk"""
+        if not self.current_case:
+            logger.error("No active case when trying to save normal data")
+            return
+            
+        case_dir = os.path.join(self.data_dir, self.current_case)
+        os.makedirs(case_dir, exist_ok=True)
         
-    def add_metrics(self, metrics: Dict[str, Any]):
+        # Save metrics data
+        metrics_file = os.path.join(case_dir, f"{prefix}metrics.json")
+        with open(metrics_file, 'w') as f:
+            json.dump(data, f)
+        
+        # Save label file for normal data
+        label_file = os.path.join(case_dir, "label.json")
+        with open(label_file, 'w') as f:
+            json.dump({
+                "type": "normal",
+                "start_time": self.collection_start_time
+            }, f)
+        
+        logger.info(f"Saved normal state data to {case_dir}")
+
+    async def add_metrics(self, metrics: Dict[str, Any]):
         """Add metrics to current collection"""
-        with self._lock:
+        async with self._lock:
             logger.debug(f"Received metrics - State: is_collecting_normal={self.is_collecting_normal}, current_case={self.current_case}")
             
             if not self.current_case:
@@ -553,167 +402,63 @@ class TrainingService:
             return self._stats_cache
 
         logger.info("Calculating fresh dataset statistics")
-        with self._lock:
-            stats = {
-                "normal": 0,
-                "anomaly": 0,
-                "anomaly_types": defaultdict(int),
-                "total_samples": 0,
-                "normal_ratio": 0,
-                "anomaly_ratio": 0,
-                "is_balanced": False
-            }
-            
-            if not os.path.exists(self.data_dir):
-                self._stats_cache = stats
-                self._last_stats_update = time.time()
-                return stats
-
-            # Process in smaller batches to avoid memory issues
-            case_dirs = [d for d in os.listdir(self.data_dir) if os.path.isdir(os.path.join(self.data_dir, d))]
-            batch_size = 50  # Process 50 cases at a time
-            case_stats = []
-
-            for i in range(0, len(case_dirs), batch_size):
-                batch = case_dirs[i:i + batch_size]
-                futures = []
-
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    for case_dir in batch:
-                        case_path = os.path.join(self.data_dir, case_dir)
-                        futures.append(
-                            executor.submit(self._process_case_stats, case_path)
-                        )
-
-                    for future in concurrent.futures.as_completed(futures, timeout=10):
-                        try:
-                            case_stat = future.result()
-                            if case_stat:
-                                case_stats.append(case_stat)
-                        except Exception as e:
-                            logger.warning(f"Error processing case batch: {str(e)}")
-
-            # Aggregate stats from all cases
-            for case_stat in case_stats:
-                stats["normal"] += case_stat["normal"]
-                stats["anomaly"] += case_stat["anomaly"]
-                for anomaly_type, count in case_stat.get("anomaly_types", {}).items():
-                    stats["anomaly_types"][anomaly_type] += count
-
-            # Calculate ratios and balance
-            total = stats["normal"] + stats["anomaly"]
-            stats["total_samples"] = total
-            
-            if total > 0:
-                stats["normal_ratio"] = stats["normal"] / total
-                stats["anomaly_ratio"] = stats["anomaly"] / total
-                stats["is_balanced"] = abs(stats["normal_ratio"] - stats["anomaly_ratio"]) <= self.balance_threshold
-
-            # Update cache with timestamp
-            stats["last_updated"] = time.time()
+        stats = {
+            "normal": 0,
+            "anomaly": 0,
+            "anomaly_types": defaultdict(int),
+            "total_samples": 0,
+            "normal_ratio": 0,
+            "anomaly_ratio": 0,
+            "is_balanced": False
+        }
+        
+        if not os.path.exists(self.data_dir):
             self._stats_cache = stats
             self._last_stats_update = time.time()
-            logger.info(f"Updated dataset statistics cache: {stats}")
             return stats
 
-    def _process_case_stats(self, case_path: str) -> Optional[Dict]:
-        """Process case statistics with metadata optimization"""
-        try:
-            # Try to use metadata file first
-            metadata_path = os.path.join(case_path, "metadata.json")
-            if os.path.exists(metadata_path):
-                with open(metadata_path) as f:
-                    metadata = json.load(f)
-                    if metadata.get("type") == "normal":
-                        return {
-                            "normal": metadata["counts"]["normal"],
-                            "anomaly": 0,
-                            "anomaly_types": {}
-                        }
-                    return {
-                        "normal": metadata["counts"]["normal"],
-                        "anomaly": metadata["counts"]["anomaly"],
-                        "anomaly_types": {
-                            metadata["anomaly_type"]: metadata["counts"]["anomaly"]
-                        }
-                    }
-
-            # Fall back to original processing if no metadata
-            case_stat = {
-                "normal": 0,
-                "anomaly": 0,
-                "anomaly_types": defaultdict(int)
-            }
-
-            # First check if this is a normal case by reading label.json
-            label_file = os.path.join(case_path, "label.json")
-            is_normal_case = False
-            if os.path.exists(label_file):
-                with open(label_file) as f:
-                    label_data = json.load(f)
-                    is_normal_case = label_data.get("type") == "normal"
-
-            # Process metrics files with optimized reading
-            for prefix in ["", "pre_anomaly_", "post_anomaly_"]:
-                metrics_file = os.path.join(case_path, f"{prefix}metrics.json")
-                if not os.path.exists(metrics_file):
+        # Process in smaller batches to avoid memory issues
+        case_dirs = [d for d in os.listdir(self.data_dir) if os.path.isdir(os.path.join(self.data_dir, d))]
+        batch_size = 50  # Process 50 cases at a time
+        case_stats = []
+        
+        for i in range(0, len(case_dirs), batch_size):
+            batch = case_dirs[i:i + batch_size]
+            for case_dir in batch:
+                case_path = os.path.join(self.data_dir, case_dir)
+                metrics_file = os.path.join(case_path, "metrics.json")
+                label_file = os.path.join(case_path, "label.json")
+                
+                if not os.path.exists(metrics_file) or not os.path.exists(label_file):
                     continue
-
-                # Use line counting for large files
-                file_size = os.path.getsize(metrics_file)
-                if file_size > 10_000_000:  # 10MB threshold
-                    count = 0
-                    with open(metrics_file, 'rb') as f:
-                        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-                        for line in iter(mm.readline, b''):
-                            if b'{' in line:
-                                count += 1
-                        mm.close()
-                    count = count // 2  # Adjust for JSON array structure
-                else:
-                    with open(metrics_file) as f:
-                        data = json.load(f)
-                        count = len(data) if isinstance(data, list) else 1
-
-                # For normal cases, all samples are normal regardless of prefix
-                if is_normal_case or prefix:
-                    case_stat["normal"] += count
-                else:
-                    case_stat["anomaly"] += count
-
-            # Process label data for anomaly type if not a normal case
-            if not is_normal_case and os.path.exists(label_file):
-                with open(label_file) as f:
-                    label_data = json.load(f)
-                    anomaly_type = label_data.get("type", "unknown")
-                    base_type = anomaly_type.replace("_stress", "")
-                    if "network_delay" in base_type:
-                        base_type = "network"
-                    if base_type in ["cpu", "memory", "io", "network", "unknown"]:
-                        case_stat["anomaly_types"][base_type] = case_stat["anomaly"]
-
-            # Save metadata for future use
-            if is_normal_case:
-                self._save_case_metadata(
-                    case_path,
-                    0,  # No pre-anomaly for normal case
-                    case_stat["normal"],  # All samples are normal
-                    0,  # No post-anomaly for normal case
-                    "normal"  # Explicitly mark as normal
-                )
-            else:
-                self._save_case_metadata(
-                    case_path,
-                    case_stat["normal"] // 2,  # Split between pre and post
-                    case_stat["anomaly"],
-                    case_stat["normal"] // 2,
-                    list(case_stat["anomaly_types"].keys())[0] if case_stat["anomaly_types"] else "unknown"
-                )
-
-            return case_stat
-        except Exception as e:
-            logger.error(f"Error processing case stats for {case_path}: {str(e)}")
-            return None
+                    
+                try:
+                    with open(label_file, 'r') as f:
+                        label_data = json.load(f)
+                        
+                    if label_data.get("type") == "normal":
+                        stats["normal"] += 1
+                    else:
+                        stats["anomaly"] += 1
+                        anomaly_type = label_data.get("type")
+                        if anomaly_type:
+                            stats["anomaly_types"][anomaly_type] += 1
+                            
+                except Exception as e:
+                    logger.error(f"Error processing case {case_dir}: {str(e)}")
+                    continue
+        
+        stats["total_samples"] = stats["normal"] + stats["anomaly"]
+        if stats["total_samples"] > 0:
+            stats["normal_ratio"] = stats["normal"] / stats["total_samples"]
+            stats["anomaly_ratio"] = stats["anomaly"] / stats["total_samples"]
+            # Consider dataset balanced if minority class is at least 30% of total
+            min_ratio = min(stats["normal_ratio"], stats["anomaly_ratio"])
+            stats["is_balanced"] = min_ratio >= 0.3
+        
+        self._stats_cache = stats
+        self._last_stats_update = time.time()
+        return stats
 
     def invalidate_stats_cache(self):
         """Invalidate the stats cache to force recalculation"""
@@ -744,18 +489,18 @@ class TrainingService:
             logger.error(f"Error checking dataset balance: {str(e)}")
             return False
 
-    def auto_balance_dataset(self):
+    async def auto_balance_dataset(self):
         """Automatically balance the dataset by collecting required data"""
         logger.info("Starting auto-balance process")
         
         # Get current stats
-        stats = self.get_dataset_stats()
+        stats = await self.get_dataset_stats()
         total = stats["normal"] + stats["anomaly"]
         
         if total == 0:
             # If no data, start with normal collection
             logger.info("No data available. Starting with normal collection")
-            self.start_normal_collection()
+            await self.start_normal_collection()
             return
             
         # Calculate ratios
@@ -766,13 +511,13 @@ class TrainingService:
         if abs(normal_ratio - anomaly_ratio) > self.balance_threshold:
             if normal_ratio < anomaly_ratio:
                 logger.info("Normal samples underrepresented. Starting normal collection")
-                self.start_normal_collection()
+                await self.start_normal_collection()
             else:
                 # Find least represented anomaly type
                 anomaly_types = stats["anomaly_types"]
                 min_type = min(anomaly_types.items(), key=lambda x: x[1])[0]
                 logger.info(f"Anomaly type {min_type} underrepresented. Starting collection")
-                self.start_collection(min_type, None)  # Let the system choose the node
+                await self.start_collection(min_type, None)  # Let the system choose the node
         else:
             # Balance anomaly types
             anomaly_types = stats["anomaly_types"]
@@ -782,7 +527,7 @@ class TrainingService:
             min_type = min(anomaly_types.items(), key=lambda x: x[1])[0]
             if anomaly_types[min_type] < avg_anomaly_count * 0.7:  # Allow 30% variance
                 logger.info(f"Anomaly type {min_type} below average. Starting collection")
-                self.start_collection(min_type, None)
+                await self.start_collection(min_type, None)
             else:
                 logger.info("Dataset is well balanced")
 

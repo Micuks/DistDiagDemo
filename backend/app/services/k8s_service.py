@@ -129,7 +129,8 @@ class K8sService:
                 # For disk stress, try to get the experiment first to check its status
                 if anomaly_type == "disk_stress":
                     try:
-                        experiment = self.custom_api.get_namespaced_custom_object(
+                        experiment = await asyncio.to_thread(
+                            self.custom_api.get_namespaced_custom_object,
                             group="chaos-mesh.org",
                             version="v1alpha1",
                             namespace=self.namespace,
@@ -141,7 +142,8 @@ class K8sService:
                         if e.status != 404:  # Log any error other than Not Found
                             logger.warning(f"Error checking {anomaly_type} experiment status: {e}")
 
-                self.custom_api.delete_namespaced_custom_object(
+                await asyncio.to_thread(
+                    self.custom_api.delete_namespaced_custom_object,
                     group="chaos-mesh.org",
                     version="v1alpha1",
                     namespace=self.namespace,
@@ -325,23 +327,47 @@ class K8sService:
         experiment = self._get_experiment_template(anomaly_type)
         
         try:
-            # Delete any existing experiment of the same type first
-            await self.delete_chaos_experiment(anomaly_type)
+            # Check if experiment already exists
+            existing_experiment = None
+            try:
+                existing_experiment = await asyncio.to_thread(
+                    self.custom_api.get_namespaced_custom_object,
+                    group="chaos-mesh.org",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural=self._get_experiment_plural(anomaly_type),
+                    name=experiment["metadata"]["name"]
+                )
+            except ApiException as e:
+                if e.status != 404:  # Only ignore 404 Not Found
+                    raise e
+
+            # If experiment exists and is active, don't recreate it
+            if existing_experiment and existing_experiment.get("status", {}).get("phase") == "running":
+                logger.info(f"Experiment {anomaly_type} is already running")
+                return
+            
+            # Delete existing experiment only if it exists and is not running
+            if existing_experiment:
+                logger.info(f"Deleting existing experiment {anomaly_type}")
+                await self.delete_chaos_experiment(anomaly_type)
             
             # Create new experiment with retry logic
-            max_retries = 5  # Increased from 3
+            max_retries = 5
             retry_delay = 2
             
             for attempt in range(max_retries):
                 try:
-                    # Verify again that the old experiment is gone
-                    if not await self.verify_experiment_deleted(anomaly_type):
-                        logger.info(f"Experiment still exists, waiting {retry_delay} seconds...")
-                        await asyncio.sleep(retry_delay)
-                        retry_delay *= 2
-                        continue
+                    # Verify again that the old experiment is gone if we had to delete it
+                    if existing_experiment:
+                        if not await self.verify_experiment_deleted(anomaly_type):
+                            logger.info(f"Experiment still exists, waiting {retry_delay} seconds...")
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= 2
+                            continue
 
-                    self.custom_api.create_namespaced_custom_object(
+                    await asyncio.to_thread(
+                        self.custom_api.create_namespaced_custom_object,
                         group="chaos-mesh.org",
                         version="v1alpha1",
                         namespace=self.namespace,

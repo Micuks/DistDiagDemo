@@ -91,9 +91,9 @@ class MetricsService:
                     except Exception as e:
                         logger.error(f"Error collecting metrics with obdiag: {e}")
                         logger.info("Falling back to psutil collection")
-                        self._collect_psutil_metrics()
+                        self.event_loop.run_until_complete(self._collect_psutil_metrics())
                 else:
-                    self._collect_psutil_metrics()
+                    self.event_loop.run_until_complete(self._collect_psutil_metrics())
                 
                 time.sleep(self.collection_interval)
             except Exception as e:
@@ -162,7 +162,7 @@ class MetricsService:
             logger.info(f"Successfully collected metrics from nodes: {list(metrics.keys())}")
             # Add metrics to training service if metrics were collected
             try:
-                training_service.add_metrics(metrics)
+                await training_service.add_metrics(metrics)
                 logger.debug("Successfully sent metrics to training service")
             except Exception as e:
                 logger.error(f"Failed to send metrics to training service: {e}")
@@ -173,7 +173,7 @@ class MetricsService:
         logger.debug(f"Cleaning up directory: {base_pack_dir}")
         subprocess.run(f"rm -rf {base_pack_dir}", shell=True)
 
-    def _collect_psutil_metrics(self):
+    async def _collect_psutil_metrics(self):
         """Collect metrics using psutil as fallback."""
         metrics = {
             "localhost": {  # Using localhost as we're collecting local metrics
@@ -193,7 +193,7 @@ class MetricsService:
 
         # Add metrics to training service
         try:
-            training_service.add_metrics(metrics)
+            await training_service.add_metrics(metrics)
             logger.debug("Successfully sent psutil metrics to training service")
         except Exception as e:
             logger.error(f"Failed to send psutil metrics to training service: {e}")

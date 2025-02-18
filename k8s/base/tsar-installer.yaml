@@ -20,13 +20,40 @@ spec:
             kubectl exec -n oceanbase ${pod} -c observer -- sh -c '
               # Install or update required packages first
               echo "Installing/updating required packages..."
-              yum update -y && \
-              yum install -y git gcc make pcre-devel cronie util-linux zip perf && \
-              # Create dmesg log file
-              dmesg > /var/log/dmesg && \
-              # Set up cron job to update dmesg log periodically
-              echo "*/5 * * * * root dmesg > /var/log/dmesg" > /etc/cron.d/dmesg-update && \
+              # Check last update time
+              if [ "$(find /var/cache/yum -mtime -30 2>/dev/null | wc -l)" -eq 0 ]; then
+                echo "System not updated in last month, updating..."
+                yum update -y
+              else
+                echo "System was updated recently, skipping update"
+              fi && \
+              # Check and install required packages if not present
+              for pkg in git gcc make pcre-devel cronie util-linux zip perf; do
+                if ! rpm -q $pkg >/dev/null 2>&1; then
+                  echo "Installing $pkg..."
+                  yum install -y $pkg
+                else
+                  echo "$pkg is already installed"
+                fi
+              done && \
+              # Create dmesg log file if it doesnt exist
+              [ ! -f /var/log/dmesg ] && dmesg > /var/log/dmesg && \
+              # Set up cron job to update dmesg log periodically if not already set up
+              [ ! -f /etc/cron.d/dmesg-update ] && echo "*/5 * * * * root dmesg > /var/log/dmesg" > /etc/cron.d/dmesg-update && \
               crond
+
+              # Install toda for Chaos Mesh disk experiments
+              if [ ! -f /usr/local/bin/toda ]; then
+                echo "Installing toda..."
+                curl -LO https://mirrors.chaos-mesh.org/v1.2.3/toda-$(uname -m).tar.gz && \
+                tar zxvf toda-*.tar.gz && \
+                mv toda /usr/local/bin/ && \
+                chmod +x /usr/local/bin/toda && \
+                rm -f toda-*.tar.gz
+                echo "Toda installation completed"
+              else
+                echo "Toda is already installed"
+              fi
 
               # Check if tsar is already installed
               if command -v tsar >/dev/null 2>&1; then
@@ -60,7 +87,7 @@ spec:
           done
           # Wait for all background processes to complete
           wait
-          echo "All tsar installations completed!"
+          echo "All installations including tsar(for obdiag) and toda(for chaos mesh) completed!"
       restartPolicy: Never
   backoffLimit: 4
 ---

@@ -11,20 +11,20 @@ const Navigation = () => {
 
     const items = [
         {
-            key: '/control',
-            label: 'Control Panel'
-        },
-        {
-            key: '/training',
-            label: 'Model Training'
-        },
-        {
             key: '/metrics',
             label: 'System Metrics'
         },
         {
             key: '/ranks',
             label: 'Anomaly Ranks'
+        },
+        {
+            key: '/control',
+            label: 'Control Panel'
+        },
+        {
+            key: '/training',
+            label: 'Model Training'
         },
     ];
 
