@@ -11,7 +11,7 @@ const AnomalyControlPanel = () => {
         { id: 'cpu_stress', name: 'CPU Stress' },
         { id: 'memory_stress', name: 'Memory Stress' },
         { id: 'network_delay', name: 'Network Delay' },
-        { id: 'disk_stress', name: 'Disk Stress(currently unavailable)' },
+        // { id: 'disk_stress', name: 'Disk Stress(currently unavailable)' },
     ];
 
     const columns = [

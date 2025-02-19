@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox } from 'antd';
+import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select } from 'antd';
 import { anomalyService } from '../services/anomalyService';
 import { useAnomalyData } from '../hooks/useAnomalyData';
+import ModelPerformanceView from './ModelPerformanceView';
 
 const ModelTrainingPanel = () => {
     const [loading, setLoading] = useState(false);
@@ -15,7 +16,26 @@ const ModelTrainingPanel = () => {
     });
     const [trainingStats, setTrainingStats] = useState(null);
     const [isAutoBalancing, setIsAutoBalancing] = useState(false);
+    const [availableModels, setAvailableModels] = useState([]);
+    const [selectedModel, setSelectedModel] = useState(null);
     const { data: activeAnomalies = [] } = useAnomalyData();
+
+    // Fetch available models
+    useEffect(() => {
+        const fetchModels = async () => {
+            try {
+                const models = await anomalyService.getAvailableModels();
+                setAvailableModels(models);
+                if (models.length > 0) {
+                    setSelectedModel(models[0]);
+                }
+            } catch (error) {
+                console.error('Failed to fetch models:', error);
+                message.error('Failed to load available models');
+            }
+        };
+        fetchModels();
+    }, []);
 
     // Fetch collection status periodically
     useEffect(() => {
@@ -30,7 +50,7 @@ const ModelTrainingPanel = () => {
                 console.error('Failed to fetch collection status:', error);
             }
         };
-        
+
         fetchStatus();
         const interval = setInterval(fetchStatus, 5000);
         return () => clearInterval(interval);
@@ -51,13 +71,13 @@ const ModelTrainingPanel = () => {
                 if (collectionStatus.currentType === 'normal') {
                     await anomalyService.stopNormalCollection();
                 } else {
-                    // For anomaly, stop collection with post-collection option
                     await anomalyService.stopAnomalyCollection(collectionOptions.postCollect);
                 }
             } else {
                 // Start collection based on presence of anomalies
                 if (activeAnomalies.length > 0) {
                     const activeAnomaly = activeAnomalies[0];
+                    // Start collection for existing anomaly without injecting new one
                     await anomalyService.startAnomalyCollection(
                         activeAnomaly.type,
                         activeAnomaly.node,
@@ -67,7 +87,7 @@ const ModelTrainingPanel = () => {
                     await anomalyService.startNormalCollection();
                 }
             }
-            
+
             // Refresh status after toggle
             const newStatus = await anomalyService.getCollectionStatus();
             setCollectionStatus({
@@ -100,9 +120,26 @@ const ModelTrainingPanel = () => {
     const fetchTrainingStats = async () => {
         try {
             const response = await anomalyService.getTrainingStats();
-            setTrainingStats(response.stats);  // Store just the stats object
+            setTrainingStats(response.stats || {
+                normal: 0,
+                anomaly: 0,
+                total_samples: 0,
+                normal_ratio: 0,
+                anomaly_ratio: 0,
+                anomaly_types: {},
+                is_balanced: false
+            });
         } catch (error) {
             console.error('Failed to fetch training stats:', error);
+            setTrainingStats({
+                normal: 0,
+                anomaly: 0,
+                total_samples: 0,
+                normal_ratio: 0,
+                anomaly_ratio: 0,
+                anomaly_types: {},
+                is_balanced: false
+            });
         }
     };
 
@@ -110,6 +147,26 @@ const ModelTrainingPanel = () => {
         <div>
             <Row gutter={[16, 16]}>
                 <Col span={24}>
+                    <Row gutter={[16, 16]}>
+                        <Col span={24}>
+                            <Space direction="vertical" style={{ width: '100%' }}>
+                                <Select
+                                    style={{ width: '100%' }}
+                                    placeholder="Select model to view performance"
+                                    value={selectedModel}
+                                    onChange={setSelectedModel}
+                                >
+                                    {availableModels.map(model => (
+                                        <Select.Option key={model} value={model}>
+                                            {model.replace(/\.[^/.]+$/, '')}
+                                        </Select.Option>
+                                    ))}
+                                </Select>
+                                {selectedModel && <ModelPerformanceView modelName={selectedModel} />}
+                            </Space>
+                        </Col>
+                    </Row>
+                    <Divider />
                     <Card title="Training Data Collection">
                         <Space direction="vertical" style={{ width: '100%' }}>
                             <div>
@@ -120,8 +177,8 @@ const ModelTrainingPanel = () => {
                                     disabled={loading}
                                 />
                                 <span style={{ marginLeft: 8 }}>
-                                    {collectionStatus.isCollecting 
-                                        ? `Collecting ${collectionStatus.currentType} data` 
+                                    {collectionStatus.isCollecting
+                                        ? `Collecting ${collectionStatus.currentType} data`
                                         : 'Start data collection'}
                                 </span>
                             </div>
@@ -162,7 +219,6 @@ const ModelTrainingPanel = () => {
             </Row>
 
             <Divider />
-
             <Row gutter={[16, 16]}>
                 <Col span={24}>
                     <Card title="Training Statistics">
@@ -172,28 +228,48 @@ const ModelTrainingPanel = () => {
                                     <Col span={8}>
                                         <Statistic
                                             title="Normal Samples"
-                                            value={trainingStats.normal}
+                                            value={trainingStats.normal || 0}
                                         />
                                     </Col>
                                     <Col span={8}>
                                         <Statistic
                                             title="Anomaly Samples"
-                                            value={trainingStats.anomaly}
+                                            value={trainingStats.anomaly || 0}
                                         />
                                     </Col>
                                     <Col span={8}>
                                         <Statistic
                                             title="Total Samples"
-                                            value={trainingStats.total_samples}
+                                            value={trainingStats.total_samples || 0}
                                         />
                                     </Col>
                                 </Row>
                                 <Divider />
                                 <Progress
-                                    percent={Math.round(trainingStats.normal_ratio * 100)}
-                                    success={{ percent: Math.round(trainingStats.anomaly_ratio * 100) }}
+                                    percent={Math.round((trainingStats.normal_ratio || 0) * 100)}
+                                    success={{ percent: Math.round((trainingStats.anomaly_ratio || 0) * 100) }}
                                     format={() => 'Data Distribution'}
                                 />
+                                <Divider />
+                                <Row gutter={[16, 16]}>
+                                    {trainingStats?.anomaly_types && Object.entries(trainingStats.anomaly_types).map(([type, count]) => (
+                                        <Col span={6} key={type}>
+                                            <Statistic
+                                                title={`${type.charAt(0).toUpperCase() + type.slice(1)} Anomalies`}
+                                                value={count}
+                                            />
+                                        </Col>
+                                    ))}
+                                    {(!trainingStats?.anomaly_types || Object.keys(trainingStats?.anomaly_types || {}).length === 0) && (
+                                        <Col span={24}>
+                                            <Alert
+                                                message="No anomaly types collected yet"
+                                                type="info"
+                                                showIcon
+                                            />
+                                        </Col>
+                                    )}
+                                </Row>
                                 {trainingStats.is_balanced ? (
                                     <Alert
                                         message="Data is well-balanced"

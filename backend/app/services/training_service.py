@@ -45,6 +45,7 @@ class TrainingService:
     _stats_lock = asyncio.Lock()
     _request_lock = asyncio.Lock()
     _last_request_time = 0
+    _event_loop = None  # Store single event loop instance
 
     def __new__(cls):
         if cls._instance is None:
@@ -58,8 +59,13 @@ class TrainingService:
         if self._initialized:
             return
             
-        # Initialize asyncio lock
+        # Initialize asyncio lock and get event loop
         self._lock = asyncio.Lock()
+        try:
+            self._event_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._event_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._event_loop)
         
         # Get data directory from environment variable or use default
         self.data_dir = os.getenv('TRAINING_DATA_DIR', 'data/training')
@@ -93,14 +99,9 @@ class TrainingService:
         
         self._initialized = True
         
-        async def warmup_cache(self):
-            async with self._stats_lock:
-                if not self.get_dataset_stats.cache_info().hits:
-                    await self.get_dataset_stats()
-        
         # Start background cache maintenance
-        self._cache_task = asyncio.create_task(self._maintain_cache())
-        
+        self._cache_task = self._event_loop.create_task(self._maintain_cache())
+
     def _log_existing_data(self):
         """Log information about existing training data"""
         if os.path.exists(self.data_dir):
@@ -146,15 +147,15 @@ class TrainingService:
             self.is_collecting_normal = pre_collect
             if pre_collect:
                 logger.info(f"Started collecting pre-anomaly normal data for {self.current_case} at {self.collection_start_time}")
-                # Use asyncio.create_task for the timer instead of threading.Timer
-                asyncio.create_task(self._schedule_switch_to_anomaly(self.pre_anomaly_duration))
+                # Use call_later instead of create_task for the timer
+                self._event_loop.call_later(
+                    self.pre_anomaly_duration,
+                    lambda: self._event_loop.create_task(self._switch_to_anomaly_collection())
+                )
             else:
                 logger.info(f"Skipping pre-anomaly data collection for {self.current_case}")
                 # Switch to anomaly collection immediately
                 await self._switch_to_anomaly_collection()
-            
-            # Start background cache maintenance
-            self._cache_task = asyncio.create_task(self._maintain_cache())
 
     async def _schedule_switch_to_anomaly(self, delay: float):
         """Schedule the switch to anomaly collection after a delay"""
@@ -221,7 +222,7 @@ class TrainingService:
             logger.info(f"Started collecting normal state data for {self.current_case}")
             
             # Start background cache maintenance
-            self._cache_task = asyncio.create_task(self._maintain_cache())
+            self._cache_task = self._event_loop.create_task(self._maintain_cache())
 
     async def stop_normal_collection(self):
         """Stop collecting normal state data"""
@@ -305,19 +306,34 @@ class TrainingService:
         processed_metrics = []
         
         for node_ip, node_data in metrics.items():
-            # Get all timestamps from CPU data to use as reference
-            timestamps = []
-            if 'cpu' in node_data and 'util' in node_data['cpu']:
-                timestamps = list(node_data['cpu']['util'].keys())
-                timestamps.remove('latest')  # Remove 'latest' key
-            elif 'cpu' in node_data:
-                # Handle psutil format which might only have 'latest'
-                timestamps = ['latest']
+            # Handle different metric formats
+            timestamps = set()
             
+            # Extract timestamps from all metric categories
+            for category, category_data in node_data.items():
+                if isinstance(category_data, dict):
+                    # For dictionary metrics, collect all timestamps
+                    if 'util' in category_data:  # CPU telegraf format
+                        timestamps.update(category_data['util'].keys())
+                    elif 'aggregated' in category_data:  # IO format
+                        for metric in category_data['aggregated'].values():
+                            timestamps.update(metric.keys())
+                    else:  # Other dictionary metrics
+                        for metric in category_data.values():
+                            if isinstance(metric, dict):
+                                timestamps.update(metric.keys())
+            
+            # If no timestamps found (e.g., all scalar values), use 'latest'
             if not timestamps:
-                logger.warning(f"No timestamps found in metrics for node {node_ip}")
-                continue
-
+                timestamps = {'latest'}
+            
+            # Remove 'latest' if it's not the only timestamp
+            if len(timestamps) > 1 and 'latest' in timestamps:
+                timestamps.remove('latest')
+            
+            # Convert to sorted list
+            timestamps = sorted(timestamps)
+            
             # Process each timestamp
             for timestamp in timestamps:
                 try:
@@ -327,25 +343,47 @@ class TrainingService:
                         "metrics": {}
                     }
                     
+                    # Process each metric category
                     for category, category_data in node_data.items():
-                        if category == 'io':
-                            # Handle IO metrics
-                            filtered_metrics["metrics"][category] = {
-                                'aggregated': {
-                                    metric: data.get(timestamp, data.get('latest', 0))
-                                    for metric, data in category_data['aggregated'].items()
+                        filtered_metrics["metrics"][category] = {}
+                        
+                        if isinstance(category_data, (int, float)):
+                            # Handle scalar values directly
+                            filtered_metrics["metrics"][category] = category_data
+                        elif isinstance(category_data, dict):
+                            if category == 'io':
+                                # Handle both aggregated and direct IO metrics
+                                if 'aggregated' in category_data:
+                                    # Traditional telegraf format
+                                    filtered_metrics["metrics"][category] = {
+                                        'aggregated': {
+                                            metric: data.get(timestamp, data.get('latest', 0))
+                                            for metric, data in category_data['aggregated'].items()
+                                        }
+                                    }
+                                else:
+                                    # Direct metrics format (e.g., psutil)
+                                    filtered_metrics["metrics"][category] = {
+                                        metric: value.get(timestamp, value.get('latest', 0)) if isinstance(value, dict) else value
+                                        for metric, value in category_data.items()
+                                    }
+                            elif 'util' in category_data:
+                                # CPU telegraf format
+                                filtered_metrics["metrics"][category] = {
+                                    'util': category_data['util'].get(timestamp, category_data['util'].get('latest', 0))
                                 }
-                            }
-                        else:
-                            # For other categories
-                            filtered_metrics["metrics"][category] = {
-                                metric: data.get(timestamp, data.get('latest', 0))
-                                for metric, data in category_data.items()
-                            }
-                            
+                            else:
+                                # Generic dictionary metrics
+                                for metric, data in category_data.items():
+                                    if isinstance(data, dict):
+                                        filtered_metrics["metrics"][category][metric] = data.get(timestamp, data.get('latest', 0))
+                                    else:
+                                        filtered_metrics["metrics"][category][metric] = data
+                    
                     processed_metrics.append(filtered_metrics)
                 except Exception as e:
                     logger.error(f"Error processing metrics for node {node_ip} at timestamp {timestamp}: {str(e)}")
+                    logger.debug(f"Raw metrics for failed node: {node_data}")
                     continue
                     
         return processed_metrics
@@ -373,9 +411,8 @@ class TrainingService:
 
             # Use background task for computation
             try:
-                loop = asyncio.get_event_loop()
                 stats = await asyncio.wait_for(
-                    loop.run_in_executor(self._stats_executor, self._compute_dataset_stats),
+                    self._event_loop.run_in_executor(self._stats_executor, self._compute_dataset_stats),
                     timeout=20  # 20s timeout
                 )
                 return stats

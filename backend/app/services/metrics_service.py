@@ -111,14 +111,12 @@ class MetricsService:
                 'cpu usage',
                 'worker time',
                 'cpu time',
-                'active cpu time',
             ],
             'memory': [
                 'total memstore used',
                 'active memstore used',
                 'memstore limit',
-                'memory limit',
-                'memory hold',
+                'memory usage',
                 'observer memory hold size'
             ],
             'io': [

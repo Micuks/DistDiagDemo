@@ -130,12 +130,31 @@ class AnomalyService {
         ).then(response => response.data);
     }
 
+    async getAvailableModels() {
+        return this._retryableRequest(() => 
+            this.client.get('/api/models/list')
+        );
+    }
+
+    async getModelPerformance(modelName) {
+        return this._retryableRequest(() => 
+            this.client.get(`/api/models/${encodeURIComponent(modelName)}/performance`)
+        );
+    }
+
+    async compareModels(modelNames) {
+        return this._retryableRequest(() => 
+            this.client.post('/api/models/compare', {
+                models: modelNames
+            })
+        );
+    }
+
     async startAnomalyCollection(type, node, options = {}) {
         return this._retryableRequest(() => 
-            this.client.post('/api/anomaly/inject', {
+            this.client.post('/api/training/collect', {
                 type: type,
                 node: node || null,
-                collect_training_data: true,
                 pre_collect: options.preCollect,
                 post_collect: options.postCollect
             })
@@ -144,8 +163,7 @@ class AnomalyService {
 
     async stopAnomalyCollection(savePostData = true) {
         return this._retryableRequest(() => 
-            this.client.post('/api/anomaly/clear', {
-                collect_training_data: true,
+            this.client.post('/api/training/stop', {
                 save_post_data: savePostData
             })
         );
