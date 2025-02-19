@@ -4,12 +4,27 @@ import psutil
 import time
 import asyncio
 import subprocess
+import warnings
 from typing import Dict, Any, List
 from datetime import datetime
 import threading
 import logging
 from functools import lru_cache, wraps
+import pymysql
 from ..services.training_service import training_service
+import sys
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Add project root to Python path
+project_root = str(Path(__file__).parent.parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+from config.dist_diagnosis_config import NODE_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +44,11 @@ def timed_lru_cache(seconds: int, maxsize: int = 128):
         return wrapped_func
     return wrapper_decorator
 
+class MetricsCollectionMethod:
+    SQL = "sql"
+    OBDIAG = "obdiag"
+    PSUTIL = "psutil"
+
 class MetricsService:
     _instance = None
     _lock = threading.Lock()
@@ -45,15 +65,118 @@ class MetricsService:
         return cls._instance
 
     def _initialize(self):
+        """Initialize the metrics service with OB connection details"""
         self.metrics = {}
+        self.metrics_history = {}  # Store time series data
         self.timestamp = None
         self.collection_active = False
         self.collection_thread = None
         self.collection_interval = 5  # seconds
-        self.use_obdiag = True  # Flag to control collection method
         self.event_loop = None
         self._metrics_cache = {}
         self._last_collection = None
+        self.MAX_HISTORY_POINTS = 720  # 1 hour of data at 5s intervals
+        
+        # Collection method configuration
+        self.collection_method = os.getenv('METRICS_COLLECTION_METHOD', MetricsCollectionMethod.SQL)
+        if self.collection_method == MetricsCollectionMethod.OBDIAG:
+            warnings.warn(
+                "Using OBDIAG collection method which is deprecated. Consider switching to SQL method.",
+                DeprecationWarning
+            )
+        
+        # Validate required environment variables
+        required_env_vars = ['OB_USER', 'OB_PASSWORD', 'OB_PORT']
+        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+        if missing_vars:
+            raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
+        
+        # OB connection config
+        try:
+            self.ob_config = {
+                'user': os.environ['OB_USER'],
+                'password': os.environ['OB_PASSWORD'],
+                'database': os.getenv('OB_DATABASE', 'oceanbase'),
+                'host': os.getenv('OB_HOST', '127.0.0.1'),
+                'port': int(os.environ['OB_PORT'])
+            }
+            logger.info(f"Initialized OB connection config with host={self.ob_config['host']}, port={self.ob_config['port']}, user={self.ob_config['user']}")
+        except (KeyError, ValueError) as e:
+            logger.error(f"Failed to initialize OB connection config: {e}")
+            raise
+        
+        # Essential metrics for anomaly detection
+        self.essential_metrics = {
+            'cpu': [
+                'cpu usage',
+                'worker time',
+                'cpu time',
+                'active cpu time',
+            ],
+            'memory': [
+                'total memstore used',
+                'active memstore used',
+                'memstore limit',
+                'memory limit',
+                'memory hold',
+                'observer memory hold size'
+            ],
+            'io': [
+                'palf write io count to disk',
+                'palf write size to disk',
+                'clog trans log total size',
+                'io read count',
+                'io write count',
+                'io read delay',
+                'io write delay'
+            ],
+            'network': [
+                'rpc packet in bytes',
+                'rpc packet out bytes',
+                'rpc net delay',
+                'rpc net frame delay',
+                'mysql packet in bytes',
+                'mysql packet out bytes',
+                'mysql deliver fail',
+                'rpc deliver fail'
+            ],
+            'transactions': [
+                'trans commit count',
+                'trans timeout count',
+                'sql update count',
+                'active sessions',
+                'sql select count',
+                'trans system trans count',
+                'trans rollback count',
+                'sql fail count',
+                'request queue time',
+            ]
+        }
+
+        # Create reverse mapping from metric name to category
+        self.metric_to_category = {}
+        for category, metrics in self.essential_metrics.items():
+            for metric in metrics:
+                self.metric_to_category[metric.strip().lower()] = category
+        
+        logger.info(f"Initialized {len(self.metric_to_category)} essential metrics across {len(self.essential_metrics)} categories")
+
+        # Start metrics collection
+        self.start_collection()
+
+    def set_collection_method(self, method: str):
+        """Set the metrics collection method."""
+        if method not in [MetricsCollectionMethod.SQL, MetricsCollectionMethod.OBDIAG, MetricsCollectionMethod.PSUTIL]:
+            raise ValueError(f"Invalid collection method: {method}")
+        
+        if method == MetricsCollectionMethod.OBDIAG:
+            warnings.warn(
+                "Switching to OBDIAG collection method which is deprecated. Consider using SQL method.",
+                DeprecationWarning
+            )
+            
+        self.collection_method = method
+        logger.info(f"Switched metrics collection method to: {method}")
 
     def start_collection(self):
         """Start collecting metrics in a separate thread."""
@@ -85,7 +208,9 @@ class MetricsService:
         
         while self.collection_active:
             try:
-                if self.use_obdiag:
+                if self.collection_method == MetricsCollectionMethod.SQL:
+                    self.event_loop.run_until_complete(self._collect_sql_metrics())
+                elif self.collection_method == MetricsCollectionMethod.OBDIAG:
                     try:
                         self.event_loop.run_until_complete(self._collect_obdiag_metrics())
                     except Exception as e:
@@ -94,21 +219,123 @@ class MetricsService:
                         self.event_loop.run_until_complete(self._collect_psutil_metrics())
                 else:
                     self.event_loop.run_until_complete(self._collect_psutil_metrics())
-                
+                    
                 time.sleep(self.collection_interval)
             except Exception as e:
                 logger.error(f"Error collecting metrics: {e}")
-                if not self.collection_active:  # Break the loop if collection is stopped
+                if not self.collection_active:
                     break
-                time.sleep(self.collection_interval)  # Wait before retrying
+                time.sleep(self.collection_interval)
                 
         # Clean up event loop
         self.event_loop.close()
         self.event_loop = None
         logger.info("Metrics collection loop ended")
 
+    async def _collect_sql_metrics(self):
+        """Collect metrics using direct SQL queries to OceanBase."""
+        timestamp = datetime.now().isoformat()
+        current_metrics = {}
+        
+        # Get list of nodes from config
+        nodes = NODE_CONFIG.get('node_list', [])
+        
+        for node in nodes:
+            try:
+                # Use full node address including port
+                node_ip = node.split(':')[0]
+                # Connect using node address directly
+                logger.info(f"Connecting to node {node_ip}")
+                conn = pymysql.connect(
+                    host=self.ob_config['host'],
+                    user=self.ob_config['user'],
+                    password=self.ob_config['password'],
+                    database=self.ob_config['database'],
+                    port=self.ob_config['port']
+                )
+                
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT name, value 
+                        FROM gv$sysstat 
+                        WHERE con_id = %s AND svr_ip = %s
+                    """, (1, node_ip))
+                    
+                    # Initialize node metrics structure
+                    node_metrics = {
+                        'cpu': {},
+                        'memory': {},
+                        'io': {},
+                        'network': {},
+                        'transactions': {}
+                    }
+                    
+                    # Categorize metrics using exact name matching
+                    metrics_found = set()
+                    for name, value in cursor.fetchall():
+                        clean_name = name.strip().lower()
+                        category = self.metric_to_category.get(clean_name)
+                        
+                        if category:
+                            value = float(value)
+                            node_metrics[category][name] = value
+                            metrics_found.add(clean_name)
+                            
+                            # Store in history
+                            if node_ip not in self.metrics_history:
+                                self.metrics_history[node_ip] = {}
+                            if category not in self.metrics_history[node_ip]:
+                                self.metrics_history[node_ip][category] = {}
+                            if name not in self.metrics_history[node_ip][category]:
+                                self.metrics_history[node_ip][category][name] = []
+                                
+                            history = self.metrics_history[node_ip][category][name]
+                            history.append({"timestamp": timestamp, "value": value})
+                            
+                            # Keep only last MAX_HISTORY_POINTS
+                            if len(history) > self.MAX_HISTORY_POINTS:
+                                self.metrics_history[node_ip][category][name] = history[-self.MAX_HISTORY_POINTS:]
+                    
+                    # Log missing essential metrics
+                    missing_metrics = set(self.metric_to_category.keys()) - metrics_found
+                    if missing_metrics:
+                        logger.warning(f"Missing essential metrics for node {node_ip}: {missing_metrics}")
+                    
+                    current_metrics[node_ip] = node_metrics
+                
+                conn.close()
+                
+            except Exception as e:
+                logger.error(f"Error collecting metrics from {node_ip}: {e}")
+                current_metrics[node_ip] = {
+                    'cpu': {},
+                    'memory': {},
+                    'io': {},
+                    'network': {},
+                    'transactions': {}
+                }
+
+        if not current_metrics:
+            logger.warning("No metrics were collected from any nodes")
+        else:
+            logger.info(f"Successfully collected metrics from nodes: {list(current_metrics.keys())}")
+            try:
+                await training_service.add_metrics(current_metrics)
+                logger.info("Successfully sent metrics to training service")
+            except Exception as e:
+                logger.error(f"Failed to send metrics to training service: {e}")
+
+        self.metrics = current_metrics
+        self.timestamp = timestamp
+
+    @DeprecationWarning
     async def _collect_obdiag_metrics(self):
-        """Collect metrics using obdiag"""
+        """[DEPRECATED] Collect metrics using obdiag"""
+        warnings.warn(
+            "Using deprecated obdiag collection method. Consider switching to SQL method.",
+            DeprecationWarning
+        )
+        
         timestamp = datetime.now().isoformat()
         dir_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         base_pack_dir = f"obdiag_gather_pack_{dir_timestamp}"
@@ -141,8 +368,8 @@ class MetricsService:
         metrics = {}
         for zip_file in os.listdir(pack_dir):
             if zip_file.startswith("sysstat_"):
-                node_ip = zip_file.split("_")[1]
-                logger.debug(f"Processing metrics for node: {node_ip}")
+                node_address = zip_file.split("_")[1]
+                logger.debug(f"Processing metrics for node: {node_address}")
                 zip_path = os.path.join(pack_dir, zip_file)
                 
                 extract_dir = pack_dir
@@ -151,16 +378,15 @@ class MetricsService:
                     cmd = f"unzip -o {zip_path} -d {extract_dir} > /dev/null 2>&1"
                     logger.debug(f"Extracting metrics data: {cmd}")
                     subprocess.run(cmd, shell=True, check=True)
-                    metrics[node_ip] = await self._parse_node_metrics(extract_dir)
+                    metrics[node_address] = await self._parse_node_metrics(extract_dir)
                 except subprocess.CalledProcessError as e:
-                    logger.error(f"Failed to extract metrics data for {node_ip}: {e}")
+                    logger.error(f"Failed to extract metrics data for {node_address}: {e}")
                     continue
 
         if not metrics:
             logger.warning("No metrics were collected from any nodes")
         else:
             logger.info(f"Successfully collected metrics from nodes: {list(metrics.keys())}")
-            # Add metrics to training service if metrics were collected
             try:
                 await training_service.add_metrics(metrics)
                 logger.debug("Successfully sent metrics to training service")
@@ -174,9 +400,14 @@ class MetricsService:
         subprocess.run(f"rm -rf {base_pack_dir}", shell=True)
 
     async def _collect_psutil_metrics(self):
-        """Collect metrics using psutil as fallback."""
+        """[DEPRECATED] Collect metrics using psutil as fallback."""
+        warnings.warn(
+            "Using deprecated psutil collection method. Consider switching to SQL method.",
+            DeprecationWarning
+        )
+        
         metrics = {
-            "localhost": {  # Using localhost as we're collecting local metrics
+            "localhost": {
                 "cpu": {
                     "util": self._get_cpu_metrics(),
                 },
@@ -191,366 +422,13 @@ class MetricsService:
         self.metrics = metrics
         self.timestamp = datetime.now().isoformat()
 
-        # Add metrics to training service
         try:
             await training_service.add_metrics(metrics)
             logger.debug("Successfully sent psutil metrics to training service")
         except Exception as e:
             logger.error(f"Failed to send psutil metrics to training service: {e}")
 
-    async def _parse_node_metrics(self, node_dir: str) -> Dict[str, Any]:
-        """Parse metrics from node directory"""
-        logger.debug(f"Parsing metrics from directory: {node_dir}")
-        metrics = {}
-
-        node_dirs = [d for d in os.listdir(node_dir) if d.startswith("sysstat_") and not d.endswith(".zip")]
-        if not node_dirs:
-            logger.error("No node-specific directory found")
-            return metrics
-
-        node_specific_dir = os.path.join(node_dir, node_dirs[0])
-        logger.debug(f"Using node-specific directory: {node_specific_dir}")
-
-        # Parse CPU metrics
-        cpu_file = os.path.join(node_specific_dir, "one_day_cpu_data.txt")
-        if os.path.exists(cpu_file):
-            with open(cpu_file) as f:
-                lines = f.readlines()
-                cpu_indices = {
-                    "user": 1, "system": 2, "wait": 3,
-                    "hirq": 4, "sirq": 5, "util": 6,
-                }
-                metrics["cpu"] = self._parse_time_series_data(lines, cpu_indices)
-        else:
-            logger.debug(f"CPU metrics file not found at {cpu_file}")
-
-        # Parse Memory metrics
-        mem_file = os.path.join(node_specific_dir, "one_day_mem_data.txt")
-        if os.path.exists(mem_file):
-            with open(mem_file) as f:
-                lines = f.readlines()
-                mem_indices = {
-                    "free": 1, "used": 2, "buff": 3,
-                    "cach": 4, "total": 5, "util": 6,
-                }
-                metrics["memory"] = self._parse_time_series_data(lines, mem_indices)
-        else:
-            logger.debug(f"Memory metrics file not found at {mem_file}")
-
-        # Parse Swap metrics
-        swap_file = os.path.join(node_specific_dir, "tsar_swap_data.txt")
-        if os.path.exists(swap_file):
-            with open(swap_file) as f:
-                lines = f.readlines()
-                swap_indices = {
-                    "total": 1,
-                    "used": 2,
-                    "free": 3,
-                    "util": 4,
-                    "in_rate": 5,
-                    "out_rate": 6,
-                }
-                metrics["swap"] = self._parse_time_series_data(lines, swap_indices)
-
-        # Parse TCP/UDP metrics
-        tcp_udp_file = os.path.join(node_specific_dir, "tsar_tcp_udp_data.txt")
-        if os.path.exists(tcp_udp_file):
-            with open(tcp_udp_file) as f:
-                lines = f.readlines()
-                tcp_udp_indices = {
-                    "active": 1,
-                    "pasv": 2,
-                    "retrans": 3,
-                    "in_segs": 4,
-                    "out_segs": 5,
-                    "udp_in_datagrams": 6,
-                    "udp_out_datagrams": 7,
-                    "udp_in_errors": 8,
-                }
-                metrics["tcp_udp"] = self._parse_time_series_data(
-                    lines, tcp_udp_indices
-                )
-
-        # Parse IO metrics
-        io_file = os.path.join(node_specific_dir, "tsar_io_data.txt")
-        if os.path.exists(io_file):
-            with open(io_file) as f:
-                lines = f.readlines()
-                truncated_lines = [line[:30] + '...' if len(line) > 30 else line for line in lines[:3]]
-                if len(lines) >= 2:
-                    # Clean and parse device line
-                    device_line = ''.join(c if c.isalnum() or c in ['-', ' '] else ' ' for c in lines[0])
-                    metric_line = lines[1]
-                    data_lines = [
-                        line
-                        for line in lines[2:]
-                        if not any(x in line for x in ["#", "MAX", "MEAN", "MIN"])
-                        and line.strip()
-                    ]
-
-                    # Parse device names
-                    devices = []
-                    current_device = ""
-                    in_device = False
-                    for char in device_line:
-                        if char == "-":
-                            if current_device.strip():
-                                devices.append(current_device.strip())
-                                current_device = ""
-                            in_device = True
-                        elif in_device and char != "-":
-                            in_device = False
-                        elif not in_device and char != "-":
-                            current_device += char
-                    
-                    # Add last device if exists
-                    if current_device.strip():
-                        devices.append(current_device.strip())
-
-                    if devices and data_lines:
-                        metrics_per_device = 17
-                        device_metrics = {}
-                        aggregated_data = {
-                            metric: []
-                            for metric in [
-                                "rrqms",
-                                "wrqms",
-                                "rs",
-                                "ws",
-                                "rsecs",
-                                "wsecs",
-                                "rqsize",
-                                "rarqsz",
-                                "warqsz",
-                                "qusize",
-                                "io_await",
-                                "rawait",
-                                "wawait",
-                                "svctm",
-                                "util",
-                            ]
-                        }
-
-                        # Process each timestamp's data
-                        for line in data_lines:
-                            # Skip header and empty lines
-                            if line.startswith(("Time", "#", "MAX", "MEAN", "MIN", "-")) or not line.strip():
-                                continue
-
-                            values = line.strip().split()
-                            if not values:
-                                continue
-
-                            timestamp = values[0]
-
-                            # Process each device's metrics at this timestamp
-                            current_totals = {k: 0.0 for k in aggregated_data}
-                            device_count = 0
-
-                            for i, device in enumerate(devices):
-                                if device.startswith("loop"):
-                                    continue
-
-                                start_idx = i * metrics_per_device + 1
-                                if start_idx + metrics_per_device <= len(values):
-                                    try:
-                                        # Convert values with units (K, M, G) to base values
-                                        def convert_io_value(val_str):
-                                            try:
-                                                return self._convert_to_bytes(val_str)
-                                            except ValueError:
-                                                logger.error(f"Error converting IO value: {val_str}")
-                                                return 0.0
-
-                                        device_data = {
-                                            "rrqms": convert_io_value(values[start_idx]),
-                                            "wrqms": convert_io_value(values[start_idx + 1]),
-                                            "rs": convert_io_value(values[start_idx + 4]),
-                                            "ws": convert_io_value(values[start_idx + 5]),
-                                            "rsecs": convert_io_value(values[start_idx + 6]),
-                                            "wsecs": convert_io_value(values[start_idx + 7]),
-                                            "rqsize": convert_io_value(values[start_idx + 8]),
-                                            "rarqsz": convert_io_value(values[start_idx + 9]),
-                                            "warqsz": convert_io_value(values[start_idx + 10]),
-                                            "qusize": convert_io_value(values[start_idx + 11]),
-                                            "io_await": convert_io_value(values[start_idx + 12]),
-                                            "rawait": convert_io_value(values[start_idx + 13]),
-                                            "wawait": convert_io_value(values[start_idx + 14]),
-                                            "svctm": convert_io_value(values[start_idx + 15]),
-                                            "util": convert_io_value(values[start_idx + 16]),
-                                        }
-
-                                        # Initialize device's time series if needed
-                                        if device not in device_metrics:
-                                            device_metrics[device] = {
-                                                k: [] for k in device_data.keys()
-                                            }
-
-                                        # Add data point for each metric
-                                        for metric, value in device_data.items():
-                                            device_metrics[device][metric].append(
-                                                {"timestamp": timestamp, "value": value}
-                                            )
-
-                                            # Aggregate metrics
-                                            if metric not in ["util"]:
-                                                current_totals[metric] += value
-                                            else:
-                                                current_totals[metric] = max(
-                                                    current_totals[metric], value
-                                                )
-
-                                        device_count += 1
-                                    except (ValueError, IndexError) as e:
-                                        logger.error(
-                                            f"Error parsing device metrics for {device}: {str(e)}"
-                                        )
-                                        continue
-
-                            # Add aggregated metrics for this timestamp
-                            if device_count > 0:
-                                for metric, total in current_totals.items():
-                                    if metric in ["io_await", "rawait", "wawait", "svctm"]:
-                                        total /= device_count
-                                    aggregated_data[metric].append(
-                                        {"timestamp": timestamp, "value": total}
-                                    )
-
-                        # Convert device metrics to final format
-                        io_metrics = {
-                            "devices": {
-                                device: {
-                                    metric: {
-                                        "data": data,
-                                        "latest": data[-1]["value"] if data else 0.0,
-                                    }
-                                    for metric, data in metrics.items()
-                                }
-                                for device, metrics in device_metrics.items()
-                            },
-                            "aggregated": {
-                                metric: {
-                                    "data": data,
-                                    "latest": data[-1]["value"] if data else 0.0,
-                                }
-                                for metric, data in aggregated_data.items()
-                            },
-                        }
-                        metrics["io"] = io_metrics
-
-        # Parse Network metrics
-        net_file = os.path.join(node_specific_dir, "tsar_traffic_data.txt")
-        if os.path.exists(net_file):
-            with open(net_file) as f:
-                lines = f.readlines()
-                if len(lines) > 3:
-                    # Update indices based on actual tsar output format
-                    net_indices = {
-                            "bytin": 1,    # KB/s
-                            "bytout": 2,   # KB/s
-                            "pktin": 3,    # packets/s
-                            "pktout": 4,   # packets/s
-                            "pkterr": 5,   # packets/s
-                            "pktdrp": 6,   # packets/s
-                        }
-                    try:
-                        metrics["network"] = self._parse_time_series_data(lines, net_indices)
-                        # Convert bytin/bytout from KB/s to B/s for frontend
-                        if "bytin" in metrics["network"]:
-                            for point in metrics["network"]["bytin"]["data"]:
-                                point["value"] *= 1024  # Convert KB/s to B/s
-                            metrics["network"]["bytin"]["latest"] *= 1024
-                        if "bytout" in metrics["network"]:
-                            for point in metrics["network"]["bytout"]["data"]:
-                                point["value"] *= 1024  # Convert KB/s to B/s
-                            metrics["network"]["bytout"]["latest"] *= 1024
-                    except Exception as e:
-                        logger.error(f"Error parsing network metrics: {e}")
-                        logger.error(f"Network file content sample: {lines[:5] if lines else 'No lines'}")
-        else:
-            logger.warning(f"Network metrics file not found at {net_file}")
-
-        logger.debug(f"Finished parsing metrics. Available metrics: {list(metrics.keys())}")
-        return metrics
-
-    def _convert_to_bytes(self, value_str: str) -> float:
-        """Convert a string value with units (K, M, G) to float in bytes."""
-        try:
-            # Skip header lines or empty values
-            if not value_str or value_str.startswith('-') or value_str in ['free', 'used', 'buff', 'cach', 'total', 'util']:
-                return 0.0
-            
-            # Remove % if present and convert directly
-            if value_str.endswith('%'):
-                return float(value_str[:-1])
-
-            # Convert number with units
-            value_str = value_str.strip().upper()
-            if value_str.endswith('K'):
-                return float(value_str[:-1]) * 1024
-            elif value_str.endswith('M'):
-                return float(value_str[:-1]) * 1024 * 1024
-            elif value_str.endswith('G'):
-                return float(value_str[:-1]) * 1024 * 1024 * 1024
-            else:
-                return float(value_str)
-        except ValueError as e:
-            logger.error(f"Error converting value '{value_str}': {e}")
-            return 0.0
-
-    def _parse_time_series_data(
-        self, lines: List[str], metric_indices: Dict[str, int], skip_first_n: int = 0
-    ) -> Dict[str, Any]:
-        """Parse time series data from lines into metrics"""
-        logger.debug(f"Parsing time series data with {len(lines)} lines")
-        metrics = {}
-        max_points = 60  # Keep last 60 data points (5 minutes with 5s interval)
-        
-        for metric_name, idx in metric_indices.items():
-            data_points = []
-            latest = 0.0
-            valid_points = 0
-
-            parsing_data = False
-            for line_num, line in enumerate(lines):
-                line = line.strip()
-                if not line:
-                    continue
-
-                if any(header in line for header in ["Time", "-----", "MAX", "MEAN", "MIN"]):
-                    parsing_data = "Time" in line and not "-----" in line
-                    continue
-
-                if not parsing_data:
-                    continue
-
-                parts = line.split()
-                if len(parts) > idx:
-                    try:
-                        timestamp = parts[0]
-                        raw_value = parts[idx]
-                        value = self._convert_to_bytes(raw_value)
-                        
-                        if metric_name in ['free', 'used', 'buff', 'cach', 'total'] and value > 1024:
-                            value = value / (1024 * 1024)
-                            
-                        data_points.append({"timestamp": timestamp, "value": value})
-                        latest = value
-                        valid_points += 1
-                    except (ValueError, IndexError) as e:
-                        logger.error(f"Error parsing metric {metric_name} at line {line_num + 1}: {e}")
-                        continue
-
-            # Only keep the most recent data points
-            if len(data_points) > max_points:
-                data_points = data_points[-max_points:]
-
-            metrics[metric_name] = {"data": data_points, "latest": latest}
-            logger.debug(f"Parsed {valid_points} points for {metric_name}, kept last {len(data_points)} points")
-
-        return metrics
-
-    def _get_cpu_metrics(self) -> Dict[str, Dict[str, Any]]:
+    def _get_cpu_metrics(self):
         """Get CPU utilization metrics using psutil."""
         value = psutil.cpu_percent(interval=1)
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -561,7 +439,7 @@ class MetricsService:
             "data": [{"timestamp": timestamp, "value": value}]
         }
 
-    def _get_memory_metrics(self) -> Dict[str, Dict[str, Any]]:
+    def _get_memory_metrics(self):
         """Get memory utilization metrics using psutil."""
         mem = psutil.virtual_memory()
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -586,7 +464,7 @@ class MetricsService:
             }
         }
 
-    def _get_io_metrics(self) -> Dict[str, Dict[str, Any]]:
+    def _get_io_metrics(self):
         """Get disk I/O metrics using psutil."""
         io = psutil.disk_io_counters()
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -631,7 +509,7 @@ class MetricsService:
             }
         }
 
-    def _get_network_metrics(self) -> Dict[str, Dict[str, Any]]:
+    def _get_network_metrics(self):
         """Get network I/O metrics using psutil."""
         net = psutil.net_io_counters()
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -665,104 +543,209 @@ class MetricsService:
             }
         }
 
+    async def _parse_node_metrics(self, node_dir: str) -> Dict[str, Any]:
+        """[DEPRECATED] Parse metrics from node directory"""
+        logger.debug(f"Parsing metrics from directory: {node_dir}")
+        metrics = {}
+
+        node_dirs = [d for d in os.listdir(node_dir) if d.startswith("sysstat_") and not d.endswith(".zip")]
+        if not node_dirs:
+            logger.error("No node-specific directory found")
+            return metrics
+
+        node_specific_dir = os.path.join(node_dir, node_dirs[0])
+        logger.debug(f"Using node-specific directory: {node_specific_dir}")
+
+        # Parse CPU metrics
+        cpu_file = os.path.join(node_specific_dir, "one_day_cpu_data.txt")
+        if os.path.exists(cpu_file):
+            with open(cpu_file) as f:
+                lines = f.readlines()
+                cpu_indices = {
+                    "user": 1, "system": 2, "wait": 3,
+                    "hirq": 4, "sirq": 5, "util": 6,
+                }
+                metrics["cpu"] = self._parse_time_series_data(lines, cpu_indices)
+        else:
+            logger.debug(f"CPU metrics file not found at {cpu_file}")
+
+        # Parse Memory metrics
+        mem_file = os.path.join(node_specific_dir, "one_day_mem_data.txt")
+        if os.path.exists(mem_file):
+            with open(mem_file) as f:
+                lines = f.readlines()
+                mem_indices = {
+                    "free": 1, "used": 2, "buff": 3,
+                    "cach": 4, "total": 5, "util": 6,
+                }
+                metrics["memory"] = self._parse_time_series_data(lines, mem_indices)
+        else:
+            logger.debug(f"Memory metrics file not found at {mem_file}")
+
+        # Parse IO metrics
+        io_file = os.path.join(node_specific_dir, "tsar_io_data.txt")
+        if os.path.exists(io_file):
+            with open(io_file) as f:
+                lines = f.readlines()
+                io_indices = {
+                    "read_bytes": 1,
+                    "write_bytes": 2,
+                    "util": 3,
+                }
+                metrics["io"] = {
+                    "aggregated": self._parse_time_series_data(lines, io_indices)
+                }
+        else:
+            logger.debug(f"IO metrics file not found at {io_file}")
+
+        # Parse Network metrics
+        net_file = os.path.join(node_specific_dir, "tsar_traffic_data.txt")
+        if os.path.exists(net_file):
+            with open(net_file) as f:
+                lines = f.readlines()
+                net_indices = {
+                    "bytes_sent": 1,
+                    "bytes_recv": 2,
+                    "packets_sent": 3,
+                    "packets_recv": 4,
+                }
+                metrics["network"] = self._parse_time_series_data(lines, net_indices)
+        else:
+            logger.debug(f"Network metrics file not found at {net_file}")
+
+        return metrics
+
+    def _parse_time_series_data(
+        self, lines: List[str], metric_indices: Dict[str, int], skip_first_n: int = 0
+    ) -> Dict[str, Any]:
+        """[DEPRECATED] Parse time series data from lines into metrics"""
+        metrics = {}
+        for metric_name, idx in metric_indices.items():
+            data_points = []
+            latest = 0.0
+            
+            for line in lines[skip_first_n:]:
+                if not line.strip() or line.startswith(("#", "Time", "MAX", "MEAN", "MIN")):
+                    continue
+                    
+                parts = line.split()
+                if len(parts) > idx:
+                    try:
+                        timestamp = parts[0]
+                        value = float(parts[idx])
+                        data_points.append({"timestamp": timestamp, "value": value})
+                        latest = value
+                    except (ValueError, IndexError):
+                        continue
+            
+            metrics[metric_name] = {
+                "data": data_points[-60:],  # Keep last 60 points
+                "latest": latest
+            }
+            
+        return metrics
+
     @timed_lru_cache(seconds=30, maxsize=1)
     def get_metrics(self) -> Dict[str, Any]:
-        """Get the latest collected metrics with caching."""
-        current_timestamp = self.timestamp
-        if current_timestamp and len(current_timestamp) == 14:  # Format: YYYYMMDDHHMMSS
-            try:
-                dt = datetime.strptime(current_timestamp, "%Y%m%d%H%M%S")
-                current_timestamp = dt.isoformat()
-            except ValueError:
-                current_timestamp = datetime.now().isoformat()
-
-        # Create a simplified version of metrics for initial load
-        simplified_metrics = {}
-        for node_ip, node_data in self.metrics.items():
-            simplified_metrics[node_ip] = {}
-            for category, metrics in node_data.items():
-                if category == 'io':
-                    # For IO, only include aggregated metrics
-                    simplified_metrics[node_ip][category] = {
-                        'aggregated': {
-                            metric: {'latest': data['latest']}
-                            for metric, data in metrics['aggregated'].items()
-                        }
-                    }
-                else:
-                    # For other categories, only include latest values
-                    simplified_metrics[node_ip][category] = {
-                        metric: {'latest': data['latest']}
-                        for metric, data in metrics.items()
-                    }
-
+        """Get the latest collected metrics with history."""
+        if not self.metrics:
+            return {"metrics": {}, "timestamp": None}
+            
         return {
-            "timestamp": current_timestamp,
-            "metrics": simplified_metrics
+            "metrics": self.metrics_history,
+            "timestamp": self.timestamp
         }
 
     @timed_lru_cache(seconds=30, maxsize=1)
     def get_system_metrics(self) -> Dict:
-        """Get current system metrics from the latest collected data with caching"""
+        """Get aggregated system-wide metrics."""
         try:
-            # Get the latest metrics for localhost or the first available node
-            node_metrics = None
-            for node, metrics in self.metrics.items():
-                if node == "localhost" or node_metrics is None:
-                    node_metrics = metrics
-                    break
-
-            if not node_metrics:
-                return {
-                    'cpu_usage': 0.0,
-                    'memory_usage': 0.0,
-                    'disk_usage': 0.0
-                }
-
-            # Extract CPU usage
-            cpu_usage = float(node_metrics.get('cpu', {}).get('util', {}).get('latest', 0))
-
-            # Extract memory usage
-            memory_usage = float(node_metrics.get('memory', {}).get('util', {}).get('latest', 0))
-
-            # Extract disk usage from IO metrics
-            disk_usage = float(node_metrics.get('io', {}).get('aggregated', {}).get('util', {}).get('latest', 0))
-
             metrics = {
-                'cpu_usage': round(cpu_usage, 1),
-                'memory_usage': round(memory_usage, 1),
-                'disk_usage': round(disk_usage, 1)
+                'cpu_usage': 0.0,
+                'memory_usage': 0.0,
+                'disk_usage': 0.0,
+                'network_io': 0.0,
+                'transactions': 0.0
             }
-
-            logger.debug(f"System metrics: {metrics}")
+            
+            if not self.metrics:
+                return metrics
+                
+            node_count = len(self.metrics)
+            if node_count == 0:
+                return metrics
+                
+            for node_address, node_data in self.metrics.items():
+                # CPU usage from active CPU time and total time
+                cpu_metrics = node_data.get('cpu', {})
+                active_time = cpu_metrics.get('active cpu time', 0)
+                total_time = cpu_metrics.get('cpu_total_time', 1)  # Avoid div by zero
+                metrics['cpu_usage'] += (active_time / total_time) * 100 if total_time > 0 else 0
+                
+                # Memory usage percentage
+                mem_metrics = node_data.get('memory', {})
+                used = mem_metrics.get('total_memstore_used', 0)
+                limit = mem_metrics.get('memstore_limit', 1)  # Avoid div by zero
+                metrics['memory_usage'] += (used / limit) * 100 if limit > 0 else 0
+                
+                # IO operations per second
+                io_metrics = node_data.get('io', {})
+                metrics['disk_usage'] += (
+                    io_metrics.get('io_read_count', 0) +
+                    io_metrics.get('io_write_count', 0)
+                )
+                
+                # Network bytes per second
+                net_metrics = node_data.get('network', {})
+                metrics['network_io'] += (
+                    net_metrics.get('rpc packet in bytes', 0) +
+                    net_metrics.get('rpc packet out bytes', 0) +
+                    net_metrics.get('mysql packet in bytes', 0) +
+                    net_metrics.get('mysql packet out bytes', 0)
+                )
+                
+                # Transaction rate
+                trans_metrics = node_data.get('transactions', {})
+                metrics['transactions'] += trans_metrics.get('trans commit count', 0)
+            
+            # Average across nodes
+            for key in metrics:
+                metrics[key] = round(metrics[key] / node_count, 2)
+                
             return metrics
-
+            
         except Exception as e:
-            logger.error(f"Error getting system metrics: {e}")
+            logger.error(f"Error calculating system metrics: {e}")
             return {
                 'cpu_usage': 0.0,
                 'memory_usage': 0.0,
-                'disk_usage': 0.0
+                'disk_usage': 0.0,
+                'network_io': 0.0,
+                'transactions': 0.0
             }
 
     @timed_lru_cache(seconds=30, maxsize=100)
-    def get_detailed_metrics(self, node_ip: str = None, category: str = None) -> Dict[str, Any]:
-        """Get detailed metrics with historical data for specific node and category with caching."""
-        if not node_ip or not category or node_ip not in self.metrics:
-            return {"error": "Invalid node_ip or category"}
-
-        node_data = self.metrics[node_ip]
-        if category not in node_data:
-            return {"error": "Category not found"}
-
-        return {
-            "timestamp": self.timestamp,
-            "metrics": {
-                node_ip: {
-                    category: node_data[category]
-                }
+    def get_detailed_metrics(self, node_address: str = None, category: str = None) -> Dict[str, Any]:
+        """Get detailed time series metrics for specific node and/or category."""
+        if not self.metrics_history:
+            return {}
+            
+        if node_address and node_address not in self.metrics_history:
+            return {}
+            
+        if node_address:
+            metrics = self.metrics_history[node_address]
+            if category:
+                return {category: metrics.get(category, {})}
+            return metrics
+            
+        if category:
+            return {
+                node: node_metrics.get(category, {})
+                for node, node_metrics in self.metrics_history.items()
             }
-        }
+            
+        return self.metrics_history
 
 # Create a singleton instance
 metrics_service = MetricsService()

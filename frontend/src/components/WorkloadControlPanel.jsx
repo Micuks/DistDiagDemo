@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, Space, Table, message, Row, Col, Progress } from 'antd';
+import { Card, Button, Space, Table, message, Row, Col, Progress, Select } from 'antd';
 import { workloadService } from '../services/workloadService';
 
 const WorkloadControlPanel = () => {
     const [activeWorkloads, setActiveWorkloads] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [selectedWorkload, setSelectedWorkload] = useState(null);
     const [systemMetrics, setSystemMetrics] = useState({
         cpu_usage: 0,
         memory_usage: 0,
@@ -12,9 +13,9 @@ const WorkloadControlPanel = () => {
     });
 
     const workloadOptions = [
-        { id: 'sysbench', name: 'Sysbench OLTP(ERR: open cursors exceeded)' },
-        { id: 'tpcc', name: 'TPC-C' },
-        { id: 'tpch', name: 'TPC-H(not implemented)' }
+        { value: 'sysbench', label: 'Sysbench OLTP(ERR: open cursors exceeded)' },
+        { value: 'tpcc', label: 'TPC-C' },
+        // { value: 'tpch', label: 'TPC-H(not implemented)' }
     ];
 
     const columns = [
@@ -55,6 +56,10 @@ const WorkloadControlPanel = () => {
     ];
 
     const handleStartWorkload = async (workloadType, threads = 4) => {
+        if (!workloadType) {
+            message.warning('Please select a workload type');
+            return;
+        }
         try {
             setLoading(true);
             await workloadService.startWorkload(workloadType, threads);
@@ -68,6 +73,10 @@ const WorkloadControlPanel = () => {
     };
 
     const handlePrepareDatabase = async (workloadType) => {
+        if (!workloadType) {
+            message.warning('Please select a workload type');
+            return;
+        }
         try {
             setLoading(true);
             await workloadService.prepareDatabase(workloadType);
@@ -128,28 +137,35 @@ const WorkloadControlPanel = () => {
     return (
         <Card title="Workload Control" style={{ marginBottom: 16 }}>
             <Space direction="vertical" style={{ width: '100%' }}>
-                <Row gutter={[16, 16]}>
-                    {workloadOptions.map((option) => (
-                        <Col span={8} key={option.id}>
-                            <Space direction="vertical" style={{ width: '100%' }}>
-                                <Button
-                                    type="primary"
-                                    onClick={() => handleStartWorkload(option.id)}
-                                    loading={loading}
-                                    style={{ width: '100%' }}
-                                >
-                                    Start {option.name}
-                                </Button>
-                                <Button
-                                    onClick={() => handlePrepareDatabase(option.id)}
-                                    loading={loading}
-                                    style={{ width: '100%' }}
-                                >
-                                    Prepare {option.name}
-                                </Button>
-                            </Space>
-                        </Col>
-                    ))}
+                <Row gutter={[16, 16]} align="middle">
+                    <Col span={12}>
+                        <Select
+                            placeholder="Select a workload"
+                            style={{ width: '100%' }}
+                            options={workloadOptions}
+                            value={selectedWorkload}
+                            onChange={setSelectedWorkload}
+                        />
+                    </Col>
+                    <Col span={6}>
+                        <Button
+                            type="primary"
+                            onClick={() => handleStartWorkload(selectedWorkload)}
+                            loading={loading}
+                            style={{ width: '100%' }}
+                        >
+                            Start Workload
+                        </Button>
+                    </Col>
+                    <Col span={6}>
+                        <Button
+                            onClick={() => handlePrepareDatabase(selectedWorkload)}
+                            loading={loading}
+                            style={{ width: '100%' }}
+                        >
+                            Prepare Database
+                        </Button>
+                    </Col>
                 </Row>
 
                 {activeWorkloads.length > 0 && (
@@ -169,8 +185,6 @@ const WorkloadControlPanel = () => {
                             </Col>
                         </Row>
                     </Card>
-
-
                 )}
                 {activeWorkloads.length > 0 && (
                     <>

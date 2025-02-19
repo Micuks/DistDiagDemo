@@ -5,9 +5,9 @@ Configuration for the dist_diagnosis integration
 # Database node configuration
 NODE_CONFIG = {
     'node_list': [
-        'localhost:2881',  # Replace with your actual OceanBase node addresses
-        'localhost:2882',
-        'localhost:2883'
+        '10.244.2.15:2881',  # Replace with your actual OceanBase node addresses
+        '10.244.3.18:2881',
+        '10.244.1.12:2881'
     ],
     'monitor_interval': 5,  # seconds
 }
