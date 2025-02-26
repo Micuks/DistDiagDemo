@@ -1,5 +1,5 @@
-import React, { useRef } from 'react';
-import { Space, Typography, Card } from 'antd';
+import React, { useRef, useState, useEffect } from 'react';
+import { Space, Typography, Card, Modal, Button } from 'antd';
 import WorkloadControlPanel from './WorkloadControlPanel';
 import AnomalyControlPanel from './AnomalyControlPanel';
 
@@ -8,6 +8,7 @@ const { Title, Text, Paragraph } = Typography;
 const ControlPanel = () => {
     const workloadRef = useRef(null);
     const anomalyRef = useRef(null);
+    const [isFirstVisit, setIsFirstVisit] = useState(true);
 
     const scrollToComponent = (ref) => {
         if (ref.current) {
@@ -17,14 +18,23 @@ const ControlPanel = () => {
                 ref.current.style.backgroundColor = 'transparent';
             }, 2000);
         }
+        setIsFirstVisit(false);
     };
 
     return (
         <Space direction="vertical" style={{ width: '100%' }}>
-            <Card style={{ marginBottom: 16 }}>
-                <Title level={4} style={{ marginBottom: 16 }}>
-                    🚀 Getting Started Guide
-                </Title>
+            <Modal
+                title="🚀 Getting Started Guide"
+                open={isFirstVisit}
+                onOk={() => setIsFirstVisit(false)}
+                onCancel={() => setIsFirstVisit(false)}
+                width={800}
+                footer={[
+                    <Button key="ok" type="primary" onClick={() => setIsFirstVisit(false)}>
+                        Got it!
+                    </Button>
+                ]}
+            >
                 <Space direction="vertical" style={{ width: '100%' }}>
                     <Paragraph
                         onClick={() => scrollToComponent(workloadRef)}
@@ -76,7 +86,8 @@ const ControlPanel = () => {
                         💡 Tip: Always start the workload before injecting anomalies for accurate results.
                     </Paragraph>
                 </Space>
-            </Card>
+            </Modal>
+
             <div ref={workloadRef} style={{ transition: 'background-color 0.3s ease' }}>
                 <WorkloadControlPanel />
             </div>

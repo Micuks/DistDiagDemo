@@ -12,10 +12,16 @@ spec:
   topology:
     - zone: zone1
       replica: 1
+      nodeSelector:
+        zone: zone1
     - zone: zone2
       replica: 1
+      nodeSelector:
+        zone: zone2
     - zone: zone3
       replica: 1
+      nodeSelector:
+        zone: zone3
   parameters:
     - name: "init_memory_limit"
       value: "8G"
@@ -27,6 +33,27 @@ spec:
       value: "2"
   observer:
     image: oceanbase/oceanbase-cloud-native:4.2.5.1-101000092024120918
+    command:
+    - /home/admin/oceanbase/bin/observer
+    - --nodaemon
+    - --appname
+    - obcluster
+    - --cluster_id
+    - "1"
+    - --zone
+    - zone1
+    - -i
+    - eth0
+    - -p
+    - "2881"
+    - -P
+    - "2882"
+    - -d
+    - /home/admin/oceanbase/store
+    - -l
+    - info
+    - -o
+    - config_additional_dir=/home/admin/oceanbase/store/etc,cpu_count=16,datafile_size=6G,log_disk_size=28G,enable_syslog_recycle=true,max_syslog_file_count=4,datafile_maxsize=28G,datafile_next=3G,init_memory_limit=8G,system_memory=2G,memory_limit=8G
     resource:
       cpu: 2
       memory: 10Gi
@@ -45,3 +72,6 @@ spec:
     resource:
       cpu: 1
       memory: 1Gi 
+      
+# observer boot command
+# /home/admin/oceanbase/bin/observer --nodaemon --appname obcluster --cluster_id 1 --zone zone1 -i eth0 -p 2881 -P 2882 -d /home/admin/oceanbase/store -l info -o config_additional_dir=/home/admin/oceanbase/store/etc,cpu_count=16,datafile_size=6G,log_disk_size=28G,enable_syslog_recycle=true,max_syslog_file_count=4,datafile_maxsize=28G,datafile_next=3G,init_memory_limit=8G,system_memory=2G,memory_limit=8G

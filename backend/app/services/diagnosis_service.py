@@ -9,6 +9,11 @@ from scipy.stats import pearsonr
 from xgboost import XGBClassifier
 import joblib
 from app.services.metrics_service import metrics_service
+import json
+import time
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import train_test_split
+import glob
 
 # Add project root and dist_diagnosis root to Python path
 project_root = Path(__file__).parent.parent.parent.parent
@@ -44,18 +49,147 @@ class DistDiagnosis:
     def __init__(self, num_classifier=1, classes_for_each_node=None, node_num=1):
         self.num_classifier = num_classifier
         self.node_num = node_num
-        # Define default anomaly types if not provided
-        if not classes_for_each_node:
-            classes_for_each_node = ['cpu', 'memory', 'io', 'network']
-        self.classes = classes_for_each_node
-        # Map network_delay to network category
-        if 'network_delay' in self.classes and 'network' not in self.classes:
-            self.classes[self.classes.index('network_delay')] = 'network'
-        # Initialize classifiers with proper number based on classes
-        self.clf_list = []
-        for _ in range(len(self.classes)):
-            self.clf_list.append(XGBClassifier(objective='binary:logistic'))
+        self.classes = classes_for_each_node if classes_for_each_node else ['cpu', 'memory', 'io', 'network']
+        self.clf_list = [XGBClassifier(objective='binary:logistic') for _ in range(num_classifier)]
         logger.info(f"Initialized {len(self.clf_list)} classifiers for {len(self.classes)} classes")
+
+    def calculate_score_for_node(self, node_metrics):
+        """Calculate PageRank scores for nodes based on metric correlations"""
+        w = [[0]*self.node_num for _ in range(self.node_num)]
+        for i in range(self.node_num):
+            for j in range(self.node_num):
+                if i != j and j > i:
+                    w[i][j] = self.calculate_rank(node_metrics[i], node_metrics[j])
+                elif j < i:
+                    w[i][j] = w[j][i]
+
+        pr = WPRNNode(w, self.node_num)
+        return pr.page_rank(10)
+
+    def calculate_rank(self, node_x, node_y):
+        """Calculate correlation between two nodes' metrics"""
+        x_array = np.array(node_x)
+        y_array = np.array(node_y)
+        
+        # Ensure x_array and y_array are 2D
+        if x_array.ndim == 1:
+            x_array = x_array.reshape(-1, 1)
+        if y_array.ndim == 1:
+            y_array = y_array.reshape(-1, 1)
+
+        rvalue = []
+        
+        for i in range(len(x_array[0])):
+            x_a = x_array[:, i]
+            y_a = y_array[:, i]
+            try:
+                # Check if either array is constant
+                if np.std(x_a) == 0 or np.std(y_a) == 0:
+                    logger.debug(f"Skipping constant array in feature {i}")
+                    continue
+                    
+                coef, _ = pearsonr(x_a, y_a)
+                if -1 <= coef <= 1:
+                    rvalue.append(abs(coef))
+            except Exception as e:
+                logger.warning(f"Error calculating correlation: {str(e)}")
+                continue
+
+        return sum(rvalue) / len(rvalue) if rvalue else 0
+
+    def diagnose(self, node_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Diagnose anomalies using the original algorithm's mechanics"""
+        try:
+            # Process metrics into feature vectors
+            features = []
+            node_names = []
+            node_metrics_list = []  # Store processed metrics for correlation
+            
+            for node, metrics in node_metrics.items():
+                feature_vector = self._process_metrics(metrics)
+                if feature_vector is not None:
+                    features.append(feature_vector)
+                    node_names.append(node)
+                    node_metrics_list.append(feature_vector)
+
+            if not features:
+                logger.warning("No valid features extracted from metrics")
+                return self._empty_result(node_metrics)
+
+            # Calculate node importance scores using PageRank
+            node_scores = self.calculate_score_for_node(node_metrics_list)
+            
+            # Get predictions and combine with node scores
+            results = {}
+            anomalies = []
+            propagation_graph = {}
+
+            for node_idx, node in enumerate(node_names):
+                node_results = {}
+                feature = np.array([features[node_idx]])
+                
+                # Get classifier predictions
+                for clf_idx, clf in enumerate(self.clf_list):
+                    try:
+                        proba = clf.predict_proba(feature)[0]
+                        score = float(proba[1]) if len(proba) > 1 else float(proba[0])
+                        # Weight the score by node importance
+                        weighted_score = score * node_scores[node_idx]
+                        anomaly_type = self.classes[clf_idx]
+                        node_results[anomaly_type] = weighted_score
+                    except Exception as e:
+                        logger.error(f"Error predicting with classifier {clf_idx}: {str(e)}")
+                        continue
+                
+                results[node] = node_results
+
+                # Find highest scoring anomaly
+                if node_results:
+                    max_score = max(node_results.values())
+                    max_type = max(node_results.items(), key=lambda x: x[1])[0]
+                    
+                    if max_score > 0.1:  # Configurable threshold
+                        anomalies.append({
+                            'node': node,
+                            'type': max_type,
+                            'score': max_score,
+                            'timestamp': datetime.now().isoformat()
+                        })
+
+            # Calculate propagation graph based on correlations
+            for i, node1 in enumerate(node_names):
+                propagation_graph[node1] = []
+                for j, node2 in enumerate(node_names):
+                    if i != j:
+                        correlation = self.calculate_rank(node_metrics_list[i], node_metrics_list[j])
+                        if correlation > 0.3:  # Configurable threshold
+                            propagation_graph[node1].append({
+                                'target': node2,
+                                'correlation': correlation
+                            })
+
+            # Sort anomalies by score
+            anomalies.sort(key=lambda x: x['score'], reverse=True)
+            
+            return {
+                'scores': {node: max(node_results.values()) if node_results else 0.0 for node, node_results in results.items()},
+                'anomalies': anomalies,
+                'propagation_graph': propagation_graph
+            }
+
+        except Exception as e:
+            logger.error(f"Error in diagnose: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return self._empty_result(node_metrics)
+
+    def _empty_result(self, node_metrics):
+        """Return empty result structure"""
+        return {
+            'scores': {node: 0.0 for node in node_metrics.keys()},
+            'anomalies': [],
+            'propagation_graph': {}
+        }
 
     def train(self, x_train, y_train):
         """Train the model with collected data"""
@@ -113,95 +247,6 @@ class DistDiagnosis:
                 self.clf_list.append(clf)
             else:
                 raise FileNotFoundError(f"Model file not found: {model_path}")
-
-    def diagnose(self, node_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Diagnose anomalies from node metrics"""
-        try:
-            # Process metrics into feature vectors
-            features = []
-            node_names = []
-            for node, metrics in node_metrics.items():
-                feature_vector = self._process_metrics(metrics)
-                if feature_vector is not None:
-                    features.append(feature_vector)
-                    node_names.append(node)
-
-            if not features:
-                logger.warning("No valid features extracted from metrics")
-                return {
-                    'scores': {},
-                    'anomalies': [],
-                    'propagation_graph': {}
-                }
-
-            logger.debug(f"Processing features for {len(node_names)} nodes")
-            
-            # Get predictions from each classifier
-            results = {}
-            for node_idx, node in enumerate(node_names):
-                node_results = {}
-                feature = np.array([features[node_idx]])  # Reshape for prediction
-                
-                logger.debug(f"Making predictions for node {node}")
-                for clf_idx, clf in enumerate(self.clf_list):
-                    try:
-                        # Get probability predictions
-                        proba = clf.predict_proba(feature)[0]
-                        # For binary classification, take the probability of anomaly (class 1)
-                        score = float(proba[1]) if len(proba) > 1 else float(proba[0])
-                        anomaly_type = self.classes[clf_idx]
-                        node_results[anomaly_type] = score
-                        logger.debug(f"Node {node}, Type {anomaly_type}: Score {score:.3f}")
-                    except Exception as e:
-                        logger.error(f"Error predicting with classifier {clf_idx}: {str(e)}")
-                        continue
-                
-                results[node] = node_results
-
-            # Calculate anomaly scores and rank them
-            scores = {}
-            anomalies = []
-            threshold = 0.1  # Lowered threshold for testing
-            
-            for node, node_results in results.items():
-                if not node_results:
-                    continue
-                    
-                # Find the highest scoring anomaly type
-                max_score = max(node_results.values())
-                max_type = max(node_results.items(), key=lambda x: x[1])[0]
-                scores[node] = max_score
-                
-                logger.debug(f"Node {node} max score: {max_score:.3f} ({max_type})")
-                
-                if max_score > threshold:
-                    anomalies.append({
-                        'node': node,
-                        'type': max_type,
-                        'score': max_score,
-                        'timestamp': datetime.now().isoformat()
-                    })
-                    logger.info(f"Detected {max_type} anomaly on {node} with score {max_score:.3f}")
-
-            # Sort anomalies by score
-            anomalies.sort(key=lambda x: x['score'], reverse=True)
-            
-            logger.info(f"Found {len(anomalies)} anomalies above threshold {threshold}")
-            return {
-                'scores': scores,
-                'anomalies': anomalies,
-                'propagation_graph': {}
-            }
-
-        except Exception as e:
-            logger.error(f"Error in diagnose: {str(e)}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return {
-                'scores': {node: 0.0 for node in node_metrics.keys()},
-                'anomalies': [],
-                'propagation_graph': {}
-            }
 
     def _process_metrics(self, metrics: Dict[str, Any]) -> np.ndarray:
         """Process metrics into feature vector"""
@@ -306,15 +351,29 @@ class DistDiagnosis:
 
 class DiagnosisService:
     def __init__(self):
-        self.model_path = os.getenv('MODEL_PATH', 'models/anomaly_detector')
+        # Use absolute path for model storage
+        self.model_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), 
+            '../../models/anomaly_detector'
+        ))
+        self.models_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), 
+            '../../models/'
+        ))
+        self.metrics_path = os.path.join(self.model_path, 'metrics')
+        os.makedirs(self.metrics_path, exist_ok=True)
+        
         # Define anomaly types that can be detected
         self.anomaly_types = ['cpu', 'memory', 'io', 'network']
+        
+        # Get node count from environment or config
+        self.node_count = int(os.getenv('NODE_COUNT', '3'))
         
         # Initialize DistDiagnosis with multi-node support
         self.diagnosis = DistDiagnosis(
             num_classifier=len(self.anomaly_types),
             classes_for_each_node=self.anomaly_types,
-            node_num=3  # Default to 3 nodes, can be adjusted based on cluster size
+            node_num=self.node_count
         )
         
         # Load existing model if available
@@ -328,33 +387,34 @@ class DiagnosisService:
     def train(self, X: np.ndarray, y: np.ndarray):
         """Train the model with collected data"""
         try:
-            # Input validation
             if len(X) == 0 or len(y) == 0:
                 raise ValueError("Empty training data")
                 
-            if len(X) != len(y):
-                raise ValueError(f"Mismatched data dimensions: X={len(X)}, y={len(y)}")
-                
-            logger.info(f"Training model with {len(X)} samples")
-            logger.debug(f"X shape: {X.shape}, y shape: {y.shape}")
+            # Split data into train and test sets
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
             
-            # Ensure data directory exists
-            os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
+            # Start timing
+            self.training_start_time = time.time()
             
-            # Reshape data if needed
-            if len(X.shape) == 1:
-                X = X.reshape(1, -1)
-            if len(y.shape) == 1:
-                y = y.reshape(1, -1)
-                
-            # Train the model
-            self.diagnosis.train(X, y)
+            # Train model
+            self.diagnosis.train(X_train, y_train)
             
-            # Save the model
-            self.diagnosis.save_model(self.model_path)
-            logger.info("Model trained and saved successfully")
+            # Generate model name with timestamp
+            model_name = f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            
+            # Save model
+            self.diagnosis.save_model(os.path.join(self.model_path, model_name))
+            
+            # Evaluate and store metrics
+            metrics = self.evaluate_model(X_test, y_test, model_name)
+            
+            return {
+                "model_name": model_name,
+                "metrics": metrics
+            }
+            
         except Exception as e:
-            logger.error("Failed to train model: %s", str(e))
+            logger.error(f"Failed to train model: {str(e)}")
             raise
 
     def analyze_metrics(self, metrics: Dict[str, Any]) -> List[Dict]:
@@ -364,14 +424,72 @@ class DiagnosisService:
                 logger.warning("Empty metrics received")
                 return []
                 
-            # Get diagnosis results
+            # Get diagnosis results using enhanced algorithm
             diagnosis_result = self.diagnosis.diagnose(metrics)
             
-            # Return ranked anomalies
+            # Return ranked anomalies with propagation information
             return diagnosis_result.get('anomalies', [])
             
         except Exception as e:
             logger.error("Error in analyze_metrics: %s", str(e))
+            return []
+
+    def evaluate_model(self, X_test, y_test, model_name):
+        """Evaluate model performance and store metrics"""
+        try:
+            model = self.diagnosis.clf_list[0]  # Get primary classifier
+            y_pred = model.predict(X_test)
+            
+            metrics = {
+                'accuracy': float(accuracy_score(y_test, y_pred)),
+                'precision': float(precision_score(y_test, y_pred, average='weighted')),
+                'recall': float(recall_score(y_test, y_pred, average='weighted')),
+                'f1_score': float(f1_score(y_test, y_pred, average='weighted')),
+                'training_time': time.time() - self.training_start_time
+            }
+            
+            # Save metrics
+            metrics_file = os.path.join(self.metrics_path, f"{model_name}_metrics.json")
+            with open(metrics_file, 'w') as f:
+                json.dump(metrics, f)
+                
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error evaluating model: {str(e)}")
+            raise
+
+    def get_model_performance(self, model_name):
+        """Get stored performance metrics for a model"""
+        try:
+            metrics_file = os.path.join(self.metrics_path, f"{model_name}_metrics.json")
+            if os.path.exists(metrics_file):
+                with open(metrics_file) as f:
+                    return json.load(f)
+            return None
+        except Exception as e:
+            logger.error(f"Error loading model metrics: {str(e)}")
+            return None
+
+    def get_available_models(self):
+        """Get list of available models"""
+        try:
+            models = []
+            # Check main model directory
+            if os.path.exists(self.models_path):
+                for entry in os.listdir(self.models_path):
+                    if os.path.isdir(os.path.join(self.models_path, entry)):
+                        # Check if any classifier files exist in this directory
+                        classifier_files = glob.glob(os.path.join(self.models_path, entry, "classifier_*.joblib"))
+                        if classifier_files:
+                            models.append(entry)
+                            logger.debug(f"Found model directory '{entry}' with {len(classifier_files)} classifiers")
+            
+            logger.info(f"Found {len(models)} available models")
+            return sorted(models, reverse=True)  # Sort by newest first
+            
+        except Exception as e:
+            logger.error(f"Error getting available models: {str(e)}")
             return []
 
 # Create singleton instance

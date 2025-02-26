@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Spin, Alert } from 'antd';
+import { Card, Table, Spin, Alert, Row, Col, Statistic } from 'antd';
 import { anomalyService } from '../services/anomalyService';
 
 const ModelPerformanceView = ({ modelName }) => {
@@ -27,46 +27,30 @@ const ModelPerformanceView = ({ modelName }) => {
         }
     }, [modelName]);
 
-    if (loading) {
-        return <Spin tip="Loading performance metrics..." />;
-    }
+    if (loading) return <Spin tip="Loading performance metrics..." />;
+    if (error) return <Alert message={error} type="error" showIcon />;
+    if (!performance) return <Alert message="No performance data available" type="info" showIcon />;
 
-    if (error) {
-        return <Alert message={error} type="error" showIcon />;
-    }
-
-    if (!performance) {
-        return <Alert message="No performance data available" type="info" showIcon />;
-    }
-
-    const columns = [
-        {
-            title: 'Metric',
-            dataIndex: 'metric',
-            key: 'metric',
-        },
-        {
-            title: 'Value',
-            dataIndex: 'value',
-            key: 'value',
-            render: (value) => typeof value === 'number' ? value.toFixed(4) : value,
-        },
+    const metrics = [
+        { key: 'accuracy', label: 'Accuracy' },
+        { key: 'precision', label: 'Precision' },
+        { key: 'recall', label: 'Recall' },
+        { key: 'f1_score', label: 'F1 Score' }
     ];
 
-    const metrics = Object.entries(performance.metrics || {}).map(([key, value]) => ({
-        key,
-        metric: key.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' '),
-        value,
-    }));
-
     return (
-        <div>
-            <Table 
-                dataSource={metrics} 
-                columns={columns} 
-                pagination={false}
-                size="small"
-            />
+        <Card title={`Model Performance: ${modelName}`} size="small">
+            <Row gutter={[16, 16]}>
+                {metrics.map(({ key, label }) => (
+                    <Col span={6} key={key}>
+                        <Statistic
+                            title={label}
+                            value={performance[key]}
+                            precision={4}
+                        />
+                    </Col>
+                ))}
+            </Row>
             {performance.training_time && (
                 <Alert
                     message={`Training Time: ${performance.training_time.toFixed(2)}s`}
@@ -75,7 +59,7 @@ const ModelPerformanceView = ({ modelName }) => {
                     style={{ marginTop: 16 }}
                 />
             )}
-        </div>
+        </Card>
     );
 };
 

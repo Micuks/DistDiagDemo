@@ -1,0 +1,17 @@
+apiVersion: oceanbase.oceanbase.com/v1alpha1
+kind: OBClusterOperation
+metadata:
+  namespace: oceanbase
+spec:
+  obcluster: obcluster
+  type: RestartOBServers
+  restartOBServers:
+    observers:
+      - obcluster-1-zone1-k6bg55
+      - obcluster-1-zone2-g667cm
+      - obcluster-1-zone3-qb4jzx
+    obzones:
+      - zone1
+      - zone2
+      - zone3
+    all: false  # Setting to false since we're explicitly specifying the observers

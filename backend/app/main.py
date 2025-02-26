@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
-from app.api import anomaly, workload, metrics
+from app.api import anomaly, workload, metrics, models
 from app.core.logging import setup_logging
 from app.services.metrics_service import metrics_service
 from fastapi_cache import FastAPICache
@@ -93,6 +93,7 @@ app.add_middleware(
 app.include_router(anomaly.router, prefix="/api/anomaly", tags=["anomaly"])
 app.include_router(workload.router, prefix="/api/workload", tags=["workload"])
 app.include_router(metrics.router, prefix="/api/metrics", tags=["metrics"])
+app.include_router(models.router, prefix="/api/models", tags=["models"])
 
 # Create metrics endpoint
 metrics_app = make_asgi_app()
