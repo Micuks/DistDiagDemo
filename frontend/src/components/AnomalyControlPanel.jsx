@@ -11,7 +11,8 @@ const AnomalyControlPanel = () => {
         { id: 'cpu_stress', name: 'CPU Stress' },
         { id: 'memory_stress', name: 'Memory Stress' },
         { id: 'network_delay', name: 'Network Delay' },
-        // { id: 'disk_stress', name: 'Disk Stress(currently unavailable)' },
+        { id: 'disk_stress', name: 'Disk Stress' },
+        { id: 'too_many_indexes', name: 'Too Many Indexes' }
     ];
 
     const columns = [
@@ -62,25 +63,25 @@ const AnomalyControlPanel = () => {
         }
     ];
 
-    const isAnomalyActive = (anomalyType) => {
-        return Array.isArray(activeAnomalies) && activeAnomalies.some(a => a.type === anomalyType && a.status === 'active');
+    const isAnomalyActive = (anomalyId) => {
+        return Array.isArray(activeAnomalies) && activeAnomalies.some(a => 
+            a && a.type === anomalyId && a.status === 'active'
+        );
     };
 
-    const handleAnomalyToggle = async (anomalyType) => {
-        let isActive = isAnomalyActive(anomalyType);
+    const handleAnomalyToggle = async (anomalyId) => {
         try {
             setLoading(true);
-            if (isActive) {
-                await anomalyService.stopAnomaly(anomalyType);
-                message.success(`Stopped ${anomalyType} anomaly`);
+            if (isAnomalyActive(anomalyId)) {
+                await anomalyService.stopAnomaly(anomalyId);
+                message.success(`Anomaly ${anomalyId} stopped`);
             } else {
-                await anomalyService.startAnomaly(anomalyType);
-                message.success(`Started ${anomalyType} anomaly`);
+                await anomalyService.startAnomaly(anomalyId);
+                message.success(`Anomaly ${anomalyId} started`);
             }
-            refetch();
-        } catch (error) {
-            message.error(`Failed to ${isActive ? 'stop' : 'start'} anomaly: ${error.message}`);
-            console.error(error);
+            await refetch();
+        } catch (err) {
+            message.error(`Failed to toggle anomaly: ${err.message}`);
         } finally {
             setLoading(false);
         }
@@ -89,12 +90,44 @@ const AnomalyControlPanel = () => {
     const handleStopAllAnomalies = async () => {
         try {
             setLoading(true);
-            await anomalyService.stopAllAnomalies();
-            message.success('Stopped all anomalies');
-            refetch();
+            message.loading({ content: 'Stopping all anomalies...', key: 'stopAll' });
+            
+            const result = await anomalyService.stopAllAnomalies();
+            
+            // Force an immediate refetch regardless of the result
+            await refetch();
+            
+            // Check if any anomalies remain
+            const currentAnomalies = await anomalyService.getActiveAnomalies();
+            
+            if (currentAnomalies && currentAnomalies.length > 0) {
+                // Some anomalies still exist
+                message.warning({ 
+                    content: `Stopped some anomalies but ${currentAnomalies.length} remain active. Try again or stop individually.`, 
+                    key: 'stopAll', 
+                    duration: 5 
+                });
+                console.warn('Anomalies still active after stopAll:', currentAnomalies);
+            } else {
+                // All anomalies successfully stopped
+                message.success({ 
+                    content: 'Successfully stopped all anomalies', 
+                    key: 'stopAll' 
+                });
+            }
+            
+            // Set a timer to do one more refetch after a short delay
+            // This handles cases where deletions are still being processed in the backend
+            setTimeout(() => {
+                refetch();
+            }, 2000);
         } catch (error) {
-            message.error('Failed to stop all anomalies');
-            console.error(error);
+            console.error('Failed to stop all anomalies:', error);
+            message.error({ 
+                content: `Failed to stop all anomalies: ${error.message}`, 
+                key: 'stopAll', 
+                duration: 5 
+            });
         } finally {
             setLoading(false);
         }
@@ -143,7 +176,7 @@ const AnomalyControlPanel = () => {
                                 <Table
                                     columns={columns}
                                     dataSource={activeAnomalies || []}
-                                    rowKey="type"
+                                    rowKey="name"
                                     pagination={false}
                                 />
                             )}

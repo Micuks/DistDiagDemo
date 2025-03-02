@@ -70,13 +70,24 @@ async def stop_all_workloads():
     """Stop all active workloads"""
     logger.info("Received request to stop all workloads")
     try:
+        # First try to stop all workloads
         success = workload_service.stop_all_workloads()
-        if success:
-            logger.info("All workloads stopped successfully")
+        
+        # Verify if workloads are actually stopped by checking active workloads
+        active_workloads = workload_service.get_active_workloads()
+        
+        if not active_workloads:
+            # No active workloads, so operation was successful regardless of the service's return value
+            logger.info("All workloads verified as stopped")
             return {"status": "success", "message": "All workloads stopped successfully"}
         else:
-            logger.error("Failed to stop all workloads")
-            raise HTTPException(status_code=500, detail="Failed to stop all workloads")
+            # Some workloads are still active - this is an actual failure
+            workload_ids = [w['id'] for w in active_workloads]
+            logger.error(f"Failed to stop all workloads, remaining: {workload_ids}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to stop all workloads. Remaining: {', '.join(workload_ids)}"
+            )
     except Exception as e:
         logger.exception("Error stopping all workloads")
         raise HTTPException(status_code=500, detail=str(e))

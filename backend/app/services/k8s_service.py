@@ -49,6 +49,7 @@ class K8sService:
     def _should_update_cache(self) -> bool:
         """Check if cache needs to be updated"""
         return (
+            self._last_cache_update == 0 or  # Force update if explicitly set to 0
             not self._last_cache_update or
             time.time() - self._last_cache_update > self.CACHE_TTL
         )
@@ -115,21 +116,78 @@ class K8sService:
         logger.error(f"Timeout waiting for {anomaly_type} experiment deletion after {timeout} seconds")
         return False
 
-    async def delete_chaos_experiment(self, anomaly_type: str):
+    async def delete_chaos_experiment(self, anomaly_type: str, experiment_name: str = None):
         """Delete a specific chaos mesh experiment with optimized retries"""
         try:
             plural = self._get_experiment_plural(anomaly_type)
-            name = f"ob-{anomaly_type.replace('_', '-')}"
+            deleted_experiments = []  # Track which experiments we deleted
             
-            # Clear cache entry for this experiment
-            if anomaly_type in self._experiment_cache:
-                del self._experiment_cache[anomaly_type]
-            
-            try:
-                # For disk stress, try to get the experiment first to check its status
-                if anomaly_type == "disk_stress":
+            # If no specific experiment name is provided, delete all experiments of this type
+            if experiment_name is None:
+                # List all experiments of this type
+                experiments = await asyncio.to_thread(
+                    self.custom_api.list_namespaced_custom_object,
+                    group="chaos-mesh.org",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural=plural
+                )
+                
+                # Filter experiments by type prefix
+                type_prefix = f"ob-{anomaly_type.replace('_', '-')}"
+                matching_experiments = [
+                    exp for exp in experiments.get("items", [])
+                    if exp["metadata"]["name"].startswith(type_prefix)
+                ]
+                
+                # Delete each matching experiment
+                for exp in matching_experiments:
+                    exp_name = exp["metadata"]["name"]
                     try:
-                        experiment = await asyncio.to_thread(
+                        await asyncio.to_thread(
+                            self.custom_api.delete_namespaced_custom_object,
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=plural,
+                            name=exp_name
+                        )
+                        # Remove from active anomalies tracking
+                        if exp_name in self.active_anomalies:
+                            del self.active_anomalies[exp_name]
+                        deleted_experiments.append(exp_name)
+                        logger.info(f"Deleted {anomaly_type} experiment {exp_name}")
+                    except ApiException as e:
+                        if e.status != 404:  # Ignore 404 Not Found errors
+                            logger.warning(f"Error deleting experiment {exp_name}: {str(e)}")
+            else:
+                # Delete specific experiment
+                try:
+                    await asyncio.to_thread(
+                        self.custom_api.delete_namespaced_custom_object,
+                        group="chaos-mesh.org",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=plural,
+                        name=experiment_name
+                    )
+                    # Remove from active anomalies tracking
+                    if experiment_name in self.active_anomalies:
+                        del self.active_anomalies[experiment_name]
+                    deleted_experiments.append(experiment_name)
+                    logger.info(f"Deleted experiment {experiment_name}")
+                except ApiException as e:
+                    if e.status != 404:  # Ignore 404 Not Found errors
+                        raise e
+            
+            # Additional check: find and remove any other experiments of this type
+            # from active_anomalies that might have been missed
+            type_prefix = f"ob-{anomaly_type.replace('_', '-')}"
+            for name in list(self.active_anomalies.keys()):
+                if name.startswith(type_prefix) or self.active_anomalies[name].get("type") == anomaly_type:
+                    # Double check if it's really gone from Kubernetes
+                    try:
+                        await asyncio.to_thread(
                             self.custom_api.get_namespaced_custom_object,
                             group="chaos-mesh.org",
                             version="v1alpha1",
@@ -137,37 +195,27 @@ class K8sService:
                             plural=plural,
                             name=name
                         )
-                        logger.info(f"Found existing {anomaly_type} experiment, status: {experiment.get('status', {})}")
+                        # If we get here, it still exists, strange but let's not remove it
+                        logger.warning(f"Experiment {name} still exists after deletion attempt")
                     except ApiException as e:
-                        if e.status != 404:  # Log any error other than Not Found
-                            logger.warning(f"Error checking {anomaly_type} experiment status: {e}")
-
-                await asyncio.to_thread(
-                    self.custom_api.delete_namespaced_custom_object,
-                    group="chaos-mesh.org",
-                    version="v1alpha1",
-                    namespace=self.namespace,
-                    plural=plural,
-                    name=name
-                )
-                # Wait for the deletion to complete
-                if not await self.wait_for_deletion(anomaly_type):
-                    if anomaly_type == "disk_stress":
-                        logger.warning("Disk stress experiment deletion timed out, but continuing...")
-                    else:
-                        raise Exception(f"Timeout waiting for {anomaly_type} experiment deletion")
-            except ApiException as e:
-                if e.status != 404:  # Ignore 404 Not Found errors
-                    raise e
+                        if e.status == 404:  # Not found, good - it's gone
+                            if name in self.active_anomalies:
+                                del self.active_anomalies[name]
+                                if name not in deleted_experiments:
+                                    deleted_experiments.append(name)
+                                    logger.info(f"Removed {name} from tracking after verified deletion")
+                    except Exception as e:
+                        logger.error(f"Error verifying deletion of {name}: {str(e)}")
             
-            # Remove from active anomalies tracking
-            if anomaly_type in self.active_anomalies:
-                del self.active_anomalies[anomaly_type]
-            
-            logger.info(f"Deleted {anomaly_type} experiment in namespace {self.namespace}")
+            # Invalidate the cache to force refresh
+            self.invalidate_cache()
+            self._last_cache_update = 0  # Force refresh on next request
+                
+            logger.info(f"Completed deletion of {anomaly_type} experiments")
+            return deleted_experiments
         except Exception as e:
-            logger.error(f"Failed to delete chaos experiment: {str(e)}")
-            raise Exception(f"Failed to delete chaos experiment: {str(e)}")
+            logger.error(f"Failed to delete chaos experiment(s): {str(e)}")
+            raise Exception(f"Failed to delete chaos experiment(s): {str(e)}")
 
     async def delete_all_chaos_experiments(self):
         """Delete all running chaos mesh experiments in parallel"""
@@ -186,138 +234,234 @@ class K8sService:
             logger.error(f"Failed to delete chaos experiments: {str(e)}")
             raise Exception(f"Failed to delete chaos experiments: {str(e)}")
 
-    @alru_cache(maxsize=1, ttl=5)
+    @alru_cache(maxsize=1, ttl=1)
     async def get_active_anomalies(self):
         """Get list of currently active anomalies with caching"""
         try:
-            if self._should_update_cache():
-                # Create new list to avoid modifying cached data
-                current_anomalies = list(self.active_anomalies.values())
-                # Check each anomaly's status
-                for anomaly in list(self.active_anomalies.keys()):
-                    is_deleted = await self.verify_experiment_deleted(anomaly)
-                    if is_deleted:
-                        del self.active_anomalies[anomaly]
+            # Always force update if _last_cache_update is 0
+            if self._last_cache_update == 0 or self._should_update_cache():
+                # Sync with Kubernetes to get current active experiments
+                experiment_types = ["cpu_stress", "memory_stress", "network_delay", "disk_stress"]
+                current_experiments = []
+                found_experiment_names = set()  # Track experiments found in k8s
+                
+                # First log the currently tracked anomalies (as a fallback)
+                logger.debug(f"Currently tracked anomalies: {list(self.active_anomalies.keys())}")
+                
+                # Get the actual state from Kubernetes
+                for exp_type in experiment_types:
+                    plural = self._get_experiment_plural(exp_type)
+                    try:
+                        experiments = await asyncio.to_thread(
+                            self.custom_api.list_namespaced_custom_object,
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=plural
+                        )
+                        
+                        logger.debug(f"Found {len(experiments.get('items', []))} {exp_type} experiments in Kubernetes")
+                        
+                        for exp in experiments.get('items', []):
+                            # Get the phase, default to empty string if not found
+                            phase = exp.get('status', {}).get('phase', '').lower()
+                            logger.debug(f"Experiment {exp['metadata']['name']} has phase: '{phase}'")
+                            
+                            # Be more flexible with phase detection - consider any experiment without a failed/deleted status as active
+                            if phase and phase not in ['failed', 'finished', 'deleted', 'completed', 'terminating']:
+                                name = exp['metadata']['name']
+                                found_experiment_names.add(name)  # Add to set of found experiments
+                                
+                                # Use existing data if available, otherwise create new
+                                if name in self.active_anomalies:
+                                    current_experiments.append(self.active_anomalies[name])
+                                else:
+                                    start_time = exp['metadata'].get('creationTimestamp', datetime.now().isoformat())
+                                    target = exp['spec']['selector']['labelSelectors'].get('ref-obcluster', 'unknown')
+                                    current_experiments.append({
+                                        "name": name,
+                                        "type": exp_type,
+                                        "start_time": start_time,
+                                        "status": "active",
+                                        "target": target,
+                                        "node": target
+                                    })
+                    except ApiException as e:
+                        if e.status != 404:  # Ignore 404 Not Found errors
+                            logger.error(f"Error listing {exp_type} experiments: {str(e)}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Unexpected error listing {exp_type} experiments: {str(e)}")
+                        continue
+
+                # Update active_anomalies with current experiments
+                new_active_anomalies = {}
+                
+                # Only keep experiments actually found in Kubernetes
+                for exp in current_experiments:
+                    if exp['name'] in found_experiment_names:
+                        new_active_anomalies[exp['name']] = exp
+                
+                # If we found nothing in Kubernetes but have local records, 
+                # do one final verification of each locally tracked anomaly
+                if not new_active_anomalies and self.active_anomalies:
+                    logger.info(f"No anomalies found in Kubernetes but have {len(self.active_anomalies)} local records. Verifying each.")
+                    for name, anomaly in self.active_anomalies.items():
+                        try:
+                            # Try to fetch each anomaly directly to verify it exists
+                            anomaly_type = anomaly.get('type')
+                            if not anomaly_type:
+                                continue
+                                
+                            plural = self._get_experiment_plural(anomaly_type)
+                            try:
+                                await asyncio.to_thread(
+                                    self.custom_api.get_namespaced_custom_object,
+                                    group="chaos-mesh.org",
+                                    version="v1alpha1",
+                                    namespace=self.namespace,
+                                    plural=plural,
+                                    name=name
+                                )
+                                # If we get here, the anomaly still exists
+                                new_active_anomalies[name] = anomaly
+                                logger.info(f"Verified {name} still exists in Kubernetes")
+                            except ApiException as e:
+                                if e.status == 404:
+                                    # Anomaly doesn't exist anymore
+                                    logger.info(f"Anomaly {name} no longer exists in Kubernetes")
+                                    continue
+                                else:
+                                    # Some other error, assume it exists
+                                    new_active_anomalies[name] = anomaly
+                                    logger.warning(f"Error verifying {name}, assuming it exists: {str(e)}")
+                        except Exception as e:
+                            logger.error(f"Error verifying anomaly {name}: {str(e)}")
+                
+                # Replace active_anomalies with the current state
+                if new_active_anomalies or not self.active_anomalies:
+                    # Only update if we found something or we had nothing before
+                    self.active_anomalies = new_active_anomalies
+                
+                logger.info(f"Active anomalies: {list(self.active_anomalies.keys())}")
                 
                 self._last_cache_update = time.time()
-                return current_anomalies
+                return list(self.active_anomalies.values())
             
+            logger.debug(f"Using cached active anomalies: {list(self.active_anomalies.keys())}")
             return list(self.active_anomalies.values())
         except Exception as e:
             logger.error(f"Failed to get active anomalies: {str(e)}")
-            return []
+            # If anything fails, return the locally tracked anomalies as a fallback
+            return list(self.active_anomalies.values())
 
     def _get_experiment_template(self, anomaly_type: str) -> Dict[str, Any]:
-        """Get the appropriate chaos mesh experiment template"""
-        if anomaly_type == "cpu_stress":
-            return {
-                "apiVersion": "chaos-mesh.org/v1alpha1",
+        """Get the chaos experiment template optimized for metric impact"""
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        experiment_name = f"ob-{anomaly_type.replace('_', '-')}-{timestamp}"
+        
+        # Base template with enhanced selectors
+        base_template = {
+            "apiVersion": "chaos-mesh.org/v1alpha1",
+            "metadata": {
+                "name": experiment_name,
+                "namespace": self.namespace
+            },
+            "spec": {
+                "mode": "all",
+                "selector": {
+                    "namespaces": [self.namespace],
+                    "labelSelectors": {"ref-obcluster": "obcluster"}
+                }
+            }
+        }
+
+        # Experiment configurations targeting critical metrics
+        experiments = {
+            "cpu_stress": {
                 "kind": "StressChaos",
-                "metadata": {
-                    "name": "ob-cpu-stress",
-                    "namespace": self.namespace
-                },
                 "spec": {
-                    "mode": "one",
-                    "selector": {
-                        "namespaces": [self.namespace],
-                        "labelSelectors": {
-                            "ref-obcluster": "obcluster"
-                        }
-                    },
                     "stressors": {
                         "cpu": {
-                            "workers": 2,
-                            "load": 90
+                            "workers": 4,
+                            "load": 100
                         }
                     },
-                    "duration": "10m"
+                    "duration": "300s"
                 }
-            }
-        elif anomaly_type == "memory_stress":
-            return {
-                "apiVersion": "chaos-mesh.org/v1alpha1",
+            },
+            "memory_stress": {
                 "kind": "StressChaos",
-                "metadata": {
-                    "name": "ob-memory-stress",
-                    "namespace": self.namespace
-                },
                 "spec": {
-                    "mode": "one",
-                    "selector": {
-                        "namespaces": [self.namespace],
-                        "labelSelectors": {
-                            "ref-obcluster": "obcluster"
-                        }
-                    },
                     "stressors": {
                         "memory": {
-                            "workers": 2,
-                            "size": "256MB"
+                            "workers": 4,
+                            "size": "512MB"
                         }
                     },
-                    "duration": "10m"
+                    "duration": "300s"
                 }
-            }
-        elif anomaly_type == "network_delay":
-            return {
-                "apiVersion": "chaos-mesh.org/v1alpha1",
+            },
+            "network_delay": {
                 "kind": "NetworkChaos",
-                "metadata": {
-                    "name": "ob-network-delay",
-                    "namespace": self.namespace
-                },
                 "spec": {
                     "action": "delay",
-                    "mode": "one",
-                    "selector": {
-                        "namespaces": [self.namespace],
-                        "labelSelectors": {
-                            "ref-obcluster": "obcluster"
-                        }
-                    },
                     "delay": {
-                        "latency": "100ms",
+                        "latency": "500ms",
                         "correlation": "100",
-                        "jitter": "0ms"
+                        "jitter": "100ms"
                     },
-                    "duration": "10m"
+                    "loss": {
+                        "loss": "10",
+                        "correlation": "50"
+                    }
                 }
-            }
-        elif anomaly_type == "disk_stress":
-            return {
-                "apiVersion": "chaos-mesh.org/v1alpha1",
+            },
+            "disk_stress": {
                 "kind": "IOChaos",
-                "metadata": {
-                    "name": "ob-disk-stress",
-                    "namespace": self.namespace
-                },
                 "spec": {
                     "action": "latency",
-                    "mode": "one",
-                    "selector": {
-                        "namespaces": [self.namespace],
-                        "labelSelectors": {
-                            "ref-obcluster": "obcluster"
-                        }
-                    },
-                    "delay": "100ms",
+                    "delay": "500ms",
                     "path": "/home/admin/oceanbase/store",
                     "percent": 100,
-                    "duration": "10m"
+                    "methods": ["write"],
+                    "duration": "300s"
                 }
             }
-        else:
-            raise ValueError(f"Unsupported anomaly type: {anomaly_type}")
+        }
+
+        # Create a deep copy of base template
+        template = base_template.copy()
+        experiment_config = experiments[anomaly_type]
+        
+        # Update non-spec fields
+        for key, value in experiment_config.items():
+            if key != "spec":
+                template[key] = value
+        
+        # Merge specs while preserving base spec fields
+        if "spec" in experiment_config:
+            template["spec"].update(experiment_config["spec"])
+        
+        # Add pressure to transaction-related metrics for storage experiments
+        if anomaly_type == "disk_stress":
+            template["spec"]["stressors"] = {
+                "io": {"workers": 4, "rws": "write"}
+            }
+        
+        return template
 
     @timed_lru_cache(seconds=60, maxsize=10)
     def _get_experiment_plural(self, anomaly_type: str) -> str:
         """Get the plural form of the experiment type for the API with caching"""
-        if anomaly_type in ["cpu_stress", "memory_stress"]:
+        # Normalize the anomaly type (kebab-case to snake_case)
+        normalized_type = anomaly_type.replace('-', '_')
+        
+        if normalized_type in ["cpu_stress", "memory_stress"]:
             return "stresschaos"
-        elif anomaly_type == "network_delay":
+        elif normalized_type == "network_delay":
             return "networkchaos"
-        elif anomaly_type == "disk_stress":
+        elif normalized_type == "disk_stress":
             return "iochaos"
         else:
             raise ValueError(f"Unsupported anomaly type: {anomaly_type}")
@@ -325,47 +469,15 @@ class K8sService:
     async def apply_chaos_experiment(self, anomaly_type: str):
         """Apply a chaos mesh experiment based on the anomaly type with optimized retries"""
         experiment = self._get_experiment_template(anomaly_type)
+        experiment_name = experiment["metadata"]["name"]
         
         try:
-            # Check if experiment already exists
-            existing_experiment = None
-            try:
-                existing_experiment = await asyncio.to_thread(
-                    self.custom_api.get_namespaced_custom_object,
-                    group="chaos-mesh.org",
-                    version="v1alpha1",
-                    namespace=self.namespace,
-                    plural=self._get_experiment_plural(anomaly_type),
-                    name=experiment["metadata"]["name"]
-                )
-            except ApiException as e:
-                if e.status != 404:  # Only ignore 404 Not Found
-                    raise e
-
-            # If experiment exists and is active, don't recreate it
-            if existing_experiment and existing_experiment.get("status", {}).get("phase") == "running":
-                logger.info(f"Experiment {anomaly_type} is already running")
-                return
-            
-            # Delete existing experiment only if it exists and is not running
-            if existing_experiment:
-                logger.info(f"Deleting existing experiment {anomaly_type}")
-                await self.delete_chaos_experiment(anomaly_type)
-            
             # Create new experiment with retry logic
             max_retries = 5
             retry_delay = 2
             
             for attempt in range(max_retries):
                 try:
-                    # Verify again that the old experiment is gone if we had to delete it
-                    if existing_experiment:
-                        if not await self.verify_experiment_deleted(anomaly_type):
-                            logger.info(f"Experiment still exists, waiting {retry_delay} seconds...")
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= 2
-                            continue
-
                     await asyncio.to_thread(
                         self.custom_api.create_namespaced_custom_object,
                         group="chaos-mesh.org",
@@ -377,25 +489,31 @@ class K8sService:
                     break
                 except ApiException as e:
                     if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
-                        logger.info(f"Experiment still being deleted, retrying in {retry_delay} seconds...")
+                        logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
                         await asyncio.sleep(retry_delay)
                         retry_delay *= 2
                         continue
                     raise e
             
             # Track the active anomaly
-            self.active_anomalies[anomaly_type] = {
+            target = experiment["spec"]["selector"]["labelSelectors"]["ref-obcluster"]
+            self.active_anomalies[experiment_name] = {
                 "start_time": datetime.now().isoformat(),
                 "status": "active",
                 "type": anomaly_type,
-                "target": experiment["spec"]["selector"]["labelSelectors"]["ref-obcluster"]
+                "name": experiment_name,
+                "target": target,
+                "node": target  # Add node field for frontend display
             }
             
-            # Clear cache for this experiment type
-            if anomaly_type in self._experiment_cache:
-                del self._experiment_cache[anomaly_type]
+            # Log the active anomalies
+            logger.info(f"Updated active_anomalies: {list(self.active_anomalies.keys())}")
             
-            logger.info(f"Created {anomaly_type} experiment in namespace {self.namespace}")
+            # Invalidate the cache to force refresh
+            self.invalidate_cache()
+            self._last_cache_update = 0  # Force refresh on next request
+            
+            logger.info(f"Created {anomaly_type} experiment {experiment_name} in namespace {self.namespace}")
         except Exception as e:
             logger.error(f"Failed to create chaos experiment: {str(e)}")
             raise Exception(f"Failed to create chaos experiment: {str(e)}")
@@ -409,4 +527,4 @@ class K8sService:
         
         # For alru_cache decorated methods, we'll force cache invalidation
         # by updating the last request time
-        self._last_request_time = 0  # This will force a refresh on next request 
+        self._last_request_time = 0  # This will force a refresh on next request

@@ -57,13 +57,25 @@ async def clear_caches():
                 keys = await redis.keys(f"{FastAPICache.get_prefix()}*")
                 if keys:
                     await redis.delete(*keys)
-                logger.debug("Cleared Redis cache")
+                logger.info("Cleared Redis cache")
     except Exception as e:
         logger.warning(f"Failed to clear Redis cache: {str(e)}")
     
-    # Clear K8s service cache
-    k8s_service.invalidate_cache()
-    logger.debug("Cleared K8s service cache")
+    try:
+        # Clear K8s service cache
+        k8s_service.invalidate_cache()
+        
+        # Force the cache to refresh on next request by resetting timestamps
+        k8s_service._last_request_time = 0
+        k8s_service._last_cache_update = 0
+        
+        # Reset any other internal caches
+        if hasattr(k8s_service, '_cache'):
+            k8s_service._cache = {}
+        
+        logger.info("Cleared K8s service cache")
+    except Exception as e:
+        logger.warning(f"Failed to clear K8s service cache: {str(e)}")
 
 class AnomalyRequest(BaseModel):
     type: str
@@ -72,12 +84,16 @@ class AnomalyRequest(BaseModel):
     pre_collect: Optional[bool] = True
     post_collect: Optional[bool] = True
     save_post_data: Optional[bool] = True
+    experiment_name: Optional[str] = None
 
 @router.post("/inject")
 async def inject_anomaly(request: AnomalyRequest):
     """Inject an anomaly into the OceanBase cluster"""
     try:
-        # Clear all caches
+        # Log the request details
+        logger.info(f"Injecting anomaly: {request.type} on node {request.node}")
+        
+        # Clear all caches to ensure fresh data
         await clear_caches()
         
         # Start collecting training data first if requested
@@ -100,10 +116,18 @@ async def inject_anomaly(request: AnomalyRequest):
         
         # Inject the anomaly
         try:
+            # Use retry_with_backoff to handle potential race conditions
             await retry_with_backoff(
                 lambda: k8s_service.apply_chaos_experiment(request.type)
             )
             logger.info(f"Successfully injected {request.type} anomaly")
+            
+            # Double check that the anomaly is tracked in active_anomalies
+            logger.info(f"Active anomalies after injection: {list(k8s_service.active_anomalies.keys())}")
+            
+            # Force invalidate all caches again after injection
+            await clear_caches()
+            
         except Exception as e:
             # If anomaly injection fails and we started collection, stop it
             if request.collect_training_data:
@@ -132,22 +156,54 @@ async def inject_anomaly(request: AnomalyRequest):
 async def clear_anomaly(request: AnomalyRequest):
     """Clear an anomaly from the OceanBase cluster"""
     try:
-        # Clear all caches
+        # Log the request details
+        logger.info(f"Clearing anomaly: {request.type}, experiment: {request.experiment_name}")
+        
+        # Clear all caches first
         await clear_caches()
         
-        # Clear the anomaly first
-        await retry_with_backoff(
-            lambda: k8s_service.delete_chaos_experiment(request.type)
+        # Clear the anomaly
+        deleted_experiments = await retry_with_backoff(
+            lambda: k8s_service.delete_chaos_experiment(request.type, request.experiment_name)
         )
+        
+        # Log the deleted experiments
+        logger.info(f"Deleted experiments: {deleted_experiments}")
         
         # Stop collecting training data if it was being collected
         if request.collect_training_data:
             training_service.stop_anomaly_collection(save_post_data=request.save_post_data)
             logger.info(f"Stopped collecting training data for {request.type} anomaly on {request.node}")
+        
+        # Clear caches again to ensure latest state
+        await clear_caches()
+        
+        # Get current active anomalies to verify cleanup
+        try:
+            current_anomalies = await k8s_service.get_active_anomalies()
+            logger.info(f"Active anomalies after clear: {[a.get('name', '') for a in current_anomalies]}")
+            
+            # Check if we still have anomalies of this type
+            remaining = [a for a in current_anomalies if a.get('type') == request.type]
+            if remaining:
+                logger.warning(f"Still have {len(remaining)} anomalies of type {request.type} after deletion")
+                
+                # Try one more time to delete them specifically
+                for anomaly in remaining:
+                    try:
+                        name = anomaly.get('name')
+                        if name:
+                            logger.info(f"Attempting to delete remaining anomaly: {name}")
+                            await k8s_service.delete_chaos_experiment(request.type, name)
+                    except Exception as e:
+                        logger.error(f"Failed to delete remaining anomaly: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error checking remaining anomalies: {str(e)}")
             
         return {
             "status": "success", 
-            "message": f"Cleared {request.type} anomaly from node {request.node}"
+            "message": f"Cleared {request.type} anomaly from node {request.node}",
+            "deleted": deleted_experiments
         }
     except Exception as e:
         logger.error(f"Failed to clear anomaly: {str(e)}")
@@ -157,23 +213,53 @@ async def clear_anomaly(request: AnomalyRequest):
 async def get_active_anomalies():
     """Get list of active anomalies in the OceanBase cluster"""
     try:
-        active_anomalies = await k8s_service.get_active_anomalies()
+        logger.info("Requesting active anomalies...")
+        
+        # Try to get active anomalies from k8s_service
+        try:
+            # Clear the cache before fetching to ensure fresh data
+            k8s_service.invalidate_cache()
+            k8s_service._last_cache_update = 0
+            
+            # Get active anomalies
+            active_anomalies = await k8s_service.get_active_anomalies()
+            logger.info(f"Retrieved {len(active_anomalies)} active anomalies from K8s service")
+        except AttributeError as e:
+            logger.warning(f"AttributeError in get_active_anomalies: {str(e)}, using fallback...")
+            # If the method is missing, use the directly stored anomalies
+            active_anomalies = list(k8s_service.active_anomalies.values())
+            logger.info(f"Retrieved {len(active_anomalies)} active anomalies from fallback")
+        except Exception as e:
+            logger.error(f"Exception in get_active_anomalies: {str(e)}, using fallback...")
+            # If any other error occurs, use the directly stored anomalies
+            active_anomalies = list(k8s_service.active_anomalies.values())
+            logger.info(f"Retrieved {len(active_anomalies)} active anomalies from fallback")
+        
+        # Log the active anomalies for debugging
+        logger.info(f"Active anomalies to return: {json.dumps(active_anomalies)}")
+        
         response = jsonable_encoder(active_anomalies)
         return JSONResponse(
             content=response,
             headers={
                 "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0"
             }
         )
     except Exception as e:
         logger.error(f"Failed to get active anomalies: {str(e)}")
+        # Return empty list instead of error in case of failure
         return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(e)},
+            content=[],
             headers={
                 "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0"
             }
         )
 
@@ -355,13 +441,48 @@ async def anomaly_stream():
     """Stream anomaly updates using Server-Sent Events"""
     async def event_generator():
         last_data = None
+        error_count = 0
+        max_errors = 10
+        
+        logger.info("Starting anomaly stream event generator")
+        
         while True:
             try:
-                # Get current anomalies directly from the service's state
-                current_data = list(k8s_service.active_anomalies.values())
+                # Clear cache before fetching to ensure fresh data
+                k8s_service.invalidate_cache()
+                k8s_service._last_cache_update = 0
+                
+                # Get current anomalies by calling the API method to ensure fresh data
+                try:
+                    logger.debug("Fetching active anomalies for stream")
+                    current_data = await k8s_service.get_active_anomalies()
+                    logger.debug(f"Stream fetched {len(current_data)} active anomalies")
+                    error_count = 0  # Reset error count on success
+                except AttributeError as e:
+                    logger.warning(f"AttributeError in anomaly stream: {str(e)}, trying to recover...")
+                    # If the method is missing, use fallback and wait
+                    current_data = list(k8s_service.active_anomalies.values())
+                    logger.debug(f"Stream fallback: {len(current_data)} active anomalies from direct cache")
+                    error_count += 1
+                except Exception as e:
+                    logger.error(f"Error getting active anomalies for stream: {str(e)}")
+                    # Use fallback to direct dictionary access if the method fails
+                    current_data = list(k8s_service.active_anomalies.values())
+                    logger.debug(f"Stream error fallback: {len(current_data)} active anomalies from direct cache")
+                    error_count += 1
+                    
+                    # If too many errors, reset cache completely
+                    if error_count > max_errors:
+                        logger.warning("Too many errors in stream, attempting to clear caches")
+                        try:
+                            await clear_caches()
+                            error_count = 0
+                        except Exception as clear_error:
+                            logger.error(f"Failed to clear caches in stream: {str(clear_error)}")
                 
                 # Only send if data changed
                 if current_data != last_data:
+                    logger.info(f"Stream data changed, sending update with {len(current_data)} anomalies")
                     last_data = current_data
                     yield {
                         "event": "anomaly_update",
@@ -372,9 +493,18 @@ async def anomaly_stream():
                 # Check every second
                 await asyncio.sleep(1)
             except Exception as e:
-                logger.error(f"Error in anomaly stream: {str(e)}")
+                logger.error(f"Critical error in anomaly stream generator: {str(e)}")
+                error_count += 1
                 # Add small delay on error
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
                 continue
 
-    return EventSourceResponse(event_generator()) 
+    return EventSourceResponse(
+        event_generator(),
+        headers={
+            "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+            "Access-Control-Allow-Credentials": "true",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        }
+    ) 

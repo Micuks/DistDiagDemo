@@ -81,7 +81,7 @@ const MetricsPanel = () => {
         cpu: 'cpu usage',
         memory: 'total memstore used',
         io: 'io read count',
-        network: 'rpc packet in bytes',
+        network: 'rpc net delay',
         transactions: 'trans commit count'
     });
 
@@ -242,6 +242,7 @@ const MetricsPanel = () => {
         const value = latestEntry?.value ?? 0;
         const suffix = getMetricSuffix(category, metric);
         const formattedValue = `${formatValue(Number(value), category, metric)} ${suffix}`;
+        const isSelected = selectedMetrics[category] === metric;
         
         return (
             <Col span={8} key={metric}>
@@ -250,13 +251,25 @@ const MetricsPanel = () => {
                     style={{ 
                         cursor: 'pointer',
                         padding: '8px',
-                        borderRadius: '4px'
+                        borderRadius: '4px',
+                        backgroundColor: isSelected ? '#e6f7ff' : 'transparent',
+                        border: isSelected ? '1px solid #91d5ff' : '1px solid transparent',
+                        transition: 'all 0.3s ease'
+                    }}
+                    onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = isSelected ? '#e6f7ff' : '#f5f5f5';
+                    }}
+                    onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = isSelected ? '#e6f7ff' : 'transparent';
                     }}
                 >
                     <Statistic 
                         title={metric} 
                         value={formattedValue}
-                        valueStyle={{ fontSize: '16px' }}
+                        valueStyle={{ 
+                            fontSize: '16px',
+                            color: isSelected ? '#1890ff' : 'rgba(0, 0, 0, 0.85)'
+                        }}
                     />
                 </div>
             </Col>

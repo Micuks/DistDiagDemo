@@ -41,6 +41,13 @@ class WorkloadService:
             )
             cursor = conn.cursor()
             
+            # Set open_cursors parameter for all zones
+            for zone in ['zone1', 'zone2', 'zone3']:
+                alter_cmd = f"ALTER SYSTEM SET open_cursors=65535 ZONE='{zone}'"
+                logger.info(f"Executing: {alter_cmd}")
+                cursor.execute(alter_cmd)
+                conn.commit()
+            
             # Create database if not exists
             cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.db_name}")
             conn.commit()
@@ -536,7 +543,8 @@ class WorkloadService:
         try:
             if workload_id not in self.active_workloads:
                 logger.warning(f"Workload {workload_id} not found in active workloads")
-                return False
+                # It might have already been stopped by the reader thread, so return True
+                return True
             
             logger.info(f"Stopping workload: {workload_id}")
             process = self.active_workloads[workload_id]
@@ -556,7 +564,11 @@ class WorkloadService:
             if stderr:
                 logger.warning(f"Final error output from workload {workload_id}: {stderr}")
             
-            del self.active_workloads[workload_id]
+            # Check if the workload is still in active_workloads before removing it
+            # It might have been removed by the reader thread
+            if workload_id in self.active_workloads:
+                del self.active_workloads[workload_id]
+            
             logger.info(f"Workload {workload_id} stopped successfully")
             return True
             
@@ -568,20 +580,31 @@ class WorkloadService:
         """Stop all active workloads"""
         try:
             logger.info("Stopping all workloads")
+            # Make a copy of the workload IDs to avoid dictionary changed during iteration
             workload_ids = list(self.active_workloads.keys())
             
-            success = True
-            for workload_id in workload_ids:
-                if not self.stop_workload(workload_id):
-                    success = False
-                    
-            if success:
-                logger.info("All workloads stopped successfully")
-            else:
-                logger.warning("Some workloads failed to stop")
+            if not workload_ids:
+                logger.info("No active workloads to stop")
+                return True
                 
-            return success
+            # Try to stop each workload
+            stop_errors = 0
+            for workload_id in workload_ids:
+                try:
+                    self.stop_workload(workload_id)
+                except Exception as e:
+                    logger.error(f"Error stopping workload {workload_id}: {str(e)}")
+                    stop_errors += 1
             
+            # After attempting to stop all workloads, check if any are still active
+            remaining_workloads = list(self.active_workloads.keys())
+            if not remaining_workloads:
+                logger.info("All workloads stopped successfully")
+                return True
+            else:
+                logger.warning(f"Failed to stop {len(remaining_workloads)} workloads: {remaining_workloads}")
+                return False
+                    
         except Exception as e:
             logger.exception("Error stopping all workloads")
             return False

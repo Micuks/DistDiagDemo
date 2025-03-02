@@ -13,7 +13,7 @@ const WorkloadControlPanel = () => {
     });
 
     const workloadOptions = [
-        { value: 'sysbench', label: 'Sysbench OLTP(not found on idmg-monitor)' },
+        { value: 'sysbench', label: 'Sysbench OLTP' },
         { value: 'tpcc', label: 'TPC-C' },
         // { value: 'tpch', label: 'TPC-H(not implemented)' }
     ];

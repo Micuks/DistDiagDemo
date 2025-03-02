@@ -1,21 +1,18 @@
 import os
 import json
-import logging
-import concurrent.futures
-from datetime import datetime
-from typing import Dict, List, Any, Tuple, Optional
-import numpy as np
-import shutil
-import threading
-from functools import lru_cache, wraps
 import time
-from concurrent.futures import ThreadPoolExecutor
+import logging
+import threading
 import asyncio
-import functools
-from async_lru import alru_cache
 import ijson
+from datetime import datetime
 from collections import defaultdict
-import mmap
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+from typing import Dict, List, Any, Optional
+import numpy as np
+
+from async_lru import alru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -432,6 +429,19 @@ class TrainingService:
                 logger.error(f"Error computing stats: {str(e)}")
                 raise
 
+    def _count_json_entries(self, file_path: str) -> int:
+        """Count entries in a JSON array file using memory-efficient parsing"""
+        count = 0
+        try:
+            with open(file_path, 'rb') as f:
+                parser = ijson.items(f, 'item')
+                for _ in parser:
+                    count += 1
+            return count
+        except Exception as e:
+            logger.error(f"Error counting entries in {file_path}: {str(e)}")
+            return 0
+
     def _compute_dataset_stats(self):
         """Get statistics about the collected training data with optimized caching"""
         if not self._should_update_stats_cache():
@@ -457,16 +467,14 @@ class TrainingService:
         # Process in smaller batches to avoid memory issues
         case_dirs = [d for d in os.listdir(self.data_dir) if os.path.isdir(os.path.join(self.data_dir, d))]
         batch_size = 50  # Process 50 cases at a time
-        case_stats = []
         
         for i in range(0, len(case_dirs), batch_size):
             batch = case_dirs[i:i + batch_size]
             for case_dir in batch:
                 case_path = os.path.join(self.data_dir, case_dir)
-                metrics_file = os.path.join(case_path, "metrics.json")
                 label_file = os.path.join(case_path, "label.json")
                 
-                if not os.path.exists(metrics_file) or not os.path.exists(label_file):
+                if not os.path.exists(label_file):
                     continue
                     
                 try:
@@ -474,12 +482,37 @@ class TrainingService:
                         label_data = json.load(f)
                         
                     if label_data.get("type") == "normal":
-                        stats["normal"] += 1
+                        # For normal cases, count all metrics as normal
+                        metrics_file = os.path.join(case_path, "metrics.json")
+                        if os.path.exists(metrics_file):
+                            count = self._count_json_entries(metrics_file)
+                            stats["normal"] += count
+                            logger.debug(f"Added {count} normal samples from {case_dir}")
                     else:
-                        stats["anomaly"] += 1
-                        anomaly_type = label_data.get("type")
-                        if anomaly_type:
-                            stats["anomaly_types"][anomaly_type] += 1
+                        # For anomaly cases:
+                        # 1. Count pre_anomaly as normal
+                        pre_anomaly_file = os.path.join(case_path, "pre_anomaly_metrics.json")
+                        if os.path.exists(pre_anomaly_file):
+                            count = self._count_json_entries(pre_anomaly_file)
+                            stats["normal"] += count
+                            logger.debug(f"Added {count} pre-anomaly normal samples from {case_dir}")
+                        
+                        # 2. Count metrics.json as anomaly
+                        metrics_file = os.path.join(case_path, "metrics.json")
+                        if os.path.exists(metrics_file):
+                            count = self._count_json_entries(metrics_file)
+                            stats["anomaly"] += count
+                            anomaly_type = label_data.get("type")
+                            if anomaly_type:
+                                stats["anomaly_types"][anomaly_type] += count
+                            logger.debug(f"Added {count} anomaly samples of type {anomaly_type} from {case_dir}")
+                        
+                        # 3. Count post_anomaly as normal
+                        post_anomaly_file = os.path.join(case_path, "post_anomaly_metrics.json")
+                        if os.path.exists(post_anomaly_file):
+                            count = self._count_json_entries(post_anomaly_file)
+                            stats["normal"] += count
+                            logger.debug(f"Added {count} post-anomaly normal samples from {case_dir}")
                             
                 except Exception as e:
                     logger.error(f"Error processing case {case_dir}: {str(e)}")
