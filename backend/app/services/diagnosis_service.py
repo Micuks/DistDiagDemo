@@ -350,18 +350,12 @@ class DistDiagnosis:
             raise
 
 class DiagnosisService:
-    def __init__(self):
-        # Use absolute path for model storage
-        self.model_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), 
-            '../../models/anomaly_detector'
-        ))
+    def __init__(self, model_name=None):
+        # Base models directory
         self.models_path = os.path.abspath(os.path.join(
             os.path.dirname(__file__), 
             '../../models/'
         ))
-        self.metrics_path = os.path.join(self.model_path, 'metrics')
-        os.makedirs(self.metrics_path, exist_ok=True)
         
         # Define anomaly types that can be detected
         self.anomaly_types = ['cpu', 'memory', 'io', 'network']
@@ -376,13 +370,30 @@ class DiagnosisService:
             node_num=self.node_count
         )
         
-        # Load existing model if available
-        if os.path.exists(self.model_path):
+        # Select model to use - either specified or latest available
+        available_models = self.get_available_models()
+        self.active_model = model_name if model_name and model_name in available_models else (
+            available_models[0] if available_models else None
+        )
+        
+        if self.active_model:
+            # Set model path based on active model
+            self.model_path = os.path.join(self.models_path, self.active_model)
+            self.metrics_path = os.path.join(self.model_path, 'metrics')
+            os.makedirs(self.metrics_path, exist_ok=True)
+            
+            # Load the selected model
             try:
                 self.diagnosis.load_model(self.model_path)
-                logger.info("Loaded existing model from %s", self.model_path)
+                logger.info("Loaded model '%s' from %s", self.active_model, self.model_path)
             except Exception as e:
-                logger.error("Failed to load model: %s", str(e))
+                logger.error("Failed to load model '%s': %s", self.active_model, str(e))
+        else:
+            logger.warning("No models available to load")
+            # Set default paths even if no model is available
+            self.model_path = None
+            self.metrics_path = os.path.join(self.models_path, 'metrics')
+            os.makedirs(self.metrics_path, exist_ok=True)
 
     def train(self, X: np.ndarray, y: np.ndarray):
         """Train the model with collected data"""
@@ -402,8 +413,21 @@ class DiagnosisService:
             # Generate model name with timestamp
             model_name = f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             
+            # Create new model directory
+            new_model_path = os.path.join(self.models_path, model_name)
+            os.makedirs(new_model_path, exist_ok=True)
+            
+            # Create metrics directory for this model
+            new_metrics_path = os.path.join(new_model_path, 'metrics')
+            os.makedirs(new_metrics_path, exist_ok=True)
+            
             # Save model
-            self.diagnosis.save_model(os.path.join(self.model_path, model_name))
+            self.diagnosis.save_model(new_model_path)
+            
+            # Update current model paths
+            self.active_model = model_name
+            self.model_path = new_model_path
+            self.metrics_path = new_metrics_path
             
             # Evaluate and store metrics
             metrics = self.evaluate_model(X_test, y_test, model_name)
@@ -462,13 +486,22 @@ class DiagnosisService:
     def get_model_performance(self, model_name):
         """Get stored performance metrics for a model"""
         try:
-            metrics_file = os.path.join(self.metrics_path, f"{model_name}_metrics.json")
+            # If looking for current active model metrics
+            if model_name == self.active_model:
+                metrics_path = self.metrics_path
+            else:
+                # Look for metrics in the specific model directory
+                model_dir = os.path.join(self.models_path, model_name)
+                metrics_path = os.path.join(model_dir, 'metrics')
+                
+            metrics_file = os.path.join(metrics_path, f"{model_name}_metrics.json")
             if os.path.exists(metrics_file):
                 with open(metrics_file) as f:
                     return json.load(f)
+            
             return None
         except Exception as e:
-            logger.error(f"Error loading model metrics: {str(e)}")
+            logger.error(f"Error loading model metrics for {model_name}: {str(e)}")
             return None
 
     def get_available_models(self):
@@ -491,6 +524,29 @@ class DiagnosisService:
         except Exception as e:
             logger.error(f"Error getting available models: {str(e)}")
             return []
+
+    def switch_model(self, model_name):
+        """Switch to using a different model"""
+        try:
+            available_models = self.get_available_models()
+            
+            if model_name not in available_models:
+                logger.error(f"Model '{model_name}' not found. Available models: {available_models}")
+                return False
+                
+            # Set new active model
+            self.active_model = model_name
+            self.model_path = os.path.join(self.models_path, model_name)
+            self.metrics_path = os.path.join(self.model_path, 'metrics')
+            
+            # Load the model
+            self.diagnosis.load_model(self.model_path)
+            logger.info(f"Switched to model '{model_name}'")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error switching to model '{model_name}': {str(e)}")
+            return False
 
 # Create singleton instance
 diagnosis_service = DiagnosisService()
