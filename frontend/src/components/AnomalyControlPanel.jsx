@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, Button, Space, Table, message, Row, Col, Tag, Spin, Alert } from 'antd';
 import { anomalyService } from '../services/anomalyService';
 import { useAnomalyData } from '../hooks/useAnomalyData';
@@ -6,6 +6,23 @@ import { useAnomalyData } from '../hooks/useAnomalyData';
 const AnomalyControlPanel = () => {
     const { data: activeAnomalies = [], error, isLoading, refetch } = useAnomalyData();
     const [loading, setLoading] = useState(false);
+    const [tableLoading, setTableLoading] = useState(true);
+    const [lastStableData, setLastStableData] = useState([]);
+    
+    // Use stable data for table to prevent flickering
+    useEffect(() => {
+        // Only update the lastStableData when we have data and aren't in a loading state
+        // This keeps the table populated with previous data during refreshes
+        if (activeAnomalies && activeAnomalies.length > 0) {
+            setLastStableData(activeAnomalies);
+        }
+        
+        // Initialize tableLoading as true only on first load
+        // After first load complete, set to false
+        if (!isLoading && tableLoading) {
+            setTableLoading(false);
+        }
+    }, [activeAnomalies, isLoading]);
 
     const anomalyOptions = [
         { id: 'cpu_stress', name: 'CPU Stress' },
@@ -144,6 +161,9 @@ const AnomalyControlPanel = () => {
         );
     }
 
+    // Determine which data to show - use lastStableData during refreshes to prevent flickering
+    const tableData = (isLoading && lastStableData.length > 0) ? lastStableData : (activeAnomalies || []);
+
     return (
         <div>
             <Row gutter={[16, 16]}>
@@ -170,15 +190,43 @@ const AnomalyControlPanel = () => {
                                     Stop All
                                 </Button>
                             </Space>
-                            {isLoading ? (
-                                <Spin tip="Loading anomalies..." />
+                            
+                            {/* Show initial loading spinner only during first load when table is empty */}
+                            {tableLoading ? (
+                                <div style={{ textAlign: 'center', padding: '20px' }}>
+                                    <Spin tip="Loading anomalies..." />
+                                </div>
                             ) : (
-                                <Table
-                                    columns={columns}
-                                    dataSource={activeAnomalies || []}
-                                    rowKey="name"
-                                    pagination={false}
-                                />
+                                <div style={{ position: 'relative' }}>
+                                    {/* Overlay a light loading indicator during refreshes */}
+                                    {isLoading && !tableLoading && (
+                                        <div style={{
+                                            position: 'absolute',
+                                            top: '8px',
+                                            right: '8px',
+                                            zIndex: 1,
+                                            background: 'rgba(255, 255, 255, 0.7)',
+                                            padding: '5px 10px',
+                                            borderRadius: '4px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)'
+                                        }}>
+                                            <Spin size="small" style={{ marginRight: '8px' }} />
+                                            <span>Refreshing...</span>
+                                        </div>
+                                    )}
+                                    
+                                    <Table
+                                        columns={columns}
+                                        dataSource={tableData}
+                                        rowKey="name"
+                                        pagination={false}
+                                        locale={{ 
+                                            emptyText: 'No active anomalies' 
+                                        }}
+                                    />
+                                </div>
                             )}
                         </Space>
                     </Card>
