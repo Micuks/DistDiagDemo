@@ -69,8 +69,6 @@ class AnomalyRequest(BaseModel):
     type: str
     node: Optional[str] = None
     collect_training_data: Optional[bool] = False
-    pre_collect: Optional[bool] = True
-    post_collect: Optional[bool] = True
     save_post_data: Optional[bool] = True
 
 @router.post("/inject")
@@ -86,9 +84,7 @@ async def inject_anomaly(request: AnomalyRequest):
             try:
                 await training_service.start_collection(
                     request.type, 
-                    request.node,
-                    pre_collect=request.pre_collect,
-                    post_collect=request.post_collect
+                    request.node
                 )
                 logger.info(f"Started collecting training data for {request.type} anomaly on {request.node}")
             except Exception as e:
@@ -250,42 +246,21 @@ async def stop_normal_collection():
 
 @router.get("/collection-status")
 async def get_collection_status():
-    """Get current data collection status"""
-    try:
-        async with training_service._lock:  # Use async lock to ensure atomic access
-            is_normal = training_service.is_collecting_normal and not training_service.current_anomaly
-            is_anomaly = training_service.current_anomaly is not None
-            
-            status = {
-                "is_collecting_normal": is_normal,
-                "is_collecting_anomaly": is_anomaly,
-                "current_type": "normal" if is_normal else training_service.current_anomaly["type"] if is_anomaly else None,
-                "collection_options": {
-                    "pre_collect": training_service.current_anomaly.get("pre_collect", True) if is_anomaly else False,
-                    "post_collect": training_service.current_anomaly.get("post_collect", True) if is_anomaly else False
-                } if is_anomaly else None,
-                "collection_phase": "pre_anomaly" if is_anomaly and training_service.is_collecting_normal else
-                                  "anomaly" if is_anomaly else
-                                  "normal" if is_normal else None
-            }
-        
-        return JSONResponse(
-            content=status,
-            headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to get collection status: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)},
-            headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
+    """Get the current data collection status"""
+    is_collecting = (training_service.current_case is not None)
+    is_normal = training_service.is_collecting_normal
+    is_anomaly = (training_service.current_anomaly is not None)
+    
+    response = {
+        "isCollecting": is_collecting,
+        "currentType": "normal" if is_normal else "anomaly" if is_anomaly else None,
+        "anomalyType": training_service.current_anomaly.get("type", None) if is_anomaly else None,
+        "anomalyNode": training_service.current_anomaly.get("node", None) if is_anomaly else None,
+        "startTime": training_service.collection_start_time,
+        "save_post_data": training_service.current_anomaly.get("save_post_data", True) if is_anomaly else False,
+    }
+    
+    return response
 
 @router.get("/training/stats")
 async def get_training_stats():
