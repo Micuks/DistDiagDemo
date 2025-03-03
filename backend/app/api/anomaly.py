@@ -81,8 +81,6 @@ class AnomalyRequest(BaseModel):
     type: str
     node: Optional[str] = None
     collect_training_data: Optional[bool] = False
-    pre_collect: Optional[bool] = True
-    post_collect: Optional[bool] = True
     save_post_data: Optional[bool] = True
     experiment_name: Optional[str] = None
 
@@ -102,9 +100,7 @@ async def inject_anomaly(request: AnomalyRequest):
             try:
                 await training_service.start_collection(
                     request.type, 
-                    request.node,
-                    pre_collect=request.pre_collect,
-                    post_collect=request.post_collect
+                    request.node
                 )
                 logger.info(f"Started collecting training data for {request.type} anomaly on {request.node}")
             except Exception as e:

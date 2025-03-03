@@ -1,6 +1,7 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.REACT_APP_API_BASE_URL || 'http://10.101.168.97:8001';
+const API_BASE_URL =
+    import.meta.env.REACT_APP_API_BASE_URL || 'http://10.101.168.97:8001';
 const MAX_RETRIES = 3;
 
 class AnomalyService {
@@ -9,7 +10,7 @@ class AnomalyService {
             baseURL: API_BASE_URL,
             timeout: 30000, // 30s timeout
         });
-        
+
         // Add response interceptor for error handling
         this.client.interceptors.response.use(
             response => response.data,
@@ -84,7 +85,7 @@ class AnomalyService {
     }
 
     async startAnomaly(type, params = {}) {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/anomaly/inject', {
                 type: type,
                 node: params.node || null,
@@ -94,7 +95,7 @@ class AnomalyService {
     }
 
     async stopAnomaly(type) {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/anomaly/clear', {
                 type: type,
                 collect_training_data: false
@@ -185,49 +186,49 @@ class AnomalyService {
     }
 
     async getTrainingStats() {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.get('/api/anomaly/training/stats')
         );
     }
 
     async startTrainingDataCollection() {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/anomaly/training/start')
         );
     }
 
     async stopTrainingDataCollection() {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/anomaly/training/stop')
         );
     }
 
     async getAnomalyRanks() {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.get('/api/anomaly/ranks')
         );
     }
 
     async getCollectionStatus() {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.get('/api/anomaly/collection-status')
         );
     }
 
     async startNormalCollection() {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/anomaly/normal/start')
         );
     }
 
     async stopNormalCollection() {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/anomaly/normal/stop')
         );
     }
 
     async getDetailedMetrics(metricType, duration) {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/metrics/detailed', {
                 metric_type: metricType,
                 duration: duration
@@ -236,38 +237,36 @@ class AnomalyService {
     }
 
     async getAvailableModels() {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.get('/api/models/list')
         );
     }
 
     async getModelPerformance(modelName) {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.get(`/api/models/${encodeURIComponent(modelName)}/performance`)
         );
     }
 
     async compareModels(modelNames) {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/models/compare', {
                 models: modelNames
             })
         );
     }
 
-    async startAnomalyCollection(type, node, options = {}) {
-        return this._retryableRequest(() => 
+    async startAnomalyCollection(type, node) {
+        return this._retryableRequest(() =>
             this.client.post('/api/training/collect', {
                 type: type,
-                node: node || null,
-                pre_collect: options.preCollect,
-                post_collect: options.postCollect
+                node: node || null
             })
         );
     }
 
     async stopAnomalyCollection(savePostData = true) {
-        return this._retryableRequest(() => 
+        return this._retryableRequest(() =>
             this.client.post('/api/training/stop', {
                 save_post_data: savePostData
             })
@@ -281,4 +280,4 @@ class AnomalyService {
     }
 }
 
-export const anomalyService = new AnomalyService(); 
+export const anomalyService = new AnomalyService();

@@ -42,7 +42,7 @@ class TrainingService:
     _stats_lock = asyncio.Lock()
     _request_lock = asyncio.Lock()
     _last_request_time = 0
-    _event_loop = None  # Store single event loop instance
+    _cache_task = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -85,10 +85,6 @@ class TrainingService:
         # Add dataset balance tracking
         self.normal_samples = 0
         self.anomaly_samples = 0
-        self.pre_anomaly_buffer = []
-        self.post_anomaly_buffer = []
-        self.pre_anomaly_duration = 60  # seconds
-        self.post_anomaly_duration = 60  # seconds
         self.balance_threshold = 0.3  # 30% threshold for balance
         
         # Log existing data
@@ -97,7 +93,7 @@ class TrainingService:
         self._initialized = True
         
         # Start background cache maintenance
-        self._cache_task = self._event_loop.create_task(self._maintain_cache())
+        self._cache_task = asyncio.create_task(self._maintain_cache())
 
     def _log_existing_data(self):
         """Log information about existing training data"""
@@ -116,7 +112,7 @@ class TrainingService:
                 logger.info(f"    Metrics file: {metrics_size} bytes")
                 logger.info(f"    Label file: {'Present' if has_label else 'Missing'}")
         
-    async def start_collection(self, anomaly_type: str, node: str, pre_collect: bool = True, post_collect: bool = True):
+    async def start_collection(self, anomaly_type: str, node: str):
         """Start collecting training data for an anomaly case"""
         async with self._lock:
             # Validate node parameter
@@ -130,63 +126,15 @@ class TrainingService:
             self.current_anomaly = {
                 "type": anomaly_type,
                 "node": node,
-                "start_time": self.collection_start_time,
-                "pre_collect": pre_collect,
-                "post_collect": post_collect
+                "start_time": self.collection_start_time
             }
             
             # Clear buffers
             self.metrics_buffer = []
-            self.pre_anomaly_buffer = []
-            self.post_anomaly_buffer = []
             
-            # Start collecting pre-anomaly normal data if requested
-            self.is_collecting_normal = pre_collect
-            if pre_collect:
-                logger.info(f"Started collecting pre-anomaly normal data for {self.current_case} at {self.collection_start_time}")
-                # Use call_later instead of create_task for the timer
-                self._event_loop.call_later(
-                    self.pre_anomaly_duration,
-                    lambda: self._event_loop.create_task(self._switch_to_anomaly_collection())
-                )
-            else:
-                logger.info(f"Skipping pre-anomaly data collection for {self.current_case}")
-                # Switch to anomaly collection immediately
-                await self._switch_to_anomaly_collection()
-
-    async def _schedule_switch_to_anomaly(self, delay: float):
-        """Schedule the switch to anomaly collection after a delay"""
-        await asyncio.sleep(delay)
-        await self._switch_to_anomaly_collection()
-
-    async def _switch_to_anomaly_collection(self):
-        """Switch from pre-anomaly to anomaly data collection"""
-        try:
-            async with self._lock:
-                if not self.current_case:
-                    logger.warning("No active case when switching to anomaly collection")
-                    return
-                    
-                # Save pre-anomaly data as normal
-                if self.pre_anomaly_buffer:
-                    try:
-                        self.normal_samples += len(self.pre_anomaly_buffer)
-                        await self._save_normal_data(self.pre_anomaly_buffer, "pre_anomaly")
-                        # Clear buffer after successful save
-                        self.pre_anomaly_buffer = []
-                    except Exception as save_error:
-                        logger.error(f"Failed to save pre-anomaly data: {str(save_error)}")
-                        # Don't clear buffer on error to allow retry
-                
-                # Switch to anomaly collection
-                self.is_collecting_normal = False
-                logger.info(f"Switched to anomaly data collection for {self.current_case}")
-                
-        except Exception as e:
-            logger.error(f"Failed to switch to anomaly collection: {str(e)}")
-            # Clear collection state on critical error
-            await self._clear_collection_state()
-            raise
+            # No pre/post collection - directly start anomaly collection
+            self.is_collecting_normal = False
+            logger.info(f"Started anomaly data collection for {self.current_case} at {self.collection_start_time}")
 
     async def _clear_collection_state(self):
         """Clear all collection state variables"""
@@ -194,8 +142,6 @@ class TrainingService:
             self.current_case = None
             self.current_anomaly = None
             self.metrics_buffer = []
-            self.pre_anomaly_buffer = []
-            self.post_anomaly_buffer = []
             self.collection_start_time = None
             self.is_collecting_normal = False
             logger.info("Cleared collection state")
@@ -203,6 +149,14 @@ class TrainingService:
     async def start_normal_collection(self):
         """Start collecting normal state data"""
         async with self._lock:
+            # If there's an existing cache task, cancel it first
+            if self._cache_task and not self._cache_task.done():
+                self._cache_task.cancel()
+                try:
+                    await self._cache_task
+                except asyncio.CancelledError:
+                    pass
+            
             self.collection_start_time = datetime.now().isoformat()
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
             self.current_case = f"case_normal_{timestamp}"
@@ -211,19 +165,25 @@ class TrainingService:
             # Clear buffers
             self.metrics_buffer = []
             self.normal_state_buffer = []
-            self.pre_anomaly_buffer = []
-            self.post_anomaly_buffer = []
             
             # Set collection state
             self.is_collecting_normal = True
             logger.info(f"Started collecting normal state data for {self.current_case}")
             
-            # Start background cache maintenance
-            self._cache_task = self._event_loop.create_task(self._maintain_cache())
+            # Start background cache maintenance using asyncio.create_task()
+            self._cache_task = asyncio.create_task(self._maintain_cache())
 
     async def stop_normal_collection(self):
         """Stop collecting normal state data"""
         async with self._lock:
+            # Cancel the cache maintenance task if it exists
+            if self._cache_task and not self._cache_task.done():
+                self._cache_task.cancel()
+                try:
+                    await self._cache_task
+                except asyncio.CancelledError:
+                    pass
+                
             if not self.is_collecting_normal or self.current_anomaly:
                 logger.warning("No active normal state collection to stop")
                 return
@@ -236,11 +196,68 @@ class TrainingService:
                     self.normal_state_buffer = []
                 except Exception as e:
                     logger.error(f"Failed to save normal state data: {str(e)}")
-                    raise
             
             # Clear collection state
             await self._clear_collection_state()
-            logger.info("Stopped normal state data collection")
+
+    def stop_collection(self, save_post_data: bool = True):
+        """Stop any active data collection.
+        This method is non-async for backward compatibility with existing code.
+        It creates a task to call the appropriate async stop method.
+        """
+        if not self.current_case:
+            logger.warning("No active collection to stop")
+            return
+            
+        # Determine which stop method to call
+        if self.current_anomaly:
+            # Create task to stop anomaly collection
+            asyncio.create_task(self._stop_anomaly_collection(save_post_data))
+        else:
+            # Create task to stop normal collection
+            asyncio.create_task(self.stop_normal_collection())
+            
+        logger.info("Initiated stop collection process")
+    
+    async def _stop_anomaly_collection(self, save_post_data: bool = True):
+        """Stop collecting anomaly data"""
+        async with self._lock:
+            if not self.current_anomaly:
+                logger.warning("No active anomaly collection to stop")
+                return
+                
+            # Save collected anomaly data
+            if self.metrics_buffer:
+                try:
+                    # Save the metrics data as an anomaly case
+                    case_dir = os.path.join(self.data_dir, self.current_case)
+                    os.makedirs(case_dir, exist_ok=True)
+                    
+                    metrics_file = os.path.join(case_dir, "metrics.json")
+                    with open(metrics_file, 'w') as f:
+                        json.dump(self.metrics_buffer, f)
+                    
+                    # Create and save the label file
+                    label_file = os.path.join(case_dir, "label.json") 
+                    with open(label_file, 'w') as f:
+                        json.dump({
+                            "type": self.current_anomaly["type"],
+                            "node": self.current_anomaly["node"],
+                            "start_time": self.collection_start_time,
+                            "end_time": datetime.now().isoformat()
+                        }, f)
+                    
+                    self.anomaly_samples += len(self.metrics_buffer)
+                    logger.info(f"Saved {len(self.metrics_buffer)} anomaly metrics to {metrics_file}")
+                    self.metrics_buffer = []
+                    
+                    # Invalidate stats cache
+                    self.invalidate_stats_cache()
+                except Exception as e:
+                    logger.error(f"Failed to save anomaly data: {str(e)}")
+            
+            # Clear collection state
+            await self._clear_collection_state()
 
     async def _save_normal_data(self, data: List[Dict], prefix: str = ""):
         """Save normal state data to disk"""
@@ -288,12 +305,8 @@ class TrainingService:
             processed_metrics = self._process_raw_metrics(metrics)
             
             if self.is_collecting_normal:
-                if self.current_anomaly:  # Pre-anomaly collection
-                    self.pre_anomaly_buffer.extend(processed_metrics)
-                    logger.debug(f"Added {len(processed_metrics)} metrics to pre-anomaly buffer")
-                else:  # Normal state collection
-                    self.normal_state_buffer.extend(processed_metrics)
-                    logger.debug(f"Added {len(processed_metrics)} metrics to normal state buffer")
+                self.normal_state_buffer.extend(processed_metrics)
+                logger.debug(f"Added {len(processed_metrics)} metrics to normal state buffer")
             else:  # Anomaly collection
                 self.metrics_buffer.extend(processed_metrics)
                 logger.debug(f"Added {len(processed_metrics)} metrics to anomaly buffer")
@@ -626,17 +639,6 @@ class TrainingService:
                 with open(label_file) as f:
                     label_data = json.load(f)
                     
-                # Process pre-anomaly data as normal
-                pre_anomaly_file = os.path.join(case_path, "pre_anomaly_metrics.json")
-                if os.path.exists(pre_anomaly_file):
-                    with open(pre_anomaly_file) as f:
-                        pre_anomaly_data = json.load(f)
-                        features = self._process_metrics(pre_anomaly_data)
-                        if features is not None:
-                            X.extend(features)
-                            y.extend([np.zeros(4) for _ in range(len(features))])  # Normal state
-                            logger.info(f"Processed {len(features)} pre-anomaly samples from {case_dir}")
-                            
                 # Process anomaly data
                 metrics_file = os.path.join(case_path, "metrics.json")
                 if os.path.exists(metrics_file):
@@ -647,17 +649,6 @@ class TrainingService:
                             X.extend(features)
                             y.extend([self._create_label_vector(label_data) for _ in range(len(features))])
                             logger.info(f"Processed {len(features)} anomaly samples from {case_dir}")
-                            
-                # Process post-anomaly data as normal
-                post_anomaly_file = os.path.join(case_path, "post_anomaly_metrics.json")
-                if os.path.exists(post_anomaly_file):
-                    with open(post_anomaly_file) as f:
-                        post_anomaly_data = json.load(f)
-                        features = self._process_metrics(post_anomaly_data)
-                        if features is not None:
-                            X.extend(features)
-                            y.extend([np.zeros(4) for _ in range(len(features))])  # Normal state
-                            logger.info(f"Processed {len(features)} post-anomaly samples from {case_dir}")
                             
             except Exception as e:
                 logger.error(f"Error loading training data from {case_dir}: {str(e)}")
@@ -767,9 +758,15 @@ class TrainingService:
         return label_vector
 
     async def _maintain_cache(self):
-        while True:
-            await self.get_dataset_stats()
-            await asyncio.sleep(30)  # Refresh every 30s
+        """Background task to periodically update the dataset stats cache"""
+        try:
+            while True:
+                await self.get_dataset_stats()
+                await asyncio.sleep(30)  # Refresh every 30s
+        except asyncio.CancelledError:
+            # Handle cancellation gracefully
+            logger.debug("Cache maintenance task was cancelled")
+            raise
 
 # Create singleton instance
 training_service = TrainingService() 
