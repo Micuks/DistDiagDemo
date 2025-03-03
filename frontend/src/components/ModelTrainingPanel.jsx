@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select } from 'antd';
 import { anomalyService } from '../services/anomalyService';
+import { trainingService } from '../services/trainingService';
 import { useAnomalyData } from '../hooks/useAnomalyData';
 import ModelPerformanceView from './ModelPerformanceView';
 
@@ -41,11 +42,18 @@ const ModelTrainingPanel = () => {
     useEffect(() => {
         const fetchStatus = async () => {
             try {
-                const status = await anomalyService.getCollectionStatus();
+                const status = await trainingService.getCollectionStatus();
                 setCollectionStatus({
                     isCollecting: status.is_collecting_normal || status.is_collecting_anomaly,
                     currentType: status.current_type
                 });
+                if (status.collection_options) {
+                    setCollectionOptions({
+                        preCollect: status.collection_options.pre_collect,
+                        postCollect: status.collection_options.post_collect
+                    });
+                }
+                await fetchTrainingStats();
             } catch (error) {
                 console.error('Failed to fetch collection status:', error);
             }
@@ -66,38 +74,42 @@ const ModelTrainingPanel = () => {
     const handleCollectionToggle = async () => {
         try {
             setLoading(true);
+            // Access activeAnomalies directly from the component state
+            
             if (collectionStatus.isCollecting) {
                 // Stop collection based on current type
                 if (collectionStatus.currentType === 'normal') {
-                    await anomalyService.stopNormalCollection();
+                    await trainingService.stopNormalCollection();
                 } else {
-                    await anomalyService.stopAnomalyCollection(collectionOptions.postCollect);
+                    await trainingService.stopAnomalyCollection(collectionOptions.postCollect);
                 }
             } else {
                 // Start collection based on presence of anomalies
                 if (activeAnomalies.length > 0) {
                     const activeAnomaly = activeAnomalies[0];
                     // Start collection for existing anomaly without injecting new one
-                    await anomalyService.startAnomalyCollection(
+                    await trainingService.startAnomalyCollection(
                         activeAnomaly.type,
                         activeAnomaly.node,
                         collectionOptions
                     );
                 } else {
-                    await anomalyService.startNormalCollection();
+                    await trainingService.startNormalCollection();
                 }
             }
-
-            // Refresh status after toggle
-            const newStatus = await anomalyService.getCollectionStatus();
+            
+            // Update status after operation
+            const newStatus = await trainingService.getCollectionStatus();
             setCollectionStatus({
                 isCollecting: newStatus.is_collecting_normal || newStatus.is_collecting_anomaly,
                 currentType: newStatus.current_type
             });
-            message.success(`${newStatus.is_collecting_normal || newStatus.is_collecting_anomaly ? 'Started' : 'Stopped'} data collection`);
+            
+            await fetchTrainingStats();
+            message.success(`Data collection ${collectionStatus.isCollecting ? 'stopped' : 'started'}`);
         } catch (error) {
-            message.error('Failed to toggle data collection');
-            console.error(error);
+            console.error("Error toggling collection", error);
+            message.error(`Failed to ${collectionStatus.isCollecting ? 'stop' : 'start'} data collection`);
         } finally {
             setLoading(false);
         }
@@ -106,12 +118,19 @@ const ModelTrainingPanel = () => {
     const handleAutoBalance = async () => {
         try {
             setLoading(true);
-            await anomalyService.toggleAutoBalance(!isAutoBalancing);
             setIsAutoBalancing(!isAutoBalancing);
-            message.success(`${!isAutoBalancing ? 'Enabled' : 'Disabled'} auto-balancing`);
+            
+            // Toggle auto-balance
+            await trainingService.autoBalanceDataset();
+            
+            // Fetch updated stats
+            await fetchTrainingStats();
+            
+            message.success(`Auto-balance ${isAutoBalancing ? 'disabled' : 'enabled'}`);
         } catch (error) {
-            message.error('Failed to toggle auto-balancing');
-            console.error(error);
+            console.error("Error toggling auto-balance", error);
+            message.error(`Failed to ${isAutoBalancing ? 'disable' : 'enable'} auto-balance`);
+            setIsAutoBalancing(isAutoBalancing); // Revert state on error
         } finally {
             setLoading(false);
         }
@@ -119,27 +138,41 @@ const ModelTrainingPanel = () => {
 
     const fetchTrainingStats = async () => {
         try {
-            const response = await anomalyService.getTrainingStats();
-            setTrainingStats(response.stats || {
-                normal: 0,
-                anomaly: 0,
-                total_samples: 0,
-                normal_ratio: 0,
-                anomaly_ratio: 0,
-                anomaly_types: {},
-                is_balanced: false
-            });
+            const response = await trainingService.getTrainingStats();
+            if (response && response.status === 'success' && response.stats) {
+                setTrainingStats(response.stats);
+            } else {
+                setTrainingStats(null);
+            }
         } catch (error) {
-            console.error('Failed to fetch training stats:', error);
-            setTrainingStats({
-                normal: 0,
-                anomaly: 0,
-                total_samples: 0,
-                normal_ratio: 0,
-                anomaly_ratio: 0,
-                anomaly_types: {},
-                is_balanced: false
-            });
+            console.error("Error loading training stats", error);
+            setTrainingStats(null);
+        }
+    };
+
+    const handleTrainModel = async () => {
+        try {
+            setLoading(true);
+            message.info('Training model with collected data...');
+            
+            const response = await trainingService.trainModel();
+            
+            if (response && response.status === 'success') {
+                message.success('Model trained successfully');
+                // Refresh the list of models
+                const models = await anomalyService.getAvailableModels();
+                setAvailableModels(models);
+                if (models.length > 0) {
+                    setSelectedModel(models[0]);
+                }
+            } else {
+                message.error('Failed to train model: ' + (response?.message || 'Unknown error'));
+            }
+        } catch (error) {
+            console.error("Error training model", error);
+            message.error(`Failed to train model: ${error.message}`);
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -212,6 +245,21 @@ const ModelTrainingPanel = () => {
                                     loading={loading}
                                 />
                                 <span style={{ marginLeft: 8 }}>Auto-balance Training Data</span>
+                            </div>
+                            <div style={{ marginTop: 16 }}>
+                                <Button 
+                                    type="primary" 
+                                    onClick={handleTrainModel}
+                                    loading={loading}
+                                    disabled={!trainingStats || trainingStats.total_samples < 10}
+                                >
+                                    Train Model
+                                </Button>
+                                {(!trainingStats || trainingStats.total_samples < 10) && (
+                                    <span style={{ marginLeft: 8, color: 'rgba(0, 0, 0, 0.45)' }}>
+                                        Need at least 10 samples
+                                    </span>
+                                )}
                             </div>
                         </Space>
                     </Card>

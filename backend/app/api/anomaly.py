@@ -19,7 +19,7 @@ import json
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_cache.coder import JsonCoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 logger = logging.getLogger(__name__)
 
@@ -302,138 +302,73 @@ async def get_anomaly_ranks(response: Response):
 async def train_model():
     """Train the anomaly detection model."""
     try:
-        # Get training data
-        X, y = training_service.get_training_data()
-        if len(X) == 0 or len(y) == 0:
-            raise HTTPException(status_code=400, detail="No training data available")
-            
-        # Train the model
-        diagnosis_service.train(X, y)
-        return {"status": "success", "message": "Model trained successfully"}
+        # Redirect to the new training endpoint
+        return RedirectResponse(url="/api/training/train", status_code=307)
     except Exception as e:
-        logger.error(f"Failed to train model: {str(e)}")
+        logger.error(f"Failed to redirect to training endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/normal/start")
 async def start_normal_collection():
-    """Start collecting normal state data"""
+    """Redirect to the new training endpoint for normal collection"""
     try:
-        await training_service.start_normal_collection()
-        return {"status": "success", "message": "Started normal state data collection"}
+        return RedirectResponse(url="/api/training/normal/start", status_code=307)
     except Exception as e:
-        logger.error(f"Failed to start normal state collection: {str(e)}")
+        logger.error(f"Failed to redirect to normal collection endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/normal/stop")
 async def stop_normal_collection():
-    """Stop collecting normal state data"""
+    """Redirect to the new training endpoint for stopping normal collection"""
     try:
-        await training_service.stop_normal_collection()
-        return {"status": "success", "message": "Stopped normal state data collection"}
+        return RedirectResponse(url="/api/training/normal/stop", status_code=307)
     except Exception as e:
-        logger.error(f"Failed to stop normal state collection: {str(e)}")
+        logger.error(f"Failed to redirect to stop normal collection endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/collection-status")
 async def get_collection_status():
-    """Get current data collection status"""
+    """Redirect to the new training endpoint for collection status"""
     try:
-        async with training_service._lock:  # Use async lock to ensure atomic access
-            is_normal = training_service.is_collecting_normal and not training_service.current_anomaly
-            is_anomaly = training_service.current_anomaly is not None
-            
-            status = {
-                "is_collecting_normal": is_normal,
-                "is_collecting_anomaly": is_anomaly,
-                "current_type": "normal" if is_normal else training_service.current_anomaly["type"] if is_anomaly else None,
-                "collection_options": {
-                    "pre_collect": training_service.current_anomaly.get("pre_collect", True) if is_anomaly else False,
-                    "post_collect": training_service.current_anomaly.get("post_collect", True) if is_anomaly else False
-                } if is_anomaly else None,
-                "collection_phase": "pre_anomaly" if is_anomaly and training_service.is_collecting_normal else
-                                  "anomaly" if is_anomaly else
-                                  "normal" if is_normal else None
-            }
-        
-        return JSONResponse(
-            content=status,
-            headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
+        return RedirectResponse(url="/api/training/collection-status", status_code=307)
     except Exception as e:
-        logger.error(f"Failed to get collection status: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)},
-            headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
+        logger.error(f"Failed to redirect to collection status endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/training/stats")
 async def get_training_stats():
-    """Get statistics about the collected training data."""
+    """Redirect to the new training endpoint for stats"""
     try:
-        try:
-            stats = await asyncio.wait_for(training_service.get_dataset_stats(), timeout=20)
-        except asyncio.TimeoutError:
-            logger.warning("Dataset stats computation timed out")
-            stats = training_service._stats_cache
-        
-        if not stats:
-            return JSONResponse(
-                status_code=404,
-                content={"status": "error", "message": "No training data available"},
-                headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
-                    "Access-Control-Allow-Credentials": "true",
-                }
-            )
-
-        # Use the stats directly from the service without modification
-        response = {
-            "status": "success",
-            "stats": {
-                "normal": stats["normal"],  # Use direct access instead of .get()
-                "anomaly": stats["anomaly"],
-                "anomaly_types": stats["anomaly_types"],
-                "total_samples": stats["total_samples"],
-                "normal_ratio": stats["normal_ratio"],
-                "anomaly_ratio": stats["anomaly_ratio"],
-                "is_balanced": stats["is_balanced"]
-            }
-        }
-        
-        return JSONResponse(
-            content=jsonable_encoder(response),
-            headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
-                "Access-Control-Allow-Credentials": "true",
-            }
-        )
+        return RedirectResponse(url="/api/training/stats", status_code=307)
     except Exception as e:
-        logger.error(f"Failed to get training stats: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(e)},
-            headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
-                "Access-Control-Allow-Credentials": "true",
-            }
-        )
+        logger.error(f"Failed to redirect to training stats endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/training/auto_balance")
 async def auto_balance_dataset():
-    """Start auto-balancing the training dataset."""
+    """Redirect to the new training endpoint for auto-balancing"""
     try:
-        # Run auto-balance directly since it's now async
-        await training_service.auto_balance_dataset()
-        return {"status": "success", "message": "Auto-balance process started"}
+        return RedirectResponse(url="/api/training/auto_balance", status_code=307)
     except Exception as e:
-        logger.error(f"Failed to start auto-balance: {str(e)}")
+        logger.error(f"Failed to redirect to auto balance endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/training/collect")
+async def start_training_collection(request: AnomalyRequest):
+    """Redirect to the new training endpoint for collection"""
+    try:
+        return RedirectResponse(url="/api/training/collect", status_code=307)
+    except Exception as e:
+        logger.error(f"Failed to redirect to training collection endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/training/stop")
+async def stop_training_collection():
+    """Redirect to the new training endpoint for stopping collection"""
+    try:
+        return RedirectResponse(url="/api/training/stop", status_code=307)
+    except Exception as e:
+        logger.error(f"Failed to redirect to stop training endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/stream")

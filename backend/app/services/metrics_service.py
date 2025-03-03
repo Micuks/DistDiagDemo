@@ -204,10 +204,27 @@ class MetricsService:
         self.event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.event_loop)
         
+        # Get reference to the training service event loop
+        training_loop = getattr(training_service, '_event_loop', None)
+        
         while self.collection_active:
             try:
                 if self.collection_method == MetricsCollectionMethod.SQL:
-                    self.event_loop.run_until_complete(self._collect_sql_metrics())
+                    metrics = self.event_loop.run_until_complete(self._collect_sql_metrics_only())
+                    
+                    # If metrics were collected, send to training service using the appropriate event loop
+                    if metrics and training_loop:
+                        future = asyncio.run_coroutine_threadsafe(
+                            training_service.add_metrics(metrics), 
+                            training_loop
+                        )
+                        # Wait for the future to complete
+                        try:
+                            future.result(timeout=10)  # 10 second timeout
+                            logger.info("Successfully sent metrics to training service")
+                        except Exception as e:
+                            logger.error(f"Failed to send metrics to training service: {e}")
+                    
                 elif self.collection_method == MetricsCollectionMethod.OBDIAG:
                     try:
                         self.event_loop.run_until_complete(self._collect_obdiag_metrics())
@@ -230,8 +247,8 @@ class MetricsService:
         self.event_loop = None
         logger.info("Metrics collection loop ended")
 
-    async def _collect_sql_metrics(self):
-        """Collect metrics using direct SQL queries to OceanBase."""
+    async def _collect_sql_metrics_only(self):
+        """Collect metrics using direct SQL queries to OceanBase without sending to training service."""
         timestamp = datetime.now().isoformat()
         current_metrics = {}
         
@@ -317,14 +334,15 @@ class MetricsService:
             logger.warning("No metrics were collected from any nodes")
         else:
             logger.info(f"Successfully collected metrics from nodes: {list(current_metrics.keys())}")
-            try:
-                await training_service.add_metrics(current_metrics)
-                logger.info("Successfully sent metrics to training service")
-            except Exception as e:
-                logger.error(f"Failed to send metrics to training service: {e}")
-
+        
         self.metrics = current_metrics
         self.timestamp = timestamp
+        
+        return current_metrics
+
+    async def _collect_sql_metrics(self):
+        """Legacy method that calls _collect_sql_metrics_only but doesn't return the metrics."""
+        await self._collect_sql_metrics_only()
 
     @DeprecationWarning
     async def _collect_obdiag_metrics(self):
