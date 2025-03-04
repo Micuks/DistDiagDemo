@@ -26,9 +26,9 @@ const AnomalyControlPanel = () => {
 
     const anomalyOptions = [
         { id: 'cpu_stress', name: 'CPU Stress' },
-        { id: 'memory_stress', name: 'Memory Stress' },
-        { id: 'network_delay', name: 'Network Delay' },
-        { id: 'disk_stress', name: 'Disk Stress' },
+        { id: 'io_stress', name: 'I/O Bottleneck' },
+        { id: 'network_delay', name: 'Network Bottleneck' },
+        { id: 'cache_stress', name: 'Cache Bottleneck' },
         { id: 'too_many_indexes', name: 'Too Many Indexes' }
     ];
 

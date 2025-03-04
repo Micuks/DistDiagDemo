@@ -8,6 +8,8 @@ import asyncio
 import time
 from functools import lru_cache, wraps
 from async_lru import alru_cache
+import json
+import pymysql
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,16 @@ class K8sService:
         self.CACHE_TTL = 5  # Cache TTL in seconds
         self._last_cache_update = None
         self._last_request_time = 0  # This will force a refresh on next request
+        
+        # OceanBase connection configuration
+        self.ob_config = {
+            'host': os.getenv('OB_HOST', '127.0.0.1'),
+            'port': int(os.getenv('OB_PORT', '2881')),
+            'user': os.getenv('OB_USER', 'root@sys'),
+            'password': os.getenv('OB_PASSWORD', 'password'),
+            'database': os.getenv('OB_DATABASE', 'oceanbase'),
+            'zones': ['zone1','zone2','zone3']
+        }
 
     def _should_update_cache(self) -> bool:
         """Check if cache needs to be updated"""
@@ -119,8 +131,44 @@ class K8sService:
     async def delete_chaos_experiment(self, anomaly_type: str, experiment_name: str = None):
         """Delete a specific chaos mesh experiment with optimized retries"""
         try:
+            # Special handling for cache bottleneck
+            if anomaly_type == "cache_stress":
+                # Restore default memstore_limit_percentage
+                await self._update_ob_parameter({
+                    "memstore_limit_percentage": "0"  # Restore default value 0
+                })
+                if experiment_name:
+                    if experiment_name in self.active_anomalies:
+                        del self.active_anomalies[experiment_name]
+                    return [experiment_name]
+                return []
+            
+            # Special handling for too_many_indexes
+            elif anomaly_type == "too_many_indexes":
+                # Drop created indexes
+                if "sql_commands" in self.active_anomalies:
+                    drop_commands = []
+                    for cmd in self.active_anomalies["sql_commands"]:
+                        if cmd.startswith("create index"):
+                            # Extract index name and table
+                            parts = cmd.split()
+                            index_name = parts[2]
+                            table_name = parts[4].split('(')[0]
+                            drop_commands.append(f"drop index {index_name} on {table_name}")
+                    
+                    if drop_commands:
+                        await self._execute_sql_commands(drop_commands)
+                    self.active_anomalies.pop("sql_commands", None)
+                
+                if experiment_name:
+                    if experiment_name in self.active_anomalies:
+                        del self.active_anomalies[experiment_name]
+                    return [experiment_name]
+                return []
+
+            # For other types, proceed with chaos mesh experiment deletion
             plural = self._get_experiment_plural(anomaly_type)
-            deleted_experiments = []  # Track which experiments we deleted
+            deleted_experiments = []
             
             # If no specific experiment name is provided, delete all experiments of this type
             if experiment_name is None:
@@ -214,8 +262,8 @@ class K8sService:
             logger.info(f"Completed deletion of {anomaly_type} experiments")
             return deleted_experiments
         except Exception as e:
-            logger.error(f"Failed to delete chaos experiment(s): {str(e)}")
-            raise Exception(f"Failed to delete chaos experiment(s): {str(e)}")
+            logger.error(f"Failed to delete chaos experiment: {str(e)}")
+            raise
 
     async def delete_all_chaos_experiments(self):
         """Delete all running chaos mesh experiments in parallel"""
@@ -383,22 +431,21 @@ class K8sService:
                 "spec": {
                     "stressors": {
                         "cpu": {
-                            "workers": 4,
+                            "workers": 32,  # Increased to match external process contention
                             "load": 100
                         }
                     },
                     "duration": "300s"
                 }
             },
-            "memory_stress": {
-                "kind": "StressChaos",
+            "io_stress": {  # Renamed from disk_stress for clarity
+                "kind": "IOChaos",
                 "spec": {
-                    "stressors": {
-                        "memory": {
-                            "workers": 4,
-                            "size": "512MB"
-                        }
-                    },
+                    "action": "latency",
+                    "delay": "1000ms",  # Increased latency for more impact
+                    "path": "/home/admin/oceanbase/store",  # OceanBase data path
+                    "percent": 100,
+                    "methods": ["write", "read"],  # Both read and write operations
                     "duration": "300s"
                 }
             },
@@ -407,32 +454,66 @@ class K8sService:
                 "spec": {
                     "action": "delay",
                     "delay": {
-                        "latency": "500ms",
+                        "latency": "2000ms",  # Increased for more noticeable impact
                         "correlation": "100",
-                        "jitter": "100ms"
+                        "jitter": "0ms"  # Removed jitter for consistent delay
                     },
-                    "loss": {
-                        "loss": "10",
-                        "correlation": "50"
-                    }
+                    "target": {
+                        "selector": {
+                            "namespaces": [self.namespace],
+                            "labelSelectors": {"ref-obcluster": "obcluster"}
+                        },
+                        "mode": "all"
+                    },
+                    "direction": "both"  # Affect both inbound and outbound traffic
                 }
             },
-            "disk_stress": {
-                "kind": "IOChaos",
+            "cache_stress": {  # New type for cache bottleneck
+                "kind": "StressChaos",
                 "spec": {
-                    "action": "latency",
-                    "delay": "500ms",
-                    "path": "/home/admin/oceanbase/store",
-                    "percent": 100,
-                    "methods": ["write"],
+                    "stressors": {
+                        "memory": {
+                            "workers": 8,
+                            "size": "2GB"  # Large memory allocation to trigger cache pressure
+                        }
+                    },
                     "duration": "300s"
                 }
             }
         }
 
+        # Special handling for too_many_indexes
+        if anomaly_type == "too_many_indexes":
+            # This will be handled differently as it requires SQL execution
+            return {
+                "apiVersion": "chaos-mesh.org/v1alpha1",
+                "kind": "SQLChaos",  # Custom type for SQL operations
+                "metadata": {
+                    "name": experiment_name,
+                    "namespace": self.namespace
+                },
+                "spec": {
+                    "mode": "all",
+                    "selector": {
+                        "namespaces": [self.namespace],
+                        "labelSelectors": {"ref-obcluster": "obcluster"}
+                    },
+                    "action": "exec",
+                    "sqlCommands": [
+                        "create index toomany1 on bmsql_config(cfg_value) local",
+                        "create index toomany2 on bmsql_config(cfg_name) local",
+                        "create index toomany3 on bmsql_customer(c_w_id) local",
+                        "create index toomany4 on bmsql_customer(c_d_id) local",
+                        "create index toomany5 on bmsql_customer(c_id) local"
+                    ]
+                }
+            }
+
         # Create a deep copy of base template
         template = base_template.copy()
-        experiment_config = experiments[anomaly_type]
+        experiment_config = experiments.get(anomaly_type)
+        if not experiment_config:
+            raise ValueError(f"Unsupported anomaly type: {anomaly_type}")
         
         # Update non-spec fields
         for key, value in experiment_config.items():
@@ -443,12 +524,6 @@ class K8sService:
         if "spec" in experiment_config:
             template["spec"].update(experiment_config["spec"])
         
-        # Add pressure to transaction-related metrics for storage experiments
-        if anomaly_type == "disk_stress":
-            template["spec"]["stressors"] = {
-                "io": {"workers": 4, "rws": "write"}
-            }
-        
         return template
 
     @timed_lru_cache(seconds=60, maxsize=10)
@@ -457,66 +532,162 @@ class K8sService:
         # Normalize the anomaly type (kebab-case to snake_case)
         normalized_type = anomaly_type.replace('-', '_')
         
-        if normalized_type in ["cpu_stress", "memory_stress"]:
+        if normalized_type == "cpu_stress":
             return "stresschaos"
+        elif normalized_type == "io_stress":
+            return "iochaos"
         elif normalized_type == "network_delay":
             return "networkchaos"
-        elif normalized_type == "disk_stress":
-            return "iochaos"
+        elif normalized_type == "cache_stress":
+            return "stresschaos"
+        elif normalized_type == "too_many_indexes":
+            return "sqlchaos"  # Custom type for SQL operations
         else:
             raise ValueError(f"Unsupported anomaly type: {anomaly_type}")
 
+    async def _update_ob_parameter(self, config_changes: Dict[str, Any]) -> None:
+        """Update OceanBase configuration parameters using SQL"""
+        try:
+            conn = pymysql.connect(**self.ob_config)
+            with conn.cursor() as cursor:
+                for param, value in config_changes.items():
+                    # Convert parameter name to OceanBase format
+                    ob_param = param.lower()
+                    base_sql = f"ALTER SYSTEM SET {ob_param} = {value}"
+                    for zone in self.ob_config['zones']:
+                        sql = base_sql + f" ZONE={zone}"
+                        logger.info(f"Executing SQL: {sql}")
+                        cursor.execute(sql)
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"Updated OceanBase configuration: {config_changes}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update OceanBase configuration: {str(e)}")
+            raise
+
+    async def _execute_sql_commands(self, commands: List[str]) -> None:
+        """Execute SQL commands on OceanBase cluster using direct connection"""
+        try:
+            conn = pymysql.connect(**self.ob_config)
+            with conn.cursor() as cursor:
+                for cmd in commands:
+                    logger.info(f"Executing SQL: {cmd}")
+                    cursor.execute(cmd)
+            
+            conn.commit()
+            conn.close()
+            
+            # Track the SQL commands for cleanup
+            if "sql_commands" not in self.active_anomalies:
+                self.active_anomalies["sql_commands"] = []
+            self.active_anomalies["sql_commands"].extend(commands)
+            
+            logger.info(f"Successfully executed {len(commands)} SQL commands")
+            
+        except Exception as e:
+            logger.error(f"Failed to execute SQL commands: {str(e)}")
+            raise
+
     async def apply_chaos_experiment(self, anomaly_type: str):
         """Apply a chaos mesh experiment based on the anomaly type with optimized retries"""
-        experiment = self._get_experiment_template(anomaly_type)
-        experiment_name = experiment["metadata"]["name"]
-        
         try:
-            # Create new experiment with retry logic
-            max_retries = 5
-            retry_delay = 2
+            # Special handling for cache bottleneck
+            if anomaly_type == "cache_stress":
+                # Update memstore_limit_percentage
+                await self._update_ob_parameter({
+                    "memstore_limit_percentage": "20"  # Reduce from default 0
+                })
+                # Create a tracking experiment without actual chaos mesh resource
+                experiment = {
+                    "apiVersion": "chaos-mesh.org/v1alpha1",
+                    "kind": "StressChaos",
+                    "metadata": {
+                        "name": f"ob-cache-stress-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        "namespace": self.namespace
+                    },
+                    "spec": {
+                        "mode": "all",
+                        "selector": {
+                            "namespaces": [self.namespace],
+                            "labelSelectors": {"ref-obcluster": "obcluster"}
+                        }
+                    }
+                }
             
-            for attempt in range(max_retries):
-                try:
-                    await asyncio.to_thread(
-                        self.custom_api.create_namespaced_custom_object,
-                        group="chaos-mesh.org",
-                        version="v1alpha1",
-                        namespace=self.namespace,
-                        plural=self._get_experiment_plural(anomaly_type),
-                        body=experiment
-                    )
-                    break
-                except ApiException as e:
-                    if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
-                        logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
-                        await asyncio.sleep(retry_delay)
-                        retry_delay *= 2
-                        continue
-                    raise e
+            # Special handling for too_many_indexes
+            elif anomaly_type == "too_many_indexes":
+                # Read SQL commands from template
+                experiment = self._get_experiment_template(anomaly_type)
+                sql_commands = experiment["spec"].get("sqlCommands", [])
+                await self._execute_sql_commands(sql_commands)
+                # Create a tracking experiment
+                experiment = {
+                    "apiVersion": "chaos-mesh.org/v1alpha1",
+                    "kind": "SQLChaos",
+                    "metadata": {
+                        "name": f"ob-too-many-indexes-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        "namespace": self.namespace
+                    },
+                    "spec": {
+                        "mode": "all",
+                        "selector": {
+                            "namespaces": [self.namespace],
+                            "labelSelectors": {"ref-obcluster": "obcluster"}
+                        }
+                    }
+                }
+            else:
+                experiment = self._get_experiment_template(anomaly_type)
+
+            experiment_name = experiment["metadata"]["name"]
+            
+            # Only create chaos mesh experiment for non-special cases
+            if anomaly_type not in ["cache_stress", "too_many_indexes"]:
+                # Create experiment with retry logic
+                max_retries = 5
+                retry_delay = 2
+                
+                for attempt in range(max_retries):
+                    try:
+                        await asyncio.to_thread(
+                            self.custom_api.create_namespaced_custom_object,
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=self._get_experiment_plural(anomaly_type),
+                            body=experiment
+                        )
+                        break
+                    except ApiException as e:
+                        if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
+                            logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= 2
+                            continue
+                        raise e
             
             # Track the active anomaly
-            target = experiment["spec"]["selector"]["labelSelectors"]["ref-obcluster"]
+            target = experiment["spec"]["selector"]["labelSelectors"].get("ref-obcluster", "obcluster")
             self.active_anomalies[experiment_name] = {
                 "start_time": datetime.now().isoformat(),
                 "status": "active",
                 "type": anomaly_type,
                 "name": experiment_name,
                 "target": target,
-                "node": target  # Add node field for frontend display
+                "node": target
             }
             
-            # Log the active anomalies
-            logger.info(f"Updated active_anomalies: {list(self.active_anomalies.keys())}")
+            logger.info(f"Created {anomaly_type} experiment {experiment_name}")
             
-            # Invalidate the cache to force refresh
+            # Invalidate cache
             self.invalidate_cache()
-            self._last_cache_update = 0  # Force refresh on next request
+            self._last_cache_update = 0
             
-            logger.info(f"Created {anomaly_type} experiment {experiment_name} in namespace {self.namespace}")
         except Exception as e:
             logger.error(f"Failed to create chaos experiment: {str(e)}")
-            raise Exception(f"Failed to create chaos experiment: {str(e)}")
+            raise
 
     def invalidate_cache(self):
         """Invalidate all caches"""
