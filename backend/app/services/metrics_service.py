@@ -268,11 +268,11 @@ class MetricsService:
                         # Wait for the future to complete
                         try:
                             future.result(timeout=10)  # 10 second timeout
-                            logger.info("Successfully sent metrics to training service")
+                            logger.debug("Successfully sent metrics to training service")
                         except Exception as e:
                             logger.error(f"Failed to send metrics to training service: {e}")
                     elif metrics and not should_send_to_training:
-                        logger.debug("Not sending metrics to training service due to configuration or workload state")
+                        logger.info("Not sending metrics to training service due to configuration or workload state")
                     
                 elif self.collection_method == MetricsCollectionMethod.OBDIAG:
                     try:
@@ -712,12 +712,85 @@ class MetricsService:
 
     @timed_lru_cache(seconds=30, maxsize=1)
     def get_metrics(self) -> Dict[str, Any]:
-        """Get the latest collected metrics with history."""
-        if not self.metrics:
+        """Get the latest collected metrics with fluctuation analysis."""
+        if not self.metrics_history:
             return {"metrics": {}, "timestamp": None}
+
+        processed_metrics = {}
+        FLUCTUATION_Z_SCORE = 2.0  # 2 standard deviations
+        HISTORY_WINDOW = 60  # Last 60 data points (5 minutes of data)
+        MIN_HISTORY = 5  # Require at least 5 data points for analysis
+        
+        for node_ip in self.metrics_history:
+            processed_metrics[node_ip] = {}
             
+            for category in self.metrics_history[node_ip]:
+                processed_metrics[node_ip][category] = {}
+                
+                for metric_name, history in self.metrics_history[node_ip][category].items():
+                    if len(history) < MIN_HISTORY:
+                        # Not enough data points, skip fluctuation analysis
+                        processed_metrics[node_ip][category][metric_name] = history
+                        continue
+                    
+                    # Process delay metrics as cumulative counters
+                    if 'delay' in metric_name.lower():
+                        processed_history = []
+                        for i in range(1, len(history)):
+                            current = history[i]
+                            previous = history[i-1]
+                            delta = current['value'] - previous['value']
+                            # Ensure delta is non-negative
+                            delta = max(0, delta)
+                            processed_history.append({
+                                'timestamp': current['timestamp'],
+                                'value': delta
+                            })
+                        history = processed_history
+                    
+                    # Get current and historical values
+                    current_entry = history[-1]
+                    historical_entries = history[-HISTORY_WINDOW:-1]  # Exclude current value
+                    
+                    if not historical_entries:
+                        processed_metrics[node_ip][category][metric_name] = history
+                        continue
+                    
+                    # Calculate statistics with numerical stability
+                    try:
+                        values = [h['value'] for h in historical_entries]
+                        mean = sum(values) / len(values)
+                        # Calculate variance with better numerical stability
+                        squared_diff_sum = sum((x - mean) ** 2 for x in values)
+                        std_dev = (squared_diff_sum / len(values)) ** 0.5 if len(values) > 1 else 0
+                    except Exception as e:
+                        logger.error(f"Error calculating stats for {metric_name}: {e}")
+                        processed_metrics[node_ip][category][metric_name] = history
+                        continue
+                    
+                    # Handle edge cases and numerical stability
+                    current_value = current_entry['value']
+                    if abs(std_dev) < 1e-9:  # Effectively zero variance
+                        z_score = 0.0
+                        pct_change = 0.0
+                    else:
+                        z_score = (current_value - mean) / std_dev
+                        # Use relative threshold for mean comparison
+                        pct_change = (current_value - mean) / mean if abs(mean) > 1e-9 else 0.0
+                    
+                    # Add fluctuation data to the entry
+                    processed_history = history.copy()
+                    processed_history[-1] = {
+                        **current_entry,
+                        'z_score': round(z_score, 2),
+                        'pct_change': round(pct_change, 4),
+                        'has_fluctuation': abs(z_score) >= FLUCTUATION_Z_SCORE and abs(pct_change) > 1e-4
+                    }
+                    
+                    processed_metrics[node_ip][category][metric_name] = processed_history
+        
         return {
-            "metrics": self.metrics_history,
+            "metrics": processed_metrics,
             "timestamp": self.timestamp
         }
 

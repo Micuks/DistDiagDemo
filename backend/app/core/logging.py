@@ -61,11 +61,11 @@ def setup_logging():
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     
     # Set specific loggers to DEBUG level
-    logging.getLogger('app.services.training_service').setLevel(logging.INFO)
+    logging.getLogger('app.services.training_service').setLevel(logging.DEBUG)
     logging.getLogger('app.services.metrics_service').setLevel(logging.INFO)
     logging.getLogger('app.services.k8s_service').setLevel(logging.DEBUG)
     logging.getLogger('app.services.diagnosis_service').setLevel(logging.DEBUG)
-    logging.getLogger('app.services.workload_service').setLevel(logging.DEBUG)
+    logging.getLogger('app.services.workload_service').setLevel(logging.INFO)
     logging.getLogger('app.api').setLevel(logging.INFO)
 
     # Quiet some noisy loggers

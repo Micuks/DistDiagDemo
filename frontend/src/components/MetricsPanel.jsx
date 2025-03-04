@@ -26,49 +26,61 @@ const formatValue = (value, category, metric) => {
     if (typeof value !== 'number') return '0';
     
     // Handle time values (convert from ns)
-    if (metric.includes('time')) {
-        return `${(value / 1e9).toFixed(2)}`;
+    if (typeof metric === 'string' ? metric.includes('time') : metric.name.includes('time')) {
+        return `${(value / 1e9).toFixed(2).toLocaleString()}`;
     }
     
-    // Handle delay values (convert from ns to ms)
-    if (metric.includes('delay')) {
-        return `${(value / 1e6).toFixed(2)}`;
+    // Handle delay values (convert from µs to ms)
+    if (typeof metric === 'string' ? metric.includes('delay') : metric.name.includes('delay')) {
+        return `${(value / 1000).toFixed(2).toLocaleString()}`;
     }
     
     // Handle memory values (convert to MB)
-    if (category === 'memory' && (metric.includes('memstore') || metric.includes('memory'))) {
-        return `${(value / (1024 * 1024)).toFixed(2)}`;
+    if (category === 'memory' && (
+        typeof metric === 'string' ? 
+        (metric.includes('memstore') || metric.includes('memory')) : 
+        (metric.name.includes('memstore') || metric.name.includes('memory'))
+    )) {
+        return `${(value / (1024 * 1024)).toFixed(2).toLocaleString()}`;
     }
     
-    // Handle network bytes (convert to MB)
-    if (category === 'network' && metric.includes('bytes')) {
+    // Handle network bytes (convert to MB/GB)
+    if (category === 'network' && (typeof metric === 'string' ? metric.includes('bytes') : metric.name.includes('bytes'))) {
         const mbValue = value / (1024 * 1024);
         if (mbValue >= 1000) {
-            return `${(mbValue / 1024).toFixed(2)}`;  // Convert to GB
+            return `${(mbValue / 1024).toFixed(2).toLocaleString()}`;  // Convert to GB
         }
-        return `${mbValue.toFixed(2)}`;
+        return `${mbValue.toFixed(2).toLocaleString()}`;
     }
 
-    // Handle disk write size (convert to MB)
-    if (metric.includes('write size') || metric.includes('log total size')) {
+    // Handle disk write size (convert to MB/GB)
+    if ((typeof metric === 'string' ? 
+        (metric.includes('write size') || metric.includes('log total size')) :
+        (metric.name.includes('write size') || metric.name.includes('log total size'))
+    )) {
         const mbValue = value / (1024 * 1024);
         if (mbValue >= 1000) {
-            return `${(mbValue / 1024).toFixed(2)}`;  // Convert to GB
+            return `${(mbValue / 1024).toFixed(2).toLocaleString()}`;  // Convert to GB
         }
-        return `${mbValue.toFixed(2)}`;
+        return `${mbValue.toFixed(2).toLocaleString()}`;
     }
     
     // Handle percentages
-    if (metric === 'cpu usage' || metric.includes('util')) {
+    if ((typeof metric === 'string' ? metric === 'cpu usage' || metric.includes('util') : 
+        metric.name === 'cpu usage' || metric.name.includes('util'))) {
         return value.toFixed(1);
     }
     
-    // Handle count metrics
-    if (metric.includes('count')) {
+    // Handle count metrics with thousands separators
+    if (typeof metric === 'string' ? metric.includes('count') : metric.name.includes('count')) {
         return Math.round(value).toLocaleString();
     }
     
-    return value.toFixed(2);
+    // Default formatting with thousands separators
+    return value.toLocaleString(undefined, {
+        maximumFractionDigits: 0,
+        useGrouping: true
+    });
 };
 
 const MetricsPanel = () => {
@@ -147,40 +159,50 @@ const MetricsPanel = () => {
 
     const formatChartValue = (value, category, metric) => {
         if (category === 'memory' && (metric.includes('memstore') || metric.includes('memory'))) {
-            return (value / (1024 * 1024)).toFixed(2);
+            return (value / (1024 * 1024)).toFixed(2).toLocaleString();
         }
         if (metric.includes('time') && category === 'cpu') {
-            return (value / 1e9).toFixed(2);
+            return (value / 1e9).toFixed(2).toLocaleString();
         }
         if (category === 'network' && metric.includes('bytes')) {
-            return (value / 1024).toFixed(2);
+            return (value / 1024).toFixed(2).toLocaleString();
         }
         if (metric.includes('delay')) {
-            return (value / 1e6).toFixed(2);
+            return (value / 1000).toFixed(2).toLocaleString();
         }
         if (metric === 'cpu usage' || metric.includes('util')) {
             return parseFloat(value).toFixed(1);
         }
         if (metric.includes('count')) {
-            return Math.round(value);
+            return Math.round(value).toLocaleString();
         }
-        return value.toFixed(2);
+        return value.toLocaleString(undefined, {
+            maximumFractionDigits: 0,
+            useGrouping: true
+        });
     };
 
     const getMetricSuffix = (category, metric) => {
+        // Handle both string and object metric formats
+        const metricName = typeof metric === 'string' ? metric : metric.name;
+        const metricValue = typeof metric === 'object' ? metric.value : 0;
+
         if (category === 'memory') return 'MB';
-        if (metric.includes('time') && category === 'cpu') return 's';
-        if (category === 'network' && metric.includes('bytes')) {
-            const mbValue = Number(metric.value) / (1024 * 1024);
+        if (metricName.includes('time') && category === 'cpu') return 's';
+        if (category === 'network' && metricName.includes('bytes')) {
+            const mbValue = metricValue / (1024 * 1024);
             return mbValue >= 1000 ? 'GB' : 'MB';
         }
-        if (metric.includes('write size') || metric.includes('log total size')) {
-            const mbValue = Number(metric.value) / (1024 * 1024);
+        if (metricName.includes('write size') || metricName.includes('log total size')) {
+            const mbValue = metricValue / (1024 * 1024);
             return mbValue >= 1000 ? 'GB' : 'MB';
         }
-        if (metric.includes('delay')) return 'ms';
-        if (metric === 'cpu usage' || metric.includes('util')) return '%';
-        if (metric.includes('count')) return '';
+        if (metricName.includes('delay')) {
+            const msValue = metricValue / 1000;  // Convert µs to ms
+            return msValue >= 1000 ? 's' : 'ms';
+        }
+        if (metricName === 'cpu usage' || metricName.includes('util')) return '%';
+        if (metricName.includes('count')) return '';
         return '';
     };
 
@@ -237,40 +259,73 @@ const MetricsPanel = () => {
         );
     };
 
-    const renderMetricStatistic = (nodeIp, metric, values, category) => {
+    const renderMetricItem = (nodeIp, category, metricName, values) => {
         const latestEntry = Array.isArray(values) ? values[values.length - 1] : null;
-        const value = latestEntry?.value ?? 0;
-        const suffix = getMetricSuffix(category, metric);
-        const formattedValue = `${formatValue(Number(value), category, metric)} ${suffix}`;
-        const isSelected = selectedMetrics[category] === metric;
-        
+        if (!latestEntry) return null;
+
+        const hasFluctuation = latestEntry?.has_fluctuation || false;
+        const formattedValue = formatValue(latestEntry.value, category, metricName);
+        const suffix = getMetricSuffix(category, metricName);
+        const isSelected = selectedMetrics[category] === metricName;
+
         return (
-            <Col span={8} key={metric}>
+            <Col span={8} key={metricName}>
                 <div 
-                    onClick={() => setSelectedMetrics(prev => ({ ...prev, [category]: metric }))}
+                    onClick={() => setSelectedMetrics(prev => ({ ...prev, [category]: metricName }))}
                     style={{ 
                         cursor: 'pointer',
                         padding: '8px',
                         borderRadius: '4px',
-                        backgroundColor: isSelected ? '#e6f7ff' : 'transparent',
-                        border: isSelected ? '1px solid #91d5ff' : '1px solid transparent',
+                        backgroundColor: hasFluctuation ? '#fffbe6' : isSelected ? '#e6f7ff' : 'transparent',
+                        borderLeft: hasFluctuation ? '3px solid #ffd666' : isSelected ? '1px solid #91d5ff' : '1px solid transparent',
+                        boxShadow: hasFluctuation ? '0 2px 8px rgba(255, 214, 102, 0.1)' : 'none',
                         transition: 'all 0.3s ease'
                     }}
                     onMouseEnter={(e) => {
-                        e.currentTarget.style.backgroundColor = isSelected ? '#e6f7ff' : '#f5f5f5';
+                        if (!hasFluctuation) {
+                            e.currentTarget.style.backgroundColor = isSelected ? '#e6f7ff' : '#f5f5f5';
+                        }
                     }}
                     onMouseLeave={(e) => {
-                        e.currentTarget.style.backgroundColor = isSelected ? '#e6f7ff' : 'transparent';
+                        if (!hasFluctuation) {
+                            e.currentTarget.style.backgroundColor = isSelected ? '#e6f7ff' : 'transparent';
+                        }
                     }}
                 >
-                    <Statistic 
-                        title={metric} 
-                        value={formattedValue}
-                        valueStyle={{ 
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+                        <span style={{ 
                             fontSize: '16px',
-                            color: isSelected ? '#1890ff' : 'rgba(0, 0, 0, 0.85)'
-                        }}
-                    />
+                            color: isSelected ? '#1890ff' : 'rgba(0, 0, 0, 0.8)'
+                        }}>
+                            {formattedValue} {suffix}
+                        </span>
+                        {hasFluctuation && latestEntry.pct_change !== undefined && (
+                            <span style={{ 
+                                color: latestEntry.pct_change > 0 ? '#389e0d' : '#cf1322',
+                                fontWeight: 600,
+                                fontSize: '0.85em',
+                                padding: '2px 6px',
+                                borderRadius: '3px',
+                                backgroundColor: latestEntry.pct_change > 0 ? 'rgba(56, 158, 13, 0.1)' : 'rgba(207, 19, 34, 0.1)'
+                            }}>
+                                {latestEntry.pct_change > 0 ? '↑' : '↓'}
+                                {Math.abs(latestEntry.pct_change * 100).toFixed(1)}%
+                                <span style={{ opacity: 0.8, marginLeft: 4 }}>
+                                    (z={latestEntry.z_score?.toFixed(1)})
+                                </span>
+                            </span>
+                        )}
+                    </div>
+                    <div style={{ 
+                        fontSize: '0.9em',
+                        color: '#666',
+                        marginTop: 4,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                    }}>
+                        {metricName}
+                    </div>
                 </div>
             </Col>
         );
@@ -285,7 +340,7 @@ const MetricsPanel = () => {
                 {renderTimeSeriesChart(chartData, category, selectedMetric)}
                 <Row gutter={[16, 16]}>
                     {Object.entries(metrics).map(([metric, values]) => 
-                        renderMetricStatistic(nodeIp, metric, values, category)
+                        renderMetricItem(nodeIp, category, metric, values)
                     )}
                 </Row>
             </Card>
@@ -339,6 +394,34 @@ const MetricsPanel = () => {
                 </Row>
             </Card>
         );
+    };
+
+    // Helper functions for fluctuation display
+    const getFluctuationStyle = (metric) => ({
+        backgroundColor: metric.has_fluctuation ? '#fffbe6' : 'inherit',
+        borderLeft: metric.has_fluctuation ? '3px solid #ffd666' : 'none',
+        boxShadow: metric.has_fluctuation ? '0 2px 8px rgba(255, 214, 102, 0.1)' : 'none',
+        padding: '12px',
+        marginBottom: '8px',
+        borderRadius: '4px',
+        transition: 'all 0.3s ease'
+    });
+
+    const getBadgeStyle = (metric) => ({
+        color: metric.pct_change > 0 ? '#389e0d' : '#cf1322',
+        marginLeft: 8,
+        fontWeight: 600,
+        fontSize: '0.9em',
+        padding: '2px 6px',
+        borderRadius: '3px',
+        backgroundColor: metric.pct_change > 0 ? 'rgba(56, 158, 13, 0.1)' : 'rgba(207, 19, 34, 0.1)'
+    });
+
+    const getFluctuationText = (metric) => {
+        const pct = Math.abs(Math.round(metric.pct_change * 100));
+        const direction = metric.pct_change > 0 ? '↑' : '↓';
+        const z = metric.z_score.toFixed(1);
+        return `${direction}${pct}% (z=${z})`;
     };
 
     if (loading) {

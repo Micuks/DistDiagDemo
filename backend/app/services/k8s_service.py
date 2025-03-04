@@ -47,6 +47,7 @@ class K8sService:
         self.CACHE_TTL = 5  # Cache TTL in seconds
         self._last_cache_update = None
         self._last_request_time = 0  # This will force a refresh on next request
+        self.experiment_types = ["cpu_stress", "io_bottleneck", "network_bottleneck", "cache_bottleneck", "too_many_indexes"]
         
         # OceanBase connection configuration
         self.ob_config = {
@@ -273,7 +274,7 @@ class K8sService:
             self._experiment_cache = {}
             
             # Delete all types of chaos experiments in parallel
-            experiment_types = ["cpu_stress", "memory_stress", "network_delay", "disk_stress"]
+            experiment_types = self.experiment_types
             tasks = [self.delete_chaos_experiment(exp_type) for exp_type in experiment_types]
             await asyncio.gather(*tasks)
             
@@ -289,7 +290,7 @@ class K8sService:
             # Always force update if _last_cache_update is 0
             if self._last_cache_update == 0 or self._should_update_cache():
                 # Sync with Kubernetes to get current active experiments
-                experiment_types = ["cpu_stress", "memory_stress", "network_delay", "disk_stress"]
+                experiment_types = self.experiment_types
                 current_experiments = []
                 found_experiment_names = set()  # Track experiments found in k8s
                 

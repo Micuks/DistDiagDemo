@@ -735,18 +735,17 @@ class TrainingService:
         anomaly_types = {
             'cpu': 0,
             'cpu_stress': 0,
-            'memory': 1,
-            'memory_stress': 1,
-            'io': 2,
-            'io_stress': 2,
-            'network': 3,
-            'network_stress': 3,
-            'network_delay': 3,  # Add network_delay type
-            'disk': 2,  # Map disk to io category
-            'disk_stress': 2
+            'io': 1,
+            'io_bottleneck': 1,
+            'network': 2,
+            'network_bottleneck': 2,
+            'cache': 3,
+            'cache_bottleneck': 3,
+            'indexes': 4,
+            'too_many_indexes': 4,
         }
         
-        label_vector = np.zeros(4)  # 4 basic types: cpu, memory, io, network
+        label_vector = np.zeros(5)  # 5 basic types: cpu, io, network, cache, indexes
         
         anomaly_type = label_data.get("type")
         if anomaly_type in anomaly_types:
