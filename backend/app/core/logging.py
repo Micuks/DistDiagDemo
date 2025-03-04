@@ -18,7 +18,7 @@ def setup_logging():
         '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
     )
     simple_formatter = logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s'
+        '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
     )
 
     # Create console handler

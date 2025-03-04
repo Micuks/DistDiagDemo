@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select } from 'antd';
-import { anomalyService } from '../services/anomalyService';
 import { trainingService } from '../services/trainingService';
 import { useAnomalyData } from '../hooks/useAnomalyData';
 import ModelPerformanceView from './ModelPerformanceView';
@@ -21,7 +20,7 @@ const ModelTrainingPanel = () => {
   useEffect(() => {
     const fetchModels = async () => {
       try {
-        const models = await anomalyService.getAvailableModels();
+        const models = await trainingService.getAvailableModels();
         setAvailableModels(models);
         if (models.length > 0) {
           setSelectedModel(models[0]);
@@ -38,11 +37,14 @@ const ModelTrainingPanel = () => {
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const status = await anomalyService.getCollectionStatus();
+        const status = await trainingService.getCollectionStatus();
+        // Update the isCollecting property based on either normal or anomaly collection
         setCollectionStatus({
-          isCollecting: status.isCollecting || false,
-          currentType: status.currentType || null,
+          isCollecting: status.is_collecting_normal || status.is_collecting_anomaly || false,
+          currentType: status.current_type || null,
         });
+        
+        console.log("Collection status updated:", status);
       } catch (error) {
         console.error("Failed to fetch collection status:", error);
       }
@@ -66,34 +68,35 @@ const ModelTrainingPanel = () => {
       if (collectionStatus.isCollecting) {
         // Stop collection based on current type
         if (collectionStatus.currentType === "normal") {
-          await anomalyService.stopNormalCollection();
+          await trainingService.stopNormalCollection();
         } else {
           // We're no longer using postCollect option
-          await anomalyService.stopAnomalyCollection(true);
+          await trainingService.stopAnomalyCollection(true);
         }
+        message.success("Successfully stopped data collection");
       } else {
         // Start collection based on presence of anomalies
         if (activeAnomalies.length > 0) {
           const activeAnomaly = activeAnomalies[0];
           // Start collection for existing anomaly without injecting new one
-          await anomalyService.startAnomalyCollection(
+          const response = await trainingService.startAnomalyCollection(
             activeAnomaly.type,
             activeAnomaly.node
           );
+          console.log("Start anomaly collection response:", response);
+          message.success(`Started data collection for ${activeAnomaly.type}`);
         } else {
-          await anomalyService.startNormalCollection();
+          await trainingService.startNormalCollection();
+          message.success("Started normal data collection");
         }
       }
 
       // Refresh status after toggle
-      const newStatus = await anomalyService.getCollectionStatus();
+      const newStatus = await trainingService.getCollectionStatus();
       setCollectionStatus({
-        isCollecting: newStatus.isCollecting || false,
-        currentType: newStatus.currentType || null,
+        isCollecting: newStatus.is_collecting_normal || newStatus.is_collecting_anomaly || false,
+        currentType: newStatus.current_type || null,
       });
-      message.success(
-        `${newStatus.isCollecting ? "Started" : "Stopped"} data collection`
-      );
     } catch (error) {
       message.error("Failed to toggle data collection");
       console.error(error);
@@ -105,7 +108,7 @@ const ModelTrainingPanel = () => {
   const handleAutoBalance = async () => {
     try {
       setLoading(true);
-      await anomalyService.toggleAutoBalance(!isAutoBalancing);
+      await trainingService.autoBalanceDataset(!isAutoBalancing);
       setIsAutoBalancing(!isAutoBalancing);
       message.success(
         `${!isAutoBalancing ? "Enabled" : "Disabled"} auto-balancing`
@@ -142,7 +145,7 @@ const ModelTrainingPanel = () => {
             if (response && response.status === 'success') {
                 message.success('Model trained successfully');
                 // Refresh the list of models
-                const models = await anomalyService.getAvailableModels();
+                const models = await trainingService.getAvailableModels();
                 setAvailableModels(models);
                 if (models.length > 0) {
                     setSelectedModel(models[0]);
@@ -171,20 +174,18 @@ const ModelTrainingPanel = () => {
                   value={selectedModel}
                   onChange={setSelectedModel}
                 >
-                  {" "}
-                  {availableModels.map((model) => (
+                  {availableModels.map(model => (
                     <Select.Option key={model} value={model}>
-                      {" "}
-                      {model.replace(/\.[^/.]+$/, "")}{" "}
+                      {model.replace(/\.[^/.]+$/, "")}
                     </Select.Option>
-                  ))}{" "}
-                </Select>{" "}
+                  ))}
+                </Select>
                 {selectedModel && (
                   <ModelPerformanceView modelName={selectedModel} />
-                )}{" "}
-              </Space>{" "}
-            </Col>{" "}
-          </Row>{" "}
+                )}
+              </Space>
+            </Col>
+          </Row>
           <Divider />
           <Card title="Training Data Collection">
             <Space direction="vertical" style={{ width: "100%" }}>
@@ -194,33 +195,49 @@ const ModelTrainingPanel = () => {
                   onChange={handleCollectionToggle}
                   loading={loading}
                   disabled={loading}
-                />{" "}
+                />
                 <span style={{ marginLeft: 8 }}>
-                  {" "}
                   {collectionStatus.isCollecting
                     ? `Collecting ${collectionStatus.currentType} data`
-                    : "Start data collection"}{" "}
-                </span>{" "}
-              </div>{" "}
+                    : 'Start data collection'}
+                </span>
+              </div>
+              {activeAnomalies.length > 0 && !collectionStatus.isCollecting && (
+                <div style={{ marginLeft: 32 }}>
+                </div>
+              )}
               <div>
                 <Switch
                   checked={isAutoBalancing}
                   onChange={handleAutoBalance}
                   loading={loading}
-                />{" "}
-                <span style={{ marginLeft: 8 }}>
-                  Auto - balance Training Data{" "}
-                </span>{" "}
-              </div>{" "}
-            </Space>{" "}
-          </Card>{" "}
-        </Col>{" "}
-      </Row>{" "}
+                />
+                <span style={{ marginLeft: 8 }}>Auto-balance Training Data</span>
+              </div>
+              <div style={{ marginTop: 16 }}>
+                <Button 
+                  type="primary" 
+                  onClick={handleTrainModel}
+                  loading={loading}
+                  disabled={!trainingStats || trainingStats.total_samples < 10}
+                >
+                  Train Model
+                </Button>
+                {(!trainingStats || trainingStats.total_samples < 10) && (
+                  <span style={{ marginLeft: 8, color: 'rgba(0, 0, 0, 0.45)' }}>
+                    Need at least 10 samples
+                  </span>
+                )}
+              </div>
+            </Space>
+          </Card>
+        </Col>
+      </Row>
+
       <Divider />
       <Row gutter={[16, 16]}>
         <Col span={24}>
           <Card title="Training Statistics">
-            {" "}
             {trainingStats ? (
               <>
                 <Row gutter={[16, 16]}>
@@ -228,56 +245,38 @@ const ModelTrainingPanel = () => {
                     <Statistic
                       title="Normal Samples"
                       value={trainingStats.normal || 0}
-                    />{" "}
-                  </Col>{" "}
+                    />
+                  </Col>
                   <Col span={8}>
                     <Statistic
                       title="Anomaly Samples"
                       value={trainingStats.anomaly || 0}
-                    />{" "}
-                  </Col>{" "}
+                    />
+                  </Col>
                   <Col span={8}>
                     <Statistic
                       title="Total Samples"
                       value={trainingStats.total_samples || 0}
-                    />{" "}
-                  </Col>{" "}
-                </Row>{" "}
+                    />
+                  </Col>
+                </Row>
                 <Divider />
                 <Progress
                   percent={Math.round((trainingStats.normal_ratio || 0) * 100)}
-                  success={{
-                    percent: Math.round(
-                      (trainingStats.anomaly_ratio || 0) * 100
-                    ),
-                  }}
-                  format={() =>
-                    `${Math.round(
-                      (trainingStats.normal_ratio || 0) * 100
-                    )}% Normal / ${Math.round(
-                      (trainingStats.anomaly_ratio || 0) * 100
-                    )}% Anomaly`
-                  }
-                />{" "}
+                  success={{ percent: Math.round((trainingStats.anomaly_ratio || 0) * 100) }}
+                  format={() => `${Math.round((trainingStats.normal_ratio || 0) * 100)}% Normal / ${Math.round((trainingStats.anomaly_ratio || 0) * 100)}% Anomaly`}
+                />
                 <Divider />
                 <Row gutter={[16, 16]}>
-                  {" "}
-                  {trainingStats.anomaly_types &&
-                    Object.entries(trainingStats.anomaly_types).map(
-                      ([type, count]) => (
-                        <Col span={6} key={type}>
-                          <Statistic
-                            title={`${
-                              type.charAt(0).toUpperCase() + type.slice(1)
-                            } Anomalies`}
-                            value={count}
-                          />{" "}
-                        </Col>
-                      )
-                    )}{" "}
-                  {(!trainingStats.anomaly_types ||
-                    Object.keys(trainingStats.anomaly_types || {}).length ===
-                      0) && (
+                  {trainingStats?.anomaly_types && Object.entries(trainingStats.anomaly_types).map(([type, count]) => (
+                    <Col span={6} key={type}>
+                      <Statistic
+                        title={`${type.charAt(0).toUpperCase() + type.slice(1)} Anomalies`}
+                        value={count}
+                      />
+                    </Col>
+                  ))}
+                  {(!trainingStats?.anomaly_types || Object.keys(trainingStats?.anomaly_types || {}).length === 0) && (
                     <Col span={24}>
                       <Alert
                         message="No anomaly types collected yet"
@@ -285,8 +284,8 @@ const ModelTrainingPanel = () => {
                         showIcon
                       />
                     </Col>
-                  )}{" "}
-                </Row>{" "}
+                  )}
+                </Row>
                 {trainingStats.is_balanced ? (
                   <Alert
                     message="Data is well-balanced"
@@ -302,183 +301,16 @@ const ModelTrainingPanel = () => {
                     showIcon
                     style={{ marginTop: 16 }}
                   />
-                )}{" "}
+                )}
               </>
             ) : (
               <Spin tip="Loading training statistics..." />
-            )}{" "}
-          </Card>{" "}
-        </Col>{" "}
-      </Row>{" "}
+            )}
+          </Card>
+        </Col>
+      </Row>
     </div>
   );
-    return (
-        <div>
-            <Row gutter={[16, 16]}>
-                <Col span={24}>
-                    <Row gutter={[16, 16]}>
-                        <Col span={24}>
-                            <Space direction="vertical" style={{ width: '100%' }}>
-                                <Select
-                                    style={{ width: '100%' }}
-                                    placeholder="Select model to view performance"
-                                    value={selectedModel}
-                                    onChange={setSelectedModel}
-                                >
-                                    {availableModels.map(model => (
-                                        <Select.Option key={model} value={model}>
-                                            {model.replace(/\.[^/.]+$/, '')}
-                                        </Select.Option>
-                                    ))}
-                                </Select>
-                                {selectedModel && <ModelPerformanceView modelName={selectedModel} />}
-                            </Space>
-                        </Col>
-                    </Row>
-                    <Divider />
-                    <Card title="Training Data Collection">
-                        <Space direction="vertical" style={{ width: '100%' }}>
-                            <div>
-                                <Switch
-                                    checked={collectionStatus.isCollecting}
-                                    onChange={handleCollectionToggle}
-                                    loading={loading}
-                                    disabled={loading}
-                                />
-                                <span style={{ marginLeft: 8 }}>
-                                    {collectionStatus.isCollecting
-                                        ? `Collecting ${collectionStatus.currentType} data`
-                                        : 'Start data collection'}
-                                </span>
-                            </div>
-                            {activeAnomalies.length > 0 && !collectionStatus.isCollecting && (
-                                <div style={{ marginLeft: 32 }}>
-                                    <Checkbox
-                                        checked={collectionOptions.preCollect}
-                                        onChange={e => setCollectionOptions({
-                                            ...collectionOptions,
-                                            preCollect: e.target.checked
-                                        })}
-                                    >
-                                        Collect pre-anomaly data
-                                    </Checkbox>
-                                    <Checkbox
-                                        checked={collectionOptions.postCollect}
-                                        onChange={e => setCollectionOptions({
-                                            ...collectionOptions,
-                                            postCollect: e.target.checked
-                                        })}
-                                        style={{ marginLeft: 16 }}
-                                    >
-                                        Collect post-anomaly data
-                                    </Checkbox>
-                                </div>
-                            )}
-                            <div>
-                                <Switch
-                                    checked={isAutoBalancing}
-                                    onChange={handleAutoBalance}
-                                    loading={loading}
-                                />
-                                <span style={{ marginLeft: 8 }}>Auto-balance Training Data</span>
-                            </div>
-                            <div style={{ marginTop: 16 }}>
-                                <Button 
-                                    type="primary" 
-                                    onClick={handleTrainModel}
-                                    loading={loading}
-                                    disabled={!trainingStats || trainingStats.total_samples < 10}
-                                >
-                                    Train Model
-                                </Button>
-                                {(!trainingStats || trainingStats.total_samples < 10) && (
-                                    <span style={{ marginLeft: 8, color: 'rgba(0, 0, 0, 0.45)' }}>
-                                        Need at least 10 samples
-                                    </span>
-                                )}
-                            </div>
-                        </Space>
-                    </Card>
-                </Col>
-            </Row>
-
-            <Divider />
-            <Row gutter={[16, 16]}>
-                <Col span={24}>
-                    <Card title="Training Statistics">
-                        {trainingStats ? (
-                            <>
-                                <Row gutter={[16, 16]}>
-                                    <Col span={8}>
-                                        <Statistic
-                                            title="Normal Samples"
-                                            value={trainingStats.normal || 0}
-                                        />
-                                    </Col>
-                                    <Col span={8}>
-                                        <Statistic
-                                            title="Anomaly Samples"
-                                            value={trainingStats.anomaly || 0}
-                                        />
-                                    </Col>
-                                    <Col span={8}>
-                                        <Statistic
-                                            title="Total Samples"
-                                            value={trainingStats.total_samples || 0}
-                                        />
-                                    </Col>
-                                </Row>
-                                <Divider />
-                                <Progress
-                                    percent={Math.round((trainingStats.normal_ratio || 0) * 100)}
-                                    success={{ percent: Math.round((trainingStats.anomaly_ratio || 0) * 100) }}
-                                    format={() => 'Data Distribution'}
-                                />
-                                <Divider />
-                                <Row gutter={[16, 16]}>
-                                    {trainingStats?.anomaly_types && Object.entries(trainingStats.anomaly_types).map(([type, count]) => (
-                                        <Col span={6} key={type}>
-                                            <Statistic
-                                                title={`${type.charAt(0).toUpperCase() + type.slice(1)} Anomalies`}
-                                                value={count}
-                                            />
-                                        </Col>
-                                    ))}
-                                    {(!trainingStats?.anomaly_types || Object.keys(trainingStats?.anomaly_types || {}).length === 0) && (
-                                        <Col span={24}>
-                                            <Alert
-                                                message="No anomaly types collected yet"
-                                                type="info"
-                                                showIcon
-                                            />
-                                        </Col>
-                                    )}
-                                </Row>
-                                {trainingStats.is_balanced ? (
-                                    <Alert
-                                        message="Data is well-balanced"
-                                        type="success"
-                                        showIcon
-                                        style={{ marginTop: 16 }}
-                                    />
-                                ) : (
-                                    <Alert
-                                        message="Data is imbalanced"
-                                        description="Consider enabling auto-balance or collecting more data"
-                                        type="warning"
-                                        showIcon
-                                        style={{ marginTop: 16 }}
-                                    />
-                                )}
-                            </>
-                        ) : (
-                            <Spin tip="Loading training statistics..." />
-                        )}
-                    </Card>
-                </Col>
-            </Row>
-        </div>
-    );
 };
 
 export default ModelTrainingPanel;

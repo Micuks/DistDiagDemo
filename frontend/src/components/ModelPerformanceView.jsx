@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Spin, Alert, Row, Col, Statistic } from 'antd';
-import { anomalyService } from '../services/anomalyService';
+import { trainingService } from '../services/trainingService';
 
 const ModelPerformanceView = ({ modelName }) => {
     const [loading, setLoading] = useState(true);
@@ -12,7 +12,7 @@ const ModelPerformanceView = ({ modelName }) => {
             try {
                 setLoading(true);
                 setError(null);
-                const data = await anomalyService.getModelPerformance(modelName);
+                const data = await trainingService.getModelPerformance(modelName);
                 setPerformance(data);
             } catch (err) {
                 setError('Failed to load model performance metrics');

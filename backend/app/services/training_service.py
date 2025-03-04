@@ -75,6 +75,10 @@ class TrainingService:
         os.makedirs(self.data_dir, mode=0o777, exist_ok=True)
         logger.info(f"Initialized training data directory at: {self.data_dir}")
         
+        # Set auto reset flag from environment variable (default to True)
+        self.auto_reset_on_startup = os.getenv('AUTO_RESET_ON_STARTUP', 'true').lower() == 'true'
+        
+        # Initialize variables
         self.current_case = None
         self.current_anomaly = None
         self.metrics_buffer = []
@@ -90,6 +94,10 @@ class TrainingService:
         # Log existing data
         self._log_existing_data()
         
+        # Reset state on startup if configured
+        if self.auto_reset_on_startup:
+            self.reset_state_on_startup()
+            
         self._initialized = True
         
         # Start background cache maintenance
@@ -200,64 +208,56 @@ class TrainingService:
             # Clear collection state
             await self._clear_collection_state()
 
-    def stop_collection(self, save_post_data: bool = True):
-        """Stop any active data collection.
-        This method is non-async for backward compatibility with existing code.
-        It creates a task to call the appropriate async stop method.
-        """
-        if not self.current_case:
-            logger.warning("No active collection to stop")
-            return
-            
-        # Determine which stop method to call
-        if self.current_anomaly:
-            # Create task to stop anomaly collection
-            asyncio.create_task(self._stop_anomaly_collection(save_post_data))
-        else:
-            # Create task to stop normal collection
-            asyncio.create_task(self.stop_normal_collection())
-            
-        logger.info("Initiated stop collection process")
-    
     async def _stop_anomaly_collection(self, save_post_data: bool = True):
         """Stop collecting anomaly data"""
-        async with self._lock:
-            if not self.current_anomaly:
-                logger.warning("No active anomaly collection to stop")
-                return
+        try:
+            async with self._lock:
+                if not self.current_anomaly:
+                    logger.warning("No active anomaly collection to stop")
+                    return
+
+                logger.info("Starting anomaly collection cleanup")
+                # Move file operations to thread pool
+                await asyncio.to_thread(self._save_anomaly_data)
+                logger.info("Anomaly data saved successfully")
                 
-            # Save collected anomaly data
-            if self.metrics_buffer:
-                try:
-                    # Save the metrics data as an anomaly case
-                    case_dir = os.path.join(self.data_dir, self.current_case)
-                    os.makedirs(case_dir, exist_ok=True)
-                    
-                    metrics_file = os.path.join(case_dir, "metrics.json")
-                    with open(metrics_file, 'w') as f:
-                        json.dump(self.metrics_buffer, f)
-                    
-                    # Create and save the label file
-                    label_file = os.path.join(case_dir, "label.json") 
-                    with open(label_file, 'w') as f:
-                        json.dump({
-                            "type": self.current_anomaly["type"],
-                            "node": self.current_anomaly["node"],
-                            "start_time": self.collection_start_time,
-                            "end_time": datetime.now().isoformat()
-                        }, f)
-                    
-                    self.anomaly_samples += len(self.metrics_buffer)
-                    logger.info(f"Saved {len(self.metrics_buffer)} anomaly metrics to {metrics_file}")
-                    self.metrics_buffer = []
-                    
-                    # Invalidate stats cache
-                    self.invalidate_stats_cache()
-                except Exception as e:
-                    logger.error(f"Failed to save anomaly data: {str(e)}")
-            
-            # Clear collection state
+        except Exception as e:
+            logger.error(f"Critical error during anomaly stop: {str(e)}", exc_info=True)
+        finally:
+            # Ensure state cleanup even if errors occur
             await self._clear_collection_state()
+            logger.info("Anomaly collection fully stopped")
+
+    def _save_anomaly_data(self):
+        """Sync method for saving anomaly data (to be run in thread pool)"""
+        try:
+            if not self.metrics_buffer:
+                logger.info("No metrics to save")
+                return
+
+            case_dir = os.path.join(self.data_dir, self.current_case)
+            os.makedirs(case_dir, exist_ok=True)
+
+            metrics_file = os.path.join(case_dir, "metrics.json")
+            with open(metrics_file, 'w') as f:
+                json.dump(self.metrics_buffer, f)
+
+            label_file = os.path.join(case_dir, "label.json") 
+            with open(label_file, 'w') as f:
+                json.dump({
+                    "type": self.current_anomaly["type"],
+                    "node": self.current_anomaly["node"],
+                    "start_time": self.collection_start_time,
+                    "end_time": datetime.now().isoformat()
+                }, f)
+
+            self.anomaly_samples += len(self.metrics_buffer)
+            logger.info(f"Saved {len(self.metrics_buffer)} anomaly metrics to {metrics_file}")
+            self.metrics_buffer = []
+            self.invalidate_stats_cache()
+        except Exception as e:
+            logger.error(f"Failed to save anomaly data: {str(e)}")
+            raise
 
     async def _save_normal_data(self, data: List[Dict], prefix: str = ""):
         """Save normal state data to disk"""
@@ -767,6 +767,51 @@ class TrainingService:
             # Handle cancellation gracefully
             logger.debug("Cache maintenance task was cancelled")
             raise
+
+    def reset_state_on_startup(self):
+        """Reset the training service state on startup to ensure clean state after restarts."""
+        logger.info("Resetting training service state on startup")
+        self.current_case = None
+        self.current_anomaly = None
+        self.metrics_buffer = []
+        self.normal_state_buffer = []
+        self.is_collecting_normal = False
+        self.collection_start_time = None
+        logger.info("Training service state has been reset")
+
+    async def reset_state(self):
+        """Reset the training service state asynchronously."""
+        async with self._lock:
+            logger.info("Resetting training service state")
+            self.current_case = None
+            self.current_anomaly = None 
+            self.metrics_buffer = []
+            self.normal_state_buffer = []
+            self.is_collecting_normal = False
+            self.collection_start_time = None
+            logger.info("Training service state has been reset")
+            return {"status": "success", "message": "Training state reset successfully"}
+
+    def stop_collection(self, save_post_data: bool = True):
+        """Stop any active data collection."""
+        if not self.current_case:
+            logger.warning("No active collection to stop")
+            return
+
+        # Create and store task reference
+        stop_task = asyncio.create_task(self._stop_anomaly_collection(save_post_data)
+                                        if self.current_anomaly 
+                                        else self.stop_normal_collection())
+        
+        # Add proper error handling
+        def callback(fut):
+            try:
+                fut.result()
+            except Exception as e:
+                logger.error(f"Stop collection failed: {str(e)}")
+
+        stop_task.add_done_callback(callback)
+        logger.info("Initiated stop collection process")
 
 # Create singleton instance
 training_service = TrainingService() 

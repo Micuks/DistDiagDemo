@@ -58,8 +58,6 @@ class TrainingService {
             this.client.post('/api/training/collect', {
                 type: type,
                 node: node || null,
-                pre_collect: options.preCollect,
-                post_collect: options.postCollect
             })
         );
     }
@@ -87,6 +85,18 @@ class TrainingService {
     async getCollectionStatus() {
         return this._retryableRequest(() => 
             this.client.get('/api/training/collection-status')
+        );
+    }
+
+    async getAvailableModels() {
+        return this._retryableRequest(() =>
+            this.client.get('/api/models/list')
+        );
+    }
+
+    async getModelPerformance(modelName) {
+        return this._retryableRequest(() =>
+            this.client.get(`/api/models/${encodeURIComponent(modelName)}/performance`)
         );
     }
 

@@ -79,6 +79,16 @@ class MetricsService:
         
         # Collection method configuration
         self.collection_method = os.getenv('METRICS_COLLECTION_METHOD', MetricsCollectionMethod.SQL)
+        
+        # Whether to send metrics to training service
+        self.send_to_training = os.getenv('SEND_METRICS_TO_TRAINING', 'true').lower() == 'true'
+        
+        # Whether to check for workload state before sending to training
+        self.check_workload_active = os.getenv('CHECK_WORKLOAD_ACTIVE', 'true').lower() == 'true'
+        
+        # Workload activity flag - indicates whether a workload is currently running
+        self.workload_active = False
+        
         if self.collection_method == MetricsCollectionMethod.OBDIAG:
             warnings.warn(
                 "Using OBDIAG collection method which is deprecated. Consider switching to SQL method.",
@@ -117,7 +127,8 @@ class MetricsService:
                 'active memstore used',
                 'memstore limit',
                 'memory usage',
-                'observer memory hold size'
+                'observer memory hold size',
+                'memory usage',
             ],
             'io': [
                 'palf write io count to disk',
@@ -126,17 +137,27 @@ class MetricsService:
                 'io read count',
                 'io write count',
                 'io read delay',
-                'io write delay'
+                'io write delay',
+                'blockscaned data micro block count',
+                'accessed data micro block count',
+                'data micro block cache hit',
+                'index micro block cache hit',
+                'row cache miss',
+                'row cache hit',
             ],
             'network': [
+                'rpc packet in',
                 'rpc packet in bytes',
+                'rpc packet out',
                 'rpc packet out bytes',
+                'rpc deliver fail',
                 'rpc net delay',
                 'rpc net frame delay',
+                'mysql packet in',
                 'mysql packet in bytes',
+                'mysql packet out',
                 'mysql packet out bytes',
                 'mysql deliver fail',
-                'rpc deliver fail'
             ],
             'transactions': [
                 'trans commit count',
@@ -148,6 +169,24 @@ class MetricsService:
                 'trans rollback count',
                 'sql fail count',
                 'request queue time',
+                'trans user trans count',
+                'commit log replay count',
+                'sql update count',
+                'sql delete count',
+                'sql other count',
+                'ps prepare count',
+                'ps execute count',
+                'sql inner insert count',
+                'sql inner update count',
+                'memstore write lock succ count',
+                'memstore write lock fail count',
+                'DB time',
+                'local trans total used time',
+                'distributed trans total used time',
+                'sql select count',
+                'sql local count',
+                'sql remote count',
+                'sql distributed count',
             ]
         }
 
@@ -212,8 +251,16 @@ class MetricsService:
                 if self.collection_method == MetricsCollectionMethod.SQL:
                     metrics = self.event_loop.run_until_complete(self._collect_sql_metrics_only())
                     
-                    # If metrics were collected, send to training service using the appropriate event loop
-                    if metrics and training_loop:
+                    # Only send metrics to training if configured to do so and either:
+                    # 1. Not checking workload state, or
+                    # 2. Workload is active
+                    should_send_to_training = (
+                        self.send_to_training and 
+                        (not self.check_workload_active or self.workload_active)
+                    )
+                    
+                    # If metrics were collected and should be sent, send to training service
+                    if metrics and training_loop and should_send_to_training:
                         future = asyncio.run_coroutine_threadsafe(
                             training_service.add_metrics(metrics), 
                             training_loop
@@ -224,6 +271,8 @@ class MetricsService:
                             logger.info("Successfully sent metrics to training service")
                         except Exception as e:
                             logger.error(f"Failed to send metrics to training service: {e}")
+                    elif metrics and not should_send_to_training:
+                        logger.debug("Not sending metrics to training service due to configuration or workload state")
                     
                 elif self.collection_method == MetricsCollectionMethod.OBDIAG:
                     try:
@@ -260,7 +309,7 @@ class MetricsService:
                 # Use full node address including port
                 node_ip = node.split(':')[0]
                 # Connect using node address directly
-                logger.info(f"Connecting to node {node_ip}")
+                logger.debug(f"Connecting to node {node_ip}")
                 conn = pymysql.connect(
                     host=self.ob_config['host'],
                     user=self.ob_config['user'],
@@ -762,6 +811,20 @@ class MetricsService:
             }
             
         return self.metrics_history
+
+    def set_workload_active(self, active: bool):
+        """Set the workload active state to control metrics flow to training service."""
+        previous_state = self.workload_active
+        self.workload_active = active
+        logger.info(f"Workload active state changed from {previous_state} to {active}")
+        return {"status": "success", "previous_state": previous_state, "current_state": active}
+
+    def toggle_send_to_training(self, enabled: bool):
+        """Enable or disable sending metrics to training service."""
+        previous_state = self.send_to_training
+        self.send_to_training = enabled
+        logger.info(f"Send metrics to training changed from {previous_state} to {enabled}")
+        return {"status": "success", "previous_state": previous_state, "current_state": enabled}
 
 # Create a singleton instance
 metrics_service = MetricsService()

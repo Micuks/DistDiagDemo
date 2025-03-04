@@ -25,8 +25,6 @@ async def start_training_collection(request: AnomalyRequest):
         await training_service.start_collection(
             anomaly_type=request.type,
             node=request.node,
-            pre_collect=request.pre_collect,
-            post_collect=request.post_collect
         )
         return {
             "status": "success",
@@ -201,4 +199,49 @@ async def train_model():
         return {"status": "success", "message": "Model trained successfully"}
     except Exception as e:
         logger.error(f"Failed to train model: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/reset")
+async def reset_training_state():
+    """Reset the training service state to clear any active collection."""
+    try:
+        result = await training_service.reset_state()
+        return {
+            "status": "success",
+            "message": "Training state reset successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error resetting training state: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error resetting training state: {str(e)}")
+
+@router.post("/workload/active")
+async def set_workload_active(active: bool = True):
+    """Set the workload active state to control metrics flow to training service."""
+    try:
+        from app.services.metrics_service import metrics_service
+        result = metrics_service.set_workload_active(active)
+        return {
+            "status": "success",
+            "message": f"Workload active state set to {active}",
+            "previous_state": result["previous_state"],
+            "current_state": result["current_state"]
+        }
+    except Exception as e:
+        logger.error(f"Error setting workload active state: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error setting workload active state: {str(e)}")
+
+@router.post("/metrics/toggle")
+async def toggle_metrics_to_training(enabled: bool = True):
+    """Enable or disable sending metrics to training service."""
+    try:
+        from app.services.metrics_service import metrics_service
+        result = metrics_service.toggle_send_to_training(enabled)
+        return {
+            "status": "success",
+            "message": f"Sending metrics to training service set to {enabled}",
+            "previous_state": result["previous_state"],
+            "current_state": result["current_state"]
+        }
+    except Exception as e:
+        logger.error(f"Error toggling metrics to training: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error toggling metrics to training: {str(e)}") 

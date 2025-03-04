@@ -7,12 +7,12 @@ import {
   Typography,
   Select,
   Button,
-  Tabs,
   Alert,
   Spin,
   Row,
   Col,
   Divider,
+  Progress,
 } from "antd";
 import { anomalyService } from "../services/anomalyService";
 import {
@@ -27,7 +27,6 @@ import {
 } from "recharts";
 
 const { Text, Title } = Typography;
-const { TabPane } = Tabs;
 const { Option } = Select;
 
 const RanksPanel = () => {
@@ -37,7 +36,6 @@ const RanksPanel = () => {
   const [selectedModels, setSelectedModels] = useState([]);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonData, setComparisonData] = useState(null);
-  const [activeTab, setActiveTab] = useState("anomalyRanks");
   const [comparisonError, setComparisonError] = useState(null);
 
   const columns = [
@@ -74,7 +72,7 @@ const RanksPanel = () => {
           default:
             color = "default";
         }
-        return <Tag color={color}> {type.toUpperCase()} </Tag>;
+        return <Tag color={color}>{type.toUpperCase()}</Tag>;
       },
     },
     {
@@ -83,13 +81,13 @@ const RanksPanel = () => {
       key: "score",
       render: (score) => {
         const percent = Math.round(score * 100);
-        let color = "#52c41a"; // Green for high confidence
+        let color = "#52c41a";
         if (percent < 50) {
-          color = "#ff4d4f"; // Red for low confidence
+          color = "#ff4d4f";
         } else if (percent < 75) {
-          color = "#faad14"; // Yellow for medium confidence
+          color = "#faad14";
         }
-        return <Text style={{ color }}> {percent} % </Text>;
+        return <Text style={{ color }}>{percent}%</Text>;
       },
       sorter: (a, b) => a.score - b.score,
       defaultSortOrder: "descend",
@@ -112,7 +110,6 @@ const RanksPanel = () => {
     try {
       const models = await anomalyService.getAvailableModels();
       setAvailableModels(models);
-      // Select first two models by default if available
       if (models.length >= 2) {
         setSelectedModels([models[0].name, models[1].name]);
       } else if (models.length === 1) {
@@ -132,12 +129,8 @@ const RanksPanel = () => {
     try {
       setComparisonError(null);
       setComparisonLoading(true);
-      const comparisonResult = await anomalyService.compareModels(
-        selectedModels
-      );
+      const comparisonResult = await anomalyService.compareModels(selectedModels);
       setComparisonData(comparisonResult);
-      // Auto-switch to comparison tab
-      setActiveTab("modelComparison");
     } catch (error) {
       console.error("Error comparing models:", error);
       setComparisonError("Failed to compare models. Please try again.");
@@ -157,7 +150,6 @@ const RanksPanel = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Transform comparison data for chart visualization
   const prepareChartData = () => {
     if (!comparisonData) return [];
 
@@ -167,11 +159,8 @@ const RanksPanel = () => {
     metrics.forEach((metric) => {
       const dataPoint = { metric };
       selectedModels.forEach((model) => {
-        if (
-          comparisonData[model] &&
-          typeof comparisonData[model][metric] === "number"
-        ) {
-          dataPoint[model] = comparisonData[model][metric] * 100; // Convert to percentage
+        if (comparisonData[model] && typeof comparisonData[model][metric] === "number") {
+          dataPoint[model] = comparisonData[model][metric] * 100;
         }
       });
       chartData.push(dataPoint);
@@ -182,179 +171,119 @@ const RanksPanel = () => {
 
   return (
     <Card>
-      <Tabs activeKey={activeTab} onChange={setActiveTab}>
-        <TabPane tab="Anomaly Ranks" key="anomalyRanks">
-          <Table
-            columns={columns}
-            dataSource={anomalyRanks}
-            rowKey={(record) =>
-              `${record.node}-${record.timestamp}-${record.type}`
-            }
-            loading={loading}
-            pagination={{ pageSize: 10 }}
-          />{" "}
-        </TabPane>{" "}
-        <TabPane tab="Model Comparison" key="modelComparison">
-          <Space direction="vertical" style={{ width: "100%" }}>
-            <Card>
-              <Row gutter={16}>
-                <Col span={16}>
-                  <Space direction="vertical" style={{ width: "100%" }}>
-                    <Title level={5}> Select Models to Compare: </Title>{" "}
-                    <Select
-                      mode="multiple"
-                      style={{ width: "100%" }}
-                      placeholder="Select models to compare"
-                      value={selectedModels}
-                      onChange={handleModelSelectionChange}
-                      optionLabelProp="label"
-                    >
-                      {" "}
-                      {availableModels.map((model) => (
-                        <Option
-                          value={model.name}
-                          key={model.name}
-                          label={model.name}
-                        >
-                          <Space>
-                            <span> {model.name} </span>{" "}
-                          </Space>{" "}
-                        </Option>
-                      ))}{" "}
-                    </Select>{" "}
-                  </Space>{" "}
-                </Col>{" "}
-                <Col
-                  span={8}
-                  style={{ display: "flex", alignItems: "flex-end" }}
+      <Row gutter={[24, 24]}>
+        {/* Anomaly Ranks Column */}
+        <Col xs={24} md={12}>
+          <Card title="Anomaly Ranking" bordered={false}>
+            <Table
+              columns={columns}
+              dataSource={anomalyRanks}
+              rowKey={(record) => `${record.node}-${record.timestamp}-${record.type}`}
+              loading={loading}
+              pagination={{ pageSize: 5 }}
+              scroll={{ y: 400 }}
+            />
+          </Card>
+        </Col>
+
+        {/* Model Comparison Column */}
+        <Col xs={24} md={12}>
+          <Card 
+            title="Model Performance Comparison" 
+            bordered={false}
+            extra={
+              <Space>
+                <Select
+                  mode="multiple"
+                  style={{ width: 200 }}
+                  placeholder="Select models"
+                  value={selectedModels}
+                  onChange={handleModelSelectionChange}
+                  optionLabelProp="label"
                 >
-                  <Button
-                    type="primary"
-                    onClick={handleCompareModels}
-                    loading={comparisonLoading}
-                    disabled={selectedModels.length < 1}
-                  >
-                    Compare Models{" "}
-                  </Button>{" "}
-                </Col>{" "}
-              </Row>
-              {comparisonError && (
-                <Alert
-                  message="Error"
-                  description={comparisonError}
-                  type="error"
-                  showIcon
-                  style={{ marginTop: 16 }}
-                />
-              )}{" "}
-            </Card>
-            {comparisonLoading ? (
-              <div style={{ textAlign: "center", padding: "40px 0" }}>
-                <Spin size="large" />
-                <div style={{ marginTop: 16 }}>
-                  {" "}
-                  Comparing model performance...{" "}
-                </div>{" "}
-              </div>
-            ) : comparisonData ? (
-              <Card title="RCA Performance Comparison">
-                <div style={{ height: 400 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart
-                      data={prepareChartData()}
-                      margin={{ top: 20, right: 30, left: 20, bottom: 5 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="metric" />
-                      <YAxis
-                        label={{
-                          value: "Score (%)",
-                          angle: -90,
-                          position: "insideLeft",
-                        }}
-                        domain={[0, 100]}
-                      />{" "}
-                      <Tooltip formatter={(value) => `${value.toFixed(2)}%`} />{" "}
-                      <Legend />{" "}
-                      {selectedModels.map((model, index) => (
-                        <Bar
-                          key={model}
-                          dataKey={model}
-                          name={model}
-                          fill={
-                            [
-                              "#1890ff",
-                              "#52c41a",
-                              "#fa8c16",
-                              "#f5222d",
-                              "#722ed1",
-                            ][index % 5]
-                          }
-                        />
-                      ))}{" "}
-                    </BarChart>{" "}
-                  </ResponsiveContainer>{" "}
-                </div>{" "}
-                <Divider />
-                <Row gutter={16}>
-                  {" "}
-                  {selectedModels.map(
-                    (model) =>
-                      comparisonData[model] && (
-                        <Col
-                          span={Math.floor(24 / selectedModels.length)}
-                          key={model}
-                        >
-                          <Card title={model} size="small">
-                            <p>
-                              {" "}
-                              <strong> Precision: </strong>{" "}
-                              {(comparisonData[model].precision * 100).toFixed(
-                                2
-                              )}
-                              %
-                            </p>
-                            <p>
-                              {" "}
-                              <strong> Recall: </strong>{" "}
-                              {(comparisonData[model].recall * 100).toFixed(2)}%
-                            </p>
-                            <p>
-                              {" "}
-                              <strong> F1 Score: </strong>{" "}
-                              {(comparisonData[model].f1_score * 100).toFixed(
-                                2
-                              )}
-                              %
-                            </p>
-                            <p>
-                              {" "}
-                              <strong> Accuracy: </strong>{" "}
-                              {(comparisonData[model].accuracy * 100).toFixed(
-                                2
-                              )}
-                              %
-                            </p>
-                          </Card>{" "}
-                        </Col>
-                      )
-                  )}{" "}
-                </Row>{" "}
-              </Card>
+                  {availableModels.map((model) => (
+                    <Option value={model.name} key={model.name} label={model.name}>
+                      {model.name}
+                    </Option>
+                  ))}
+                </Select>
+                <Button
+                  type="primary"
+                  onClick={handleCompareModels}
+                  loading={comparisonLoading}
+                  disabled={selectedModels.length < 1}
+                >
+                  Compare
+                </Button>
+              </Space>
+            }
+          >
+            {comparisonError && (
+              <Alert
+                message="Error"
+                description={comparisonError}
+                type="error"
+                showIcon
+                style={{ marginBottom: 16 }}
+              />
+            )}
+
+            {comparisonData ? (
+              <>
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart data={prepareChartData()}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="metric" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    {selectedModels.map((model, index) => (
+                      <Bar
+                        key={model}
+                        dataKey={model}
+                        fill={`hsl(${(index * 360) / selectedModels.length}, 70%, 50%)`}
+                      />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+
+                <Divider>Detailed Metrics</Divider>
+                <Row gutter={[16, 16]}>
+                  {selectedModels.map((model) => (
+                    <Col span={24} key={model}>
+                      <Card size="small" title={model}>
+                        <Space direction="vertical" style={{ width: '100%' }}>
+                          <Progress
+                            percent={Math.round(comparisonData[model].precision * 100)}
+                            status="active"
+                            format={(percent) => `Precision: ${percent}%`}
+                          />
+                          <Progress
+                            percent={Math.round(comparisonData[model].recall * 100)}
+                            status="active"
+                            format={(percent) => `Recall: ${percent}%`}
+                          />
+                          <Progress
+                            percent={Math.round(comparisonData[model].f1_score * 100)}
+                            status="active"
+                            format={(percent) => `F1 Score: ${percent}%`}
+                          />
+                          <Text>Detection Time: {comparisonData[model].detection_time}s</Text>
+                          <Text>RCA Time: {comparisonData[model].rca_time}s</Text>
+                        </Space>
+                      </Card>
+                    </Col>
+                  ))}
+                </Row>
+              </>
             ) : (
-              <Card>
-                <div style={{ textAlign: "center", padding: "20px" }}>
-                  <Text type="secondary">
-                    {" "}
-                    Select models and click "Compare Models" to see performance
-                    metrics{" "}
-                  </Text>{" "}
-                </div>{" "}
-              </Card>
-            )}{" "}
-          </Space>{" "}
-        </TabPane>{" "}
-      </Tabs>{" "}
+              <div style={{ textAlign: 'center', padding: 40 }}>
+                <Text type="secondary">Select models and click compare to view performance</Text>
+              </div>
+            )}
+          </Card>
+        </Col>
+      </Row>
     </Card>
   );
 };
