@@ -10,6 +10,7 @@ from functools import lru_cache, wraps
 from async_lru import alru_cache
 import json
 import pymysql
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +50,29 @@ class K8sService:
         self._last_request_time = 0  # This will force a refresh on next request
         self.experiment_types = ["cpu_stress", "io_bottleneck", "network_bottleneck", "cache_bottleneck", "too_many_indexes"]
         
+        # Force immediate refresh of active anomalies on startup
+        self._last_cache_update = 0
+        # Create event loop for initialization if none exists
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Use synchronous methods to avoid async in __init__
+            # We'll schedule the initial cache refresh to happen soon after startup
+            threading.Thread(target=self._initialize_active_anomalies).start()
+        except Exception as e:
+            logger.error(f"Error setting up anomaly state initialization: {e}")
+        
         # OceanBase connection configuration
+        self.ob_zones = ['zone1','zone2','zone3']
         self.ob_config = {
             'host': os.getenv('OB_HOST', '127.0.0.1'),
             'port': int(os.getenv('OB_PORT', '2881')),
             'user': os.getenv('OB_USER', 'root@sys'),
             'password': os.getenv('OB_PASSWORD', 'password'),
             'database': os.getenv('OB_DATABASE', 'oceanbase'),
-            'zones': ['zone1','zone2','zone3']
         }
 
     def _should_update_cache(self) -> bool:
@@ -146,26 +162,99 @@ class K8sService:
             
             # Special handling for too_many_indexes
             elif anomaly_type == "too_many_indexes":
-                # Drop created indexes
-                if "sql_commands" in self.active_anomalies:
-                    drop_commands = []
-                    for cmd in self.active_anomalies["sql_commands"]:
-                        if cmd.startswith("create index"):
-                            # Extract index name and table
-                            parts = cmd.split()
-                            index_name = parts[2]
-                            table_name = parts[4].split('(')[0]
-                            drop_commands.append(f"drop index {index_name} on {table_name}")
-                    
-                    if drop_commands:
-                        await self._execute_sql_commands(drop_commands)
-                    self.active_anomalies.pop("sql_commands", None)
+                # Create drop index commands for both tpcc and sbtest databases
+                tpcc_drop_commands = [
+                    "USE tpcc",
+                    # Drop customer table indexes
+                    "DROP INDEX IF EXISTS idx_customer_1 ON customer",
+                    "DROP INDEX IF EXISTS idx_customer_2 ON customer",
+                    "DROP INDEX IF EXISTS idx_customer_3 ON customer",
+                    "DROP INDEX IF EXISTS idx_customer_4 ON customer",
+                    "DROP INDEX IF EXISTS idx_customer_5 ON customer",
+                    # Drop district table indexes
+                    "DROP INDEX IF EXISTS idx_district_1 ON district",
+                    "DROP INDEX IF EXISTS idx_district_2 ON district",
+                    "DROP INDEX IF EXISTS idx_district_3 ON district",
+                    # Drop history table indexes
+                    "DROP INDEX IF EXISTS idx_history_1 ON history",
+                    "DROP INDEX IF EXISTS idx_history_2 ON history",
+                    "DROP INDEX IF EXISTS idx_history_3 ON history",
+                    # Drop item table indexes
+                    "DROP INDEX IF EXISTS idx_item_1 ON item",
+                    "DROP INDEX IF EXISTS idx_item_2 ON item",
+                    "DROP INDEX IF EXISTS idx_item_3 ON item",
+                    # Drop new_orders table indexes
+                    "DROP INDEX IF EXISTS idx_new_orders_1 ON new_orders",
+                    "DROP INDEX IF EXISTS idx_new_orders_2 ON new_orders",
+                    # Drop order_line table indexes
+                    "DROP INDEX IF EXISTS idx_order_line_1 ON order_line",
+                    "DROP INDEX IF EXISTS idx_order_line_2 ON order_line",
+                    "DROP INDEX IF EXISTS idx_order_line_3 ON order_line",
+                    "DROP INDEX IF EXISTS idx_order_line_4 ON order_line",
+                    # Drop orders table indexes
+                    "DROP INDEX IF EXISTS idx_orders_1 ON orders",
+                    "DROP INDEX IF EXISTS idx_orders_2 ON orders",
+                    "DROP INDEX IF EXISTS idx_orders_3 ON orders",
+                    "DROP INDEX IF EXISTS idx_orders_4 ON orders",
+                    # Drop stock table indexes
+                    "DROP INDEX IF EXISTS idx_stock_1 ON stock",
+                    "DROP INDEX IF EXISTS idx_stock_2 ON stock",
+                    "DROP INDEX IF EXISTS idx_stock_3 ON stock",
+                    # Drop warehouse table indexes
+                    "DROP INDEX IF EXISTS idx_warehouse_1 ON warehouse",
+                    "DROP INDEX IF EXISTS idx_warehouse_2 ON warehouse"
+                ]
                 
+                sbtest_drop_commands = [
+                    "USE sbtest",
+                    # Drop all sbtest table indexes
+                ]
+                
+                # Generate drop commands for all sbtest tables (1-10)
+                for i in range(1, 11):
+                    sbtest_drop_commands.extend([
+                        f"DROP INDEX IF EXISTS idx_sbtest{i}_1 ON sbtest{i}",
+                        f"DROP INDEX IF EXISTS idx_sbtest{i}_2 ON sbtest{i}",
+                        f"DROP INDEX IF EXISTS idx_sbtest{i}_3 ON sbtest{i}"
+                    ])
+                
+                # Combine all drop commands
+                drop_commands = tpcc_drop_commands + sbtest_drop_commands
+                
+                try:
+                    # Execute all drop commands
+                    await self._execute_sql_commands(drop_commands)
+                    logger.info("Successfully dropped all indexes created for too_many_indexes anomaly")
+                except Exception as e:
+                    logger.error(f"Error dropping indexes: {str(e)}")
+                
+                # Clean up tracking
+                self.active_anomalies.pop("sql_commands", None)
+                
+                # Find and remove all too_many_indexes experiments from active_anomalies
+                type_prefix = f"ob-too-many-indexes"
+                experiment_names = []
+                
+                # If a specific experiment is provided, just delete that one
                 if experiment_name:
                     if experiment_name in self.active_anomalies:
                         del self.active_anomalies[experiment_name]
-                    return [experiment_name]
-                return []
+                        experiment_names = [experiment_name]
+                else:
+                    # Find all too_many_indexes experiments
+                    for name in list(self.active_anomalies.keys()):
+                        if name.startswith(type_prefix) or (
+                            isinstance(self.active_anomalies[name], dict) and 
+                            self.active_anomalies[name].get("type") == "too_many_indexes"
+                        ):
+                            del self.active_anomalies[name]
+                            experiment_names.append(name)
+                
+                # Invalidate cache
+                self.invalidate_cache()
+                self._last_cache_update = 0
+                
+                return experiment_names
 
             # For other types, proceed with chaos mesh experiment deletion
             plural = self._get_experiment_plural(anomaly_type)
@@ -439,7 +528,7 @@ class K8sService:
                     "duration": "300s"
                 }
             },
-            "io_stress": {  # Renamed from disk_stress for clarity
+            "io_bottleneck": {  # Renamed from disk_stress for clarity
                 "kind": "IOChaos",
                 "spec": {
                     "action": "latency",
@@ -450,7 +539,7 @@ class K8sService:
                     "duration": "300s"
                 }
             },
-            "network_delay": {
+            "network_bottleneck": {
                 "kind": "NetworkChaos",
                 "spec": {
                     "action": "delay",
@@ -469,7 +558,7 @@ class K8sService:
                     "direction": "both"  # Affect both inbound and outbound traffic
                 }
             },
-            "cache_stress": {  # New type for cache bottleneck
+            "cache_bottleneck": {  # New type for cache bottleneck
                 "kind": "StressChaos",
                 "spec": {
                     "stressors": {
@@ -486,9 +575,92 @@ class K8sService:
         # Special handling for too_many_indexes
         if anomaly_type == "too_many_indexes":
             # This will be handled differently as it requires SQL execution
+            # Create indexes on both tpcc and sbtest databases
+            tpcc_sql_commands = [
+                "USE tpcc",
+                # Create multiple indexes on customer table
+                "CREATE INDEX idx_customer_1 ON customer(c_w_id)",
+                "CREATE INDEX idx_customer_2 ON customer(c_d_id)",
+                "CREATE INDEX idx_customer_3 ON customer(c_last)",
+                "CREATE INDEX idx_customer_4 ON customer(c_first)",
+                "CREATE INDEX idx_customer_5 ON customer(c_balance)",
+                # Create multiple indexes on district table
+                "CREATE INDEX idx_district_1 ON district(d_w_id)",
+                "CREATE INDEX idx_district_2 ON district(d_name)",
+                "CREATE INDEX idx_district_3 ON district(d_street_1)",
+                # Create multiple indexes on history table
+                "CREATE INDEX idx_history_1 ON history(h_c_id)",
+                "CREATE INDEX idx_history_2 ON history(h_d_id)",
+                "CREATE INDEX idx_history_3 ON history(h_w_id)",
+                # Create multiple indexes on item table
+                "CREATE INDEX idx_item_1 ON item(i_name)",
+                "CREATE INDEX idx_item_2 ON item(i_price)",
+                "CREATE INDEX idx_item_3 ON item(i_data)",
+                # Create multiple indexes on new_orders table
+                "CREATE INDEX idx_new_orders_1 ON new_orders(no_w_id)",
+                "CREATE INDEX idx_new_orders_2 ON new_orders(no_d_id)",
+                # Create multiple indexes on order_line table
+                "CREATE INDEX idx_order_line_1 ON order_line(ol_w_id)",
+                "CREATE INDEX idx_order_line_2 ON order_line(ol_d_id)",
+                "CREATE INDEX idx_order_line_3 ON order_line(ol_i_id)",
+                "CREATE INDEX idx_order_line_4 ON order_line(ol_delivery_d)",
+                # Create multiple indexes on orders table
+                "CREATE INDEX idx_orders_1 ON orders(o_w_id)",
+                "CREATE INDEX idx_orders_2 ON orders(o_d_id)",
+                "CREATE INDEX idx_orders_3 ON orders(o_c_id)",
+                "CREATE INDEX idx_orders_4 ON orders(o_entry_d)",
+                # Create multiple indexes on stock table
+                "CREATE INDEX idx_stock_1 ON stock(s_w_id)",
+                "CREATE INDEX idx_stock_2 ON stock(s_i_id)",
+                "CREATE INDEX idx_stock_3 ON stock(s_quantity)",
+                # Create multiple indexes on warehouse table
+                "CREATE INDEX idx_warehouse_1 ON warehouse(w_name)",
+                "CREATE INDEX idx_warehouse_2 ON warehouse(w_street_1)"
+            ]
+            
+            sbtest_sql_commands = [
+                "USE sbtest",
+                # Create multiple indexes for each sbtest table
+                "CREATE INDEX idx_sbtest1_1 ON sbtest1(k)",
+                "CREATE INDEX idx_sbtest1_2 ON sbtest1(c)",
+                "CREATE INDEX idx_sbtest1_3 ON sbtest1(pad)",
+                "CREATE INDEX idx_sbtest2_1 ON sbtest2(k)",
+                "CREATE INDEX idx_sbtest2_2 ON sbtest2(c)",
+                "CREATE INDEX idx_sbtest2_3 ON sbtest2(pad)",
+                "CREATE INDEX idx_sbtest3_1 ON sbtest3(k)",
+                "CREATE INDEX idx_sbtest3_2 ON sbtest3(c)",
+                "CREATE INDEX idx_sbtest3_3 ON sbtest3(pad)",
+                "CREATE INDEX idx_sbtest4_1 ON sbtest4(k)",
+                "CREATE INDEX idx_sbtest4_2 ON sbtest4(c)",
+                "CREATE INDEX idx_sbtest4_3 ON sbtest4(pad)",
+                "CREATE INDEX idx_sbtest5_1 ON sbtest5(k)",
+                "CREATE INDEX idx_sbtest5_2 ON sbtest5(c)",
+                "CREATE INDEX idx_sbtest5_3 ON sbtest5(pad)",
+                "CREATE INDEX idx_sbtest6_1 ON sbtest6(k)",
+                "CREATE INDEX idx_sbtest6_2 ON sbtest6(c)",
+                "CREATE INDEX idx_sbtest6_3 ON sbtest6(pad)",
+                "CREATE INDEX idx_sbtest7_1 ON sbtest7(k)",
+                "CREATE INDEX idx_sbtest7_2 ON sbtest7(c)",
+                "CREATE INDEX idx_sbtest7_3 ON sbtest7(pad)",
+                "CREATE INDEX idx_sbtest8_1 ON sbtest8(k)",
+                "CREATE INDEX idx_sbtest8_2 ON sbtest8(c)",
+                "CREATE INDEX idx_sbtest8_3 ON sbtest8(pad)",
+                "CREATE INDEX idx_sbtest9_1 ON sbtest9(k)",
+                "CREATE INDEX idx_sbtest9_2 ON sbtest9(c)",
+                "CREATE INDEX idx_sbtest9_3 ON sbtest9(pad)",
+                "CREATE INDEX idx_sbtest10_1 ON sbtest10(k)",
+                "CREATE INDEX idx_sbtest10_2 ON sbtest10(c)",
+                "CREATE INDEX idx_sbtest10_3 ON sbtest10(pad)"
+            ]
+            
+            # Combine all SQL commands
+            sql_commands = tpcc_sql_commands + sbtest_sql_commands
+            
+            # Return a template that includes the SQL commands
+            # This is not an actual Chaos Mesh resource type but used for tracking
             return {
                 "apiVersion": "chaos-mesh.org/v1alpha1",
-                "kind": "SQLChaos",  # Custom type for SQL operations
+                "kind": "SQLChaos",  # Not a real Chaos Mesh type, just for internal tracking
                 "metadata": {
                     "name": experiment_name,
                     "namespace": self.namespace
@@ -500,13 +672,7 @@ class K8sService:
                         "labelSelectors": {"ref-obcluster": "obcluster"}
                     },
                     "action": "exec",
-                    "sqlCommands": [
-                        "create index toomany1 on bmsql_config(cfg_value) local",
-                        "create index toomany2 on bmsql_config(cfg_name) local",
-                        "create index toomany3 on bmsql_customer(c_w_id) local",
-                        "create index toomany4 on bmsql_customer(c_d_id) local",
-                        "create index toomany5 on bmsql_customer(c_id) local"
-                    ]
+                    "sqlCommands": sql_commands
                 }
             }
 
@@ -527,22 +693,22 @@ class K8sService:
         
         return template
 
-    @timed_lru_cache(seconds=60, maxsize=10)
     def _get_experiment_plural(self, anomaly_type: str) -> str:
-        """Get the plural form of the experiment type for the API with caching"""
+        """Get the plural form of the experiment type for the API"""
         # Normalize the anomaly type (kebab-case to snake_case)
         normalized_type = anomaly_type.replace('-', '_')
         
         if normalized_type == "cpu_stress":
             return "stresschaos"
-        elif normalized_type == "io_stress":
+        elif normalized_type == "io_bottleneck":
             return "iochaos"
-        elif normalized_type == "network_delay":
+        elif normalized_type == "network_bottleneck":
             return "networkchaos"
-        elif normalized_type == "cache_stress":
+        elif normalized_type == "cache_bottleneck":
             return "stresschaos"
         elif normalized_type == "too_many_indexes":
-            return "sqlchaos"  # Custom type for SQL operations
+            # Not actually used since we don't create a real Chaos Mesh resource for this
+            return "none"
         else:
             raise ValueError(f"Unsupported anomaly type: {anomaly_type}")
 
@@ -555,7 +721,7 @@ class K8sService:
                     # Convert parameter name to OceanBase format
                     ob_param = param.lower()
                     base_sql = f"ALTER SYSTEM SET {ob_param} = {value}"
-                    for zone in self.ob_config['zones']:
+                    for zone in self.ob_zones:
                         sql = base_sql + f" ZONE={zone}"
                         logger.info(f"Executing SQL: {sql}")
                         cursor.execute(sql)
@@ -573,9 +739,27 @@ class K8sService:
         try:
             conn = pymysql.connect(**self.ob_config)
             with conn.cursor() as cursor:
+                current_db = None
                 for cmd in commands:
+                    # Check if command is for changing database
+                    if cmd.lower().startswith("use "):
+                        current_db = cmd.split()[1].strip()
+                        logger.info(f"Switching to database: {current_db}")
+                    
                     logger.info(f"Executing SQL: {cmd}")
-                    cursor.execute(cmd)
+                    try:
+                        cursor.execute(cmd)
+                    except pymysql.err.OperationalError as e:
+                        # Handle errors but continue with other commands
+                        logger.warning(f"Error executing SQL command: {cmd}, error: {str(e)}")
+                        # If it's a duplicate index error, continue
+                        if "Duplicate key name" in str(e) or "already exists" in str(e):
+                            continue
+                        # For other errors, continue but log them
+                        continue
+                    except Exception as e:
+                        logger.warning(f"Unexpected error executing SQL command: {cmd}, error: {str(e)}")
+                        continue
             
             conn.commit()
             conn.close()
@@ -585,7 +769,7 @@ class K8sService:
                 self.active_anomalies["sql_commands"] = []
             self.active_anomalies["sql_commands"].extend(commands)
             
-            logger.info(f"Successfully executed {len(commands)} SQL commands")
+            logger.info(f"Successfully executed SQL commands")
             
         except Exception as e:
             logger.error(f"Failed to execute SQL commands: {str(e)}")
@@ -619,16 +803,22 @@ class K8sService:
             
             # Special handling for too_many_indexes
             elif anomaly_type == "too_many_indexes":
+                # Generate a unique experiment name for tracking
+                experiment_name = f"ob-too-many-indexes-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                
                 # Read SQL commands from template
-                experiment = self._get_experiment_template(anomaly_type)
-                sql_commands = experiment["spec"].get("sqlCommands", [])
+                template = self._get_experiment_template(anomaly_type)
+                sql_commands = template["spec"].get("sqlCommands", [])
+                
+                # Execute SQL commands directly
                 await self._execute_sql_commands(sql_commands)
-                # Create a tracking experiment
+                
+                # Create a tracking record but don't create an actual Chaos Mesh resource
                 experiment = {
                     "apiVersion": "chaos-mesh.org/v1alpha1",
-                    "kind": "SQLChaos",
+                    "kind": "SQLChaos",  # This is just for our internal tracking
                     "metadata": {
-                        "name": f"ob-too-many-indexes-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        "name": experiment_name,
                         "namespace": self.namespace
                     },
                     "spec": {
@@ -639,6 +829,26 @@ class K8sService:
                         }
                     }
                 }
+                
+                # Track the experiment
+                experiment_name = experiment["metadata"]["name"]
+                target = experiment["spec"]["selector"]["labelSelectors"].get("ref-obcluster", "obcluster")
+                self.active_anomalies[experiment_name] = {
+                    "start_time": datetime.now().isoformat(),
+                    "status": "active",
+                    "type": anomaly_type,
+                    "name": experiment_name,
+                    "target": target,
+                    "node": target
+                }
+                
+                logger.info(f"Created {anomaly_type} experiment {experiment_name}")
+                
+                # Invalidate cache
+                self.invalidate_cache()
+                self._last_cache_update = 0
+                
+                return
             else:
                 experiment = self._get_experiment_template(anomaly_type)
 
@@ -694,9 +904,66 @@ class K8sService:
         """Invalidate all caches"""
         self._experiment_cache = {}
         self._last_cache_update = None
-        # Only clear the timed_lru_cache as it supports cache_clear
-        self._get_experiment_plural.cache_clear()
         
         # For alru_cache decorated methods, we'll force cache invalidation
         # by updating the last request time
         self._last_request_time = 0  # This will force a refresh on next request
+
+    def _initialize_active_anomalies(self):
+        """Initialize active anomalies from Kubernetes"""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Use synchronous methods to avoid async in _initialize_active_anomalies
+            # We'll schedule the initial cache refresh to happen soon after startup
+            threading.Thread(target=self._initialize_active_anomalies_sync).start()
+        except Exception as e:
+            logger.error(f"Error setting up anomaly state initialization: {e}")
+
+    def _initialize_active_anomalies_sync(self):
+        """Synchronously initialize active anomalies"""
+        try:
+            # Wait a bit for the service to fully initialize
+            time.sleep(2)
+            
+            # Create new active_anomalies dictionary
+            new_active_anomalies = {}
+            
+            # Check each experiment type
+            for exp_type in self.experiment_types:
+                plural = self._get_experiment_plural(exp_type)
+                try:
+                    experiments = self.custom_api.list_namespaced_custom_object(
+                        group="chaos-mesh.org",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=plural
+                    )
+                    
+                    if "items" in experiments:
+                        for exp in experiments["items"]:
+                            name = exp['metadata']['name']
+                            start_time = exp['metadata'].get('creationTimestamp', datetime.now().isoformat())
+                            target = exp['spec']['selector']['labelSelectors'].get('ref-obcluster', 'unknown')
+                            new_active_anomalies[name] = {
+                                "name": name,
+                                "type": exp_type,
+                                "start_time": start_time,
+                                "status": "active",
+                                "target": target,
+                                "node": target
+                            }
+                            
+                except Exception as e:
+                    logger.error(f"Error listing {exp_type} experiments during initialization: {str(e)}")
+                    continue
+            
+            # Update local active_anomalies
+            self.active_anomalies = new_active_anomalies
+            
+            logger.info(f"Initialized active anomalies on startup: {list(self.active_anomalies.keys())}")
+        except Exception as e:
+            logger.error(f"Error initializing active anomalies: {str(e)}")

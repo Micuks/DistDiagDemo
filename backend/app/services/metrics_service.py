@@ -254,13 +254,29 @@ class MetricsService:
                     # Only send metrics to training if configured to do so and either:
                     # 1. Not checking workload state, or
                     # 2. Workload is active
+                    # 3. OR training service indicates it's collecting data
+                    
+                    # Check if training service is actively collecting
+                    is_training_collecting = (
+                        hasattr(training_service, 'current_case') and 
+                        training_service.current_case is not None
+                    )
+                    
                     should_send_to_training = (
                         self.send_to_training and 
-                        (not self.check_workload_active or self.workload_active)
+                        (
+                            not self.check_workload_active or 
+                            self.workload_active or
+                            is_training_collecting  # Always send if training service is collecting
+                        )
                     )
+                    
+                    # Log the decision factors
+                    logger.debug(f"Metrics collection: send_to_training={self.send_to_training}, check_workload_active={self.check_workload_active}, workload_active={self.workload_active}, is_training_collecting={is_training_collecting}")
                     
                     # If metrics were collected and should be sent, send to training service
                     if metrics and training_loop and should_send_to_training:
+                        logger.info(f"Sending metrics to training service: {len(metrics)} nodes of data")
                         future = asyncio.run_coroutine_threadsafe(
                             training_service.add_metrics(metrics), 
                             training_loop
@@ -268,11 +284,13 @@ class MetricsService:
                         # Wait for the future to complete
                         try:
                             future.result(timeout=10)  # 10 second timeout
-                            logger.debug("Successfully sent metrics to training service")
+                            logger.info(f"Successfully sent metrics to training service: {len(metrics)} nodes")
                         except Exception as e:
                             logger.error(f"Failed to send metrics to training service: {e}")
                     elif metrics and not should_send_to_training:
-                        logger.info("Not sending metrics to training service due to configuration or workload state")
+                        logger.info(f"Not sending metrics to training service due to configuration or workload state: send_to_training={self.send_to_training}, check_workload_active={self.check_workload_active}, workload_active={self.workload_active}")
+                    elif not metrics:
+                        logger.debug("No metrics collected to send to training service")
                     
                 elif self.collection_method == MetricsCollectionMethod.OBDIAG:
                     try:
@@ -382,7 +400,7 @@ class MetricsService:
         if not current_metrics:
             logger.warning("No metrics were collected from any nodes")
         else:
-            logger.info(f"Successfully collected metrics from nodes: {list(current_metrics.keys())}")
+            logger.debug(f"Successfully collected metrics from nodes: {list(current_metrics.keys())}")
         
         self.metrics = current_metrics
         self.timestamp = timestamp
@@ -774,7 +792,21 @@ class MetricsService:
                         z_score = 0.0
                         pct_change = 0.0
                     else:
-                        z_score = (current_value - mean) / std_dev
+                        # Calculate relative standard deviation as a percentage of the mean
+                        rel_std_dev = std_dev / abs(mean) if abs(mean) > 1e-9 else 0
+                        
+                        # If the standard deviation is extremely small relative to the mean,
+                        # this indicates values changing at an extremely consistent rate
+                        if rel_std_dev < 1e-4:  # Less than 0.01% variation
+                            # For large monotonically increasing counters, reduce z-score significance
+                            is_monotonic = all(history[i]['value'] <= history[i+1]['value'] for i in range(len(history)-2, len(history)-min(5, len(history)-1), -1))
+                            if is_monotonic and mean > 1e6:  # Large counter values
+                                z_score = min((current_value - mean) / std_dev, 1.0)  # Cap z-score at 1.0
+                            else:
+                                z_score = (current_value - mean) / std_dev
+                        else:
+                            z_score = (current_value - mean) / std_dev
+                            
                         # Use relative threshold for mean comparison
                         pct_change = (current_value - mean) / mean if abs(mean) > 1e-9 else 0.0
                     
@@ -784,7 +816,12 @@ class MetricsService:
                         **current_entry,
                         'z_score': round(z_score, 2),
                         'pct_change': round(pct_change, 4),
-                        'has_fluctuation': abs(z_score) >= FLUCTUATION_Z_SCORE and abs(pct_change) > 1e-4
+                        'has_fluctuation': abs(z_score) >= FLUCTUATION_Z_SCORE and (
+                            # Either significant percentage change
+                            abs(pct_change) > 0.001 or  
+                            # Or significant absolute change
+                            (abs(current_value - mean) > max(1.0, mean * 0.01))
+                        )
                     }
                     
                     processed_metrics[node_ip][category][metric_name] = processed_history

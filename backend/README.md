@@ -9,6 +9,9 @@ This is the backend service for the DistDiagDemo project, providing APIs for ano
 - Anomaly detection and diagnosis
 - Workload generation and management using sysbench
 - Prometheus integration for metrics storage
+- Advanced fluctuation detection with statistical analysis
+- Delta-based processing for cumulative counter metrics
+- Numerically stable statistical calculations
 
 ## Backend Architecture
 
@@ -63,7 +66,7 @@ backend/
 
 2. **Service Layer** (`app/services/`)
    - `workload_service.py`: Manages database workloads (Sysbench, TPC-C, TPC-H)
-   - `metrics_service.py`: Collects and processes system metrics
+   - `metrics_service.py`: Collects and processes system metrics with fluctuation detection
    - `diagnosis_service.py`: Performs root cause analysis
    - `k8s_service.py`: Handles Kubernetes operations
    - `anomaly_service.py`: Controls anomaly injection
@@ -249,3 +252,42 @@ pytest
 ```
 
 ## License
+
+## Recent Enhancements
+
+### Improved Metrics Processing
+
+1. **Advanced Fluctuation Detection**
+   - Sophisticated statistical analysis for identifying metric fluctuations
+   - Z-score calculation with numerical stability improvements
+   - Percentage change computation relative to historical means
+   - Combined thresholds using both z-score and percentage change
+   - Minimum history requirements to ensure statistical significance
+
+2. **Metric Type-Specific Processing**
+   - Delta calculation for cumulative counters (delay metrics)
+   - Proper handling of counter resets
+   - Improved handling of metrics with different units
+
+3. **Numerical Stability Improvements**
+   - Handling near-zero standard deviation cases
+   - Protection against division by zero
+   - More accurate variance calculation
+   - Error handling with appropriate fallbacks
+
+### Technical Fixes
+
+1. **Delay Metric Processing**
+   - Correct handling of cumulative counters
+   - Conversion from raw counter values to delta-per-interval
+   - Proper handling of microsecond-based metrics
+   
+2. **Statistical Calculation Enhancements**
+   - Improved mean and standard deviation calculations
+   - Better handling of edge cases with near-zero variance
+   - More robust z-score thresholds with relative change validation
+
+3. **Code Optimization**
+   - Removal of redundant functions
+   - Enhanced error logging
+   - More robust type checking

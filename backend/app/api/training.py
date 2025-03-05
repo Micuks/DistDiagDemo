@@ -3,7 +3,7 @@ from typing import List, Dict, Optional
 from pydantic import BaseModel
 import logging
 from app.services.training_service import training_service
-
+from app.services.metrics_service import metrics_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -22,6 +22,7 @@ class TrainingStopRequest(BaseModel):
 async def start_training_collection(request: AnomalyRequest):
     """Start collecting training data for a specific anomaly type"""
     try:
+        metrics_service.toggle_send_to_training(True);
         await training_service.start_collection(
             anomaly_type=request.type,
             node=request.node,
@@ -40,6 +41,7 @@ async def start_training_collection(request: AnomalyRequest):
 async def stop_training_collection(request: TrainingStopRequest):
     """Stop collecting training data for an anomaly type"""
     try:
+        metrics_service.toggle_send_to_training(False);
         if hasattr(training_service, "stop_anomaly_collection"):
             training_service.stop_anomaly_collection(save_post_data=request.save_post_data)
         else:
@@ -218,7 +220,6 @@ async def reset_training_state():
 async def set_workload_active(active: bool = True):
     """Set the workload active state to control metrics flow to training service."""
     try:
-        from app.services.metrics_service import metrics_service
         result = metrics_service.set_workload_active(active)
         return {
             "status": "success",
@@ -229,19 +230,3 @@ async def set_workload_active(active: bool = True):
     except Exception as e:
         logger.error(f"Error setting workload active state: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error setting workload active state: {str(e)}")
-
-@router.post("/metrics/toggle")
-async def toggle_metrics_to_training(enabled: bool = True):
-    """Enable or disable sending metrics to training service."""
-    try:
-        from app.services.metrics_service import metrics_service
-        result = metrics_service.toggle_send_to_training(enabled)
-        return {
-            "status": "success",
-            "message": f"Sending metrics to training service set to {enabled}",
-            "previous_state": result["previous_state"],
-            "current_state": result["current_state"]
-        }
-    except Exception as e:
-        logger.error(f"Error toggling metrics to training: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error toggling metrics to training: {str(e)}") 

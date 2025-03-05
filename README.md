@@ -9,6 +9,9 @@ DistDiagDemo is a comprehensive diagnostic and workload management system for di
 ## Features
 
 - Real-time metrics monitoring and visualization
+  - Statistical fluctuation detection with visual indicators
+  - Intelligent formatting of metric values with appropriate units
+  - Smart display of technical metrics with tooltips
 - Anomaly injection for testing and validation
 - Workload management and performance optimization
   - Multiple workload types support:
@@ -20,6 +23,8 @@ DistDiagDemo is a comprehensive diagnostic and workload management system for di
   - Automated database preparation
 - Automated anomaly detection and diagnosis using DistDiagnosis
 - Support for both `obdiag` and `psutil` metrics collection
+- Advanced statistical analysis for detecting metric fluctuations
+- Delta-based processing for cumulative metrics (delay metrics)
 
 ## Environment Setup
 
@@ -215,3 +220,81 @@ MIT License - see the [LICENSE](LICENSE) file for details
 - [TPC-C MySQL](https://github.com/Percona-Lab/tpcc-mysql) - TPC-C implementation
 - [FastAPI](https://fastapi.tiangolo.com/) - Backend framework
 - [React](https://reactjs.org/) - Frontend framework
+
+## Recent Enhancements
+
+### Enhanced Metrics Visualization
+
+- **Fluctuation Detection and Display**
+  - Visual indicators for metrics showing significant statistical fluctuations
+  - Z-score and percentage change badges showing magnitude and direction of changes
+  - Yellow highlighting for metrics exceeding statistically significant thresholds
+
+- **Improved Value Formatting**
+  - Thousands separators for all numeric values (e.g., 1,234,567)
+  - Dynamic unit selection based on magnitude (KB → MB → GB)
+  - Type-specific formatting for time, memory, and network metrics
+  - Tooltips showing complete names for long metrics
+
+- **UI Improvements**
+  - Proper capitalization of technical terms (CPU, IO, MySQL, etc.)
+  - Two-line display for long metric names with ellipsis
+  - Responsive metric cards with consistent sizing
+
+### Backend Improvements
+
+- **Statistical Analysis Enhancements**
+  - More accurate fluctuation detection using combined z-score and percentage change
+  - Minimum history requirements to ensure statistical validity
+  - Improved numerical stability for edge cases (near-zero variance)
+
+- **Metric Processing Upgrades**
+  - Delta calculation for cumulative counter metrics (CPU, IO, network)
+  - Proper handling of microsecond-based delay metrics
+  - Enhanced error handling and logging
+
+- **Code Optimization**
+  - Streamlined codebase with removal of redundant functions
+  - More robust type checking and error prevention
+  - Performance improvements for large metric datasets
+
+## Supported Anomaly Types
+
+DistDiagDemo supports multiple types of anomalies that can be injected into the system for testing, training, and demonstration purposes. These anomalies are designed to simulate common issues encountered in distributed database environments.
+
+### Resource Contention Anomalies
+
+- **CPU Stress**
+  - Simulates high CPU utilization scenarios
+  - Uses StressChaos to generate CPU load with 32 worker threads at 100% load
+  - Duration: 300 seconds
+
+- **I/O Bottleneck**
+  - Simulates disk I/O pressure on database nodes
+  - Uses IOChaos to add 1000ms latency to all read/write operations
+  - Targets OceanBase data storage path
+
+- **Network Bottleneck**
+  - Simulates network latency issues between database nodes
+  - Uses NetworkChaos to inject 2000ms latency on all connections
+  - Affects both inbound and outbound traffic
+
+- **Cache Bottleneck**
+  - Simulates memory pressure affecting database cache performance
+  - Uses StressChaos to allocate 2GB of memory across 8 worker threads
+  - Additionally adjusts OceanBase memstore_limit_percentage parameter to 20%
+
+### Database-Specific Anomalies
+
+- **Too Many Indexes**
+  - Simulates performance degradation caused by excessive index creation
+  - Creates multiple redundant indexes on both tpcc and sbtest databases
+  - Implemented using direct SQL command execution rather than Chaos Mesh
+  - Supports two database workloads:
+    - TPC-C: Creates 34 indexes across 9 tables including customer, district, history, item, new_orders, order_line, orders, stock, and warehouse
+    - Sysbench: Creates 30 indexes across 10 sbtest tables (sbtest1-sbtest10)
+  - Proper cleanup mechanism to drop all created indexes when the anomaly is removed
+
+Each anomaly can be injected through the Anomaly Control Panel in the web interface or via the API. For advanced scenarios, multiple anomalies can be combined to simulate complex failure patterns.
+
+The anomaly system is designed to be extensible, allowing new anomaly types to be added with minimal code changes. All anomalies include proper tracking and cleanup mechanisms to ensure the system returns to a normal state after testing.

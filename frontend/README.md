@@ -9,6 +9,11 @@ A modern React-based frontend for the DistDiagDemo project, providing an intuiti
 - Anomaly detection and monitoring
 - Dynamic charts and graphs using Recharts
 - Material-UI based responsive design
+- Fluctuation-aware metrics visualization with visual indicators
+- Enhanced formatting for numeric values with thousands separators
+- Intelligent display of units based on metric values
+- Tooltip-enabled metric name display for long names
+- Smart handling of technical abbreviations (CPU, IO, MySQL, etc.)
 
 ## Frontend Architecture
 
@@ -159,8 +164,16 @@ pnpm preview
    - CPU, memory, I/O visualization
    - Custom tooltips and legends
    - Time range selection
+   - Historical trend comparison
 
-3. **WorkloadControl**
+3. **MetricsPanel**
+   - Fluctuation-aware metric tiles with visual indicators
+   - Responsive grid layout with intelligent overflow handling
+   - Statistical significance indicators (z-scores, percentage changes)
+   - Interactive tooltips showing full metric names
+   - Visual highlighting for anomalous metrics
+
+4. **WorkloadControl**
    - Workload type selection
    - Parameter configuration
    - Start/stop functionality
@@ -183,6 +196,45 @@ pnpm preview
    - Database preparation
    - Status monitoring
    - Results collection
+
+## Recent Enhancements
+
+### Metrics Visualization Improvements
+
+1. **Fluctuation Detection**
+   - Visual indicators for metrics experiencing significant fluctuations
+   - Yellow background and left border highlight unstable metrics
+   - Z-score and percentage change badges show magnitude and direction
+   
+2. **Formatting Enhancements**
+   - Thousands separators for all numeric values (e.g., 1,234,567)
+   - Dynamic unit selection based on value magnitude (KB → MB → GB)
+   - Proper handling of different metric types:
+     - Time values: nanoseconds → seconds (properly scaled)
+     - Memory: bytes → MB/GB (with appropriate conversions)
+     - Delay metrics: microseconds → milliseconds (fixed from previous incorrect nanosecond assumption)
+     - Count metrics: whole numbers with thousands separators
+
+3. **UI/UX Improvements**
+   - Tooltips for long metric names
+   - Proper capitalization of technical terms (CPU, IO, MySQL, etc.)
+   - Two-line display for metric names with proper truncation
+   - Responsive layout ensuring consistent metric tile sizes
+
+### Technical Fixes
+
+1. **Unit Conversion Accuracy**
+   - Corrected delay metric handling from nanoseconds to microseconds
+   - Improved conversion logic for all metric types
+   
+2. **Object Type Handling**
+   - Enhanced `getMetricSuffix` to handle both string and object metric formats
+   - Fixed "metric.includes is not a function" error
+
+3. **Display Optimizations**
+   - Text overflow handling with tooltips
+   - Consistent vertical alignment
+   - Improved contrast and readability
 
 ## Styling
 

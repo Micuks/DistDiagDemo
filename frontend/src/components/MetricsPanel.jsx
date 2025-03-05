@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Space, Card, Row, Col, Statistic, Spin, Select, Modal, Button } from 'antd';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { Space, Card, Row, Col, Statistic, Spin, Select, Modal, Button, Tooltip } from 'antd';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Legend, ResponsiveContainer } from 'recharts';
 import { fetchMetrics, fetchDetailedMetrics } from '../services/metricsService';
 import { anomalyService } from '../services/anomalyService';
 import { message } from 'antd';
@@ -263,10 +263,47 @@ const MetricsPanel = () => {
         const latestEntry = Array.isArray(values) ? values[values.length - 1] : null;
         if (!latestEntry) return null;
 
-        const hasFluctuation = latestEntry?.has_fluctuation || false;
+        // Detect monotonically increasing counter metrics
+        const isMonotonicCounter = 
+            Array.isArray(values) && 
+            values.length > 2 && 
+            // Check if values are monotonically increasing
+            values.slice(-5).every((v, i, arr) => i === 0 || v.value >= arr[i-1].value) &&
+            // And check if it's a large number (likely a counter)
+            values[values.length - 1].value > 1e6;
+            
+        // For monotonic counters, if no fluctuation is detected, don't highlight
+        const hasFluctuation = isMonotonicCounter && Math.abs(latestEntry.z_score || 0) < 2.0 
+            ? false 
+            : (latestEntry?.has_fluctuation || false);
+            
         const formattedValue = formatValue(latestEntry.value, category, metricName);
         const suffix = getMetricSuffix(category, metricName);
         const isSelected = selectedMetrics[category] === metricName;
+        
+        // Clean up metric name for display
+        const displayName = metricName
+            .replace(/_/g, ' ') // Replace underscores with spaces
+            .replace(/\b\w/g, l => l.toUpperCase()) // Capitalize first letter of each word
+            // Fix common tech abbreviations
+            .replace(/\bCpu\b/g, 'CPU')
+            .replace(/\bIo\b/g, 'IO')
+            .replace(/\bRpc\b/g, 'RPC')
+            .replace(/\bSql\b/g, 'SQL') 
+            .replace(/\bMysql\b/g, 'MySQL')
+            .replace(/\bIops\b/g, 'IOPS')
+            .replace(/\bDb\b/g, 'DB')
+            .replace(/\bApi\b/g, 'API')
+            .replace(/\bUuid\b/g, 'UUID')
+            .replace(/\bTps\b/g, 'TPS')
+            .replace(/\bQps\b/g, 'QPS')
+            .replace(/\bIp\b/g, 'IP')
+            .replace(/\bTcp\b/g, 'TCP')
+            .replace(/\bUdp\b/g, 'UDP')
+            .replace(/\bHttp\b/g, 'HTTP')
+            .replace(/\bHttps\b/g, 'HTTPS')
+            .replace(/\bDns\b/g, 'DNS')
+            .replace(/\bOs\b/g, 'OS');
 
         return (
             <Col span={8} key={metricName}>
@@ -279,7 +316,11 @@ const MetricsPanel = () => {
                         backgroundColor: hasFluctuation ? '#fffbe6' : isSelected ? '#e6f7ff' : 'transparent',
                         borderLeft: hasFluctuation ? '3px solid #ffd666' : isSelected ? '1px solid #91d5ff' : '1px solid transparent',
                         boxShadow: hasFluctuation ? '0 2px 8px rgba(255, 214, 102, 0.1)' : 'none',
-                        transition: 'all 0.3s ease'
+                        transition: 'all 0.3s ease',
+                        height: '100%',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'space-between'
                     }}
                     onMouseEnter={(e) => {
                         if (!hasFluctuation) {
@@ -292,40 +333,37 @@ const MetricsPanel = () => {
                         }
                     }}
                 >
-                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '4px' }}>
                         <span style={{ 
                             fontSize: '16px',
+                            fontWeight: '500',
                             color: isSelected ? '#1890ff' : 'rgba(0, 0, 0, 0.8)'
                         }}>
                             {formattedValue} {suffix}
                         </span>
-                        {hasFluctuation && latestEntry.pct_change !== undefined && (
-                            <span style={{ 
-                                color: latestEntry.pct_change > 0 ? '#389e0d' : '#cf1322',
-                                fontWeight: 600,
-                                fontSize: '0.85em',
-                                padding: '2px 6px',
-                                borderRadius: '3px',
-                                backgroundColor: latestEntry.pct_change > 0 ? 'rgba(56, 158, 13, 0.1)' : 'rgba(207, 19, 34, 0.1)'
-                            }}>
-                                {latestEntry.pct_change > 0 ? '↑' : '↓'}
-                                {Math.abs(latestEntry.pct_change * 100).toFixed(1)}%
-                                <span style={{ opacity: 0.8, marginLeft: 4 }}>
-                                    (z={latestEntry.z_score?.toFixed(1)})
-                                </span>
-                            </span>
+                        {hasFluctuation && (
+                            <div style={getBadgeStyle(latestEntry)}>
+                                {getFluctuationText(latestEntry)}
+                            </div>
                         )}
                     </div>
-                    <div style={{ 
-                        fontSize: '0.9em',
-                        color: '#666',
-                        marginTop: 4,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap'
-                    }}>
-                        {metricName}
-                    </div>
+                    
+                    <Tooltip title={displayName} placement="bottomLeft">
+                        <div style={{ 
+                            fontSize: '13px', 
+                            color: 'rgba(0, 0, 0, 0.6)', 
+                            lineHeight: '1.2',
+                            textOverflow: 'ellipsis',
+                            overflow: 'hidden',
+                            display: '-webkit-box',
+                            WebkitBoxOrient: 'vertical',
+                            WebkitLineClamp: 2,
+                            height: '31px',
+                            wordBreak: 'break-word'
+                        }}>
+                            {displayName}
+                        </div>
+                    </Tooltip>
                 </div>
             </Col>
         );
@@ -418,7 +456,17 @@ const MetricsPanel = () => {
     });
 
     const getFluctuationText = (metric) => {
-        const pct = Math.abs(Math.round(metric.pct_change * 100));
+        // For constant rate changes in large values, show the absolute change
+        if (metric.pct_change === 0 && metric.value > 1e6 && Math.abs(metric.z_score) < 2.0) {
+            // Don't show any fluctuation text for monotonically increasing counters with normal z-scores
+            return '';
+        }
+        
+        // If pct_change is very small but z-score is significant, display as <1% instead of 0%
+        let pct = Math.abs(Math.round(metric.pct_change * 100));
+        if (pct === 0 && Math.abs(metric.z_score) >= 2.0) {
+            pct = '<1';
+        }
         const direction = metric.pct_change > 0 ? '↑' : '↓';
         const z = metric.z_score.toFixed(1);
         return `${direction}${pct}% (z=${z})`;

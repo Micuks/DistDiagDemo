@@ -128,6 +128,14 @@ class TrainingService:
                 logger.warning("No node specified for anomaly collection. Using default node.")
                 node = "default"  # Use a default node if none specified
                 
+            # Make sure metrics service is aware we're collecting data
+            try:
+                from app.services.metrics_service import metrics_service
+                metrics_service.toggle_send_to_training(True)
+                logger.info("Enabled sending metrics to training service")
+            except Exception as e:
+                logger.error(f"Failed to enable metrics collection: {e}")
+            
             self.collection_start_time = datetime.now().isoformat()
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
             self.current_case = f"case_{anomaly_type}_{node}_{timestamp}"
@@ -137,12 +145,13 @@ class TrainingService:
                 "start_time": self.collection_start_time
             }
             
-            # Clear buffers
+            # Ensure the metrics buffer is initialized as an empty list
             self.metrics_buffer = []
             
             # No pre/post collection - directly start anomaly collection
             self.is_collecting_normal = False
             logger.info(f"Started anomaly data collection for {self.current_case} at {self.collection_start_time}")
+            logger.info(f"Metrics buffer initialized: {self.metrics_buffer is not None}, length: {len(self.metrics_buffer)}")
 
     async def _clear_collection_state(self):
         """Clear all collection state variables"""
@@ -231,33 +240,40 @@ class TrainingService:
     def _save_anomaly_data(self):
         """Sync method for saving anomaly data (to be run in thread pool)"""
         try:
-            if not self.metrics_buffer:
-                logger.info("No metrics to save")
-                return
-
+            # Create directory even if we don't have metrics
             case_dir = os.path.join(self.data_dir, self.current_case)
             os.makedirs(case_dir, exist_ok=True)
+            
+            # Save what we have in the metrics buffer
+            metrics_count = len(self.metrics_buffer) if self.metrics_buffer else 0
+            logger.info(f"Saving anomaly data: {metrics_count} metrics entries")
+            
+            if not self.metrics_buffer:
+                logger.warning("No metrics to save, creating empty metrics file")
+                # Create an empty metrics file so we know the collection happened
+                metrics_file = os.path.join(case_dir, "metrics.json")
+                with open(metrics_file, 'w') as f:
+                    json.dump([], f)
+            else:
+                metrics_file = os.path.join(case_dir, "metrics.json")
+                with open(metrics_file, 'w') as f:
+                    json.dump(self.metrics_buffer, f)
 
-            metrics_file = os.path.join(case_dir, "metrics.json")
-            with open(metrics_file, 'w') as f:
-                json.dump(self.metrics_buffer, f)
-
+            # Always save label information
             label_file = os.path.join(case_dir, "label.json") 
             with open(label_file, 'w') as f:
                 json.dump({
                     "type": self.current_anomaly["type"],
                     "node": self.current_anomaly["node"],
                     "start_time": self.collection_start_time,
-                    "end_time": datetime.now().isoformat()
+                    "end_time": datetime.now().isoformat(),
+                    "metrics_count": metrics_count
                 }, f)
-
-            self.anomaly_samples += len(self.metrics_buffer)
-            logger.info(f"Saved {len(self.metrics_buffer)} anomaly metrics to {metrics_file}")
-            self.metrics_buffer = []
-            self.invalidate_stats_cache()
+                
+            logger.info(f"Saved anomaly data to {case_dir} (metrics: {metrics_count})")
+            
         except Exception as e:
-            logger.error(f"Failed to save anomaly data: {str(e)}")
-            raise
+            logger.error(f"Error saving anomaly data: {str(e)}", exc_info=True)
 
     async def _save_normal_data(self, data: List[Dict], prefix: str = ""):
         """Save normal state data to disk"""
@@ -286,36 +302,43 @@ class TrainingService:
     async def add_metrics(self, metrics: Dict[str, Any]):
         """Add metrics to current collection"""
         async with self._lock:
-            logger.debug(f"Received metrics - State: is_collecting_normal={self.is_collecting_normal}, current_case={self.current_case}")
+            logger.info(f"Received metrics - State: is_collecting_normal={self.is_collecting_normal}, current_case={self.current_case}")
             
             if not self.current_case:
                 logger.warning("No active case - metrics will not be collected")
-                logger.debug(f"Collection state: is_collecting_normal={self.is_collecting_normal}, collection_start_time={self.collection_start_time}")
+                logger.info(f"Collection state: is_collecting_normal={self.is_collecting_normal}, collection_start_time={self.collection_start_time}")
                 return
                 
             if not self.collection_start_time:
                 logger.warning("No collection start time - metrics will not be collected")
                 return
 
-            logger.debug(f"Processing metrics for case: {self.current_case}")
-            logger.debug(f"Collection mode: {'normal' if self.is_collecting_normal else 'anomaly'}")
-            logger.debug(f"Number of nodes in metrics: {len(metrics)}")
+            logger.info(f"Processing metrics for case: {self.current_case}")
+            logger.info(f"Collection mode: {'normal' if self.is_collecting_normal else 'anomaly'}")
+            logger.info(f"Number of nodes in metrics: {len(metrics)}")
 
             # Process metrics based on collection phase
             processed_metrics = self._process_raw_metrics(metrics)
+            logger.info(f"Processed {len(processed_metrics)} metrics from raw data")
             
             if self.is_collecting_normal:
                 self.normal_state_buffer.extend(processed_metrics)
-                logger.debug(f"Added {len(processed_metrics)} metrics to normal state buffer")
+                logger.info(f"Added {len(processed_metrics)} metrics to normal state buffer, total size: {len(self.normal_state_buffer)}")
             else:  # Anomaly collection
                 self.metrics_buffer.extend(processed_metrics)
-                logger.debug(f"Added {len(processed_metrics)} metrics to anomaly buffer")
+                logger.info(f"Added {len(processed_metrics)} metrics to anomaly buffer, total size: {len(self.metrics_buffer)}")
         
     def _process_raw_metrics(self, metrics: Dict[str, Any]) -> List[Dict]:
         """Process raw metrics into a list of timestamped metrics"""
         processed_metrics = []
         
+        logger.info(f"Processing raw metrics for {len(metrics)} nodes")
+        logger.info(f"Sample node IPs: {list(metrics.keys())[:3]}")
+        
         for node_ip, node_data in metrics.items():
+            # Log sample of node data structure 
+            logger.info(f"Node {node_ip} has {len(node_data)} metric categories: {list(node_data.keys())}")
+            
             # Handle different metric formats
             timestamps = set()
             
@@ -325,17 +348,23 @@ class TrainingService:
                     # For dictionary metrics, collect all timestamps
                     if 'util' in category_data:  # CPU telegraf format
                         timestamps.update(category_data['util'].keys())
+                        logger.debug(f"CPU format found for {category}, timestamps: {list(category_data['util'].keys())[:3]}")
                     elif 'aggregated' in category_data:  # IO format
+                        logger.debug(f"IO format found for {category}, keys: {list(category_data['aggregated'].keys())}")
                         for metric in category_data['aggregated'].values():
                             timestamps.update(metric.keys())
                     else:  # Other dictionary metrics
-                        for metric in category_data.values():
+                        for metric_name, metric in category_data.items():
+                            logger.debug(f"Processing metric {category}.{metric_name}, type: {type(metric)}")
                             if isinstance(metric, dict):
                                 timestamps.update(metric.keys())
             
             # If no timestamps found (e.g., all scalar values), use 'latest'
             if not timestamps:
+                logger.warning(f"No timestamps found for node {node_ip}, using 'latest'")
                 timestamps = {'latest'}
+            
+            logger.info(f"Node {node_ip} has {len(timestamps)} unique timestamps")
             
             # Remove 'latest' if it's not the only timestamp
             if len(timestamps) > 1 and 'latest' in timestamps:
@@ -345,6 +374,7 @@ class TrainingService:
             timestamps = sorted(timestamps)
             
             # Process each timestamp
+            timestamp_count = 0
             for timestamp in timestamps:
                 try:
                     filtered_metrics = {
@@ -353,49 +383,50 @@ class TrainingService:
                         "metrics": {}
                     }
                     
+                    metrics_count = 0
+                    
                     # Process each metric category
                     for category, category_data in node_data.items():
                         filtered_metrics["metrics"][category] = {}
                         
-                        if isinstance(category_data, (int, float)):
-                            # Handle scalar values directly
+                        if isinstance(category_data, dict):
+                            # Handle different formats based on category structure
+                            if 'util' in category_data:  # CPU telegraf format
+                                if timestamp in category_data['util']:
+                                    filtered_metrics["metrics"][category]['util'] = category_data['util'][timestamp]
+                                    metrics_count += 1
+                            elif 'aggregated' in category_data:  # IO format
+                                filtered_metrics["metrics"][category]['aggregated'] = {}
+                                for io_metric, values in category_data['aggregated'].items():
+                                    if timestamp in values:
+                                        filtered_metrics["metrics"][category]['aggregated'][io_metric] = values[timestamp]
+                                        metrics_count += 1
+                            else:  # Other dictionary metrics
+                                for metric_name, metric_data in category_data.items():
+                                    if isinstance(metric_data, dict) and timestamp in metric_data:
+                                        filtered_metrics["metrics"][category][metric_name] = metric_data[timestamp]
+                                        metrics_count += 1
+                                    elif not isinstance(metric_data, dict):
+                                        # For scalar values, always include them
+                                        filtered_metrics["metrics"][category][metric_name] = metric_data
+                                        metrics_count += 1
+                        else:
+                            # Scalar category value
                             filtered_metrics["metrics"][category] = category_data
-                        elif isinstance(category_data, dict):
-                            if category == 'io':
-                                # Handle both aggregated and direct IO metrics
-                                if 'aggregated' in category_data:
-                                    # Traditional telegraf format
-                                    filtered_metrics["metrics"][category] = {
-                                        'aggregated': {
-                                            metric: data.get(timestamp, data.get('latest', 0))
-                                            for metric, data in category_data['aggregated'].items()
-                                        }
-                                    }
-                                else:
-                                    # Direct metrics format (e.g., psutil)
-                                    filtered_metrics["metrics"][category] = {
-                                        metric: value.get(timestamp, value.get('latest', 0)) if isinstance(value, dict) else value
-                                        for metric, value in category_data.items()
-                                    }
-                            elif 'util' in category_data:
-                                # CPU telegraf format
-                                filtered_metrics["metrics"][category] = {
-                                    'util': category_data['util'].get(timestamp, category_data['util'].get('latest', 0))
-                                }
-                            else:
-                                # Generic dictionary metrics
-                                for metric, data in category_data.items():
-                                    if isinstance(data, dict):
-                                        filtered_metrics["metrics"][category][metric] = data.get(timestamp, data.get('latest', 0))
-                                    else:
-                                        filtered_metrics["metrics"][category][metric] = data
+                            metrics_count += 1
                     
-                    processed_metrics.append(filtered_metrics)
+                    # Only add if we have at least one metric
+                    if metrics_count > 0:
+                        processed_metrics.append(filtered_metrics)
+                        timestamp_count += 1
+                    else:
+                        logger.warning(f"No metrics found for timestamp {timestamp} on node {node_ip}")
                 except Exception as e:
-                    logger.error(f"Error processing metrics for node {node_ip} at timestamp {timestamp}: {str(e)}")
-                    logger.debug(f"Raw metrics for failed node: {node_data}")
-                    continue
-                    
+                    logger.error(f"Error processing metrics for timestamp {timestamp} on node {node_ip}: {str(e)}")
+            
+            logger.info(f"Processed {timestamp_count} timestamps for node {node_ip}")
+        
+        logger.info(f"Processed a total of {len(processed_metrics)} metric entries across all nodes")
         return processed_metrics
         
     def _should_update_stats_cache(self) -> bool:
@@ -461,7 +492,7 @@ class TrainingService:
             logger.debug("Returning cached stats")
             return self._stats_cache
 
-        logger.info("Calculating fresh dataset statistics")
+        logger.debug("Calculating fresh dataset statistics")
         stats = {
             "normal": 0,
             "anomaly": 0,
