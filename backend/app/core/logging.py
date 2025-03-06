@@ -11,7 +11,7 @@ def setup_logging():
     
     # Create logger
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     # Create formatters
     detailed_formatter = logging.Formatter(
@@ -23,7 +23,7 @@ def setup_logging():
 
     # Create console handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG)
     console_handler.setFormatter(simple_formatter)
 
     # Create file handlers
@@ -62,11 +62,11 @@ def setup_logging():
     
     # Set specific loggers to DEBUG level
     logging.getLogger('app.services.training_service').setLevel(logging.DEBUG)
-    logging.getLogger('app.services.metrics_service').setLevel(logging.INFO)
+    logging.getLogger('app.services.metrics_service').setLevel(logging.DEBUG)
     logging.getLogger('app.services.k8s_service').setLevel(logging.DEBUG)
     logging.getLogger('app.services.diagnosis_service').setLevel(logging.DEBUG)
-    logging.getLogger('app.services.workload_service').setLevel(logging.INFO)
-    logging.getLogger('app.api').setLevel(logging.INFO)
+    logging.getLogger('app.services.workload_service').setLevel(logging.DEBUG)
+    logging.getLogger('app.api').setLevel(logging.DEBUG)
 
     # Quiet some noisy loggers
     logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -81,4 +81,7 @@ def setup_logging():
     # Log environment information
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Working directory: {os.getcwd()}")
-    logger.info(f"Environment variables: OB_HOST={os.getenv('OB_HOST')}, OB_PORT={os.getenv('OB_PORT')}") 
+    logger.info(f"Environment variables: OB_HOST={os.getenv('OB_HOST')}, OB_PORT={os.getenv('OB_PORT')}")
+    
+    # Test debug logging
+    logger.debug("Debug logging is enabled - if you see this message, DEBUG level logging is working") 

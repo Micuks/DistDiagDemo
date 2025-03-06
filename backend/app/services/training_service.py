@@ -248,6 +248,15 @@ class TrainingService:
             metrics_count = len(self.metrics_buffer) if self.metrics_buffer else 0
             logger.info(f"Saving anomaly data: {metrics_count} metrics entries")
             
+            # Add detailed debug logging
+            if self.metrics_buffer:
+                logger.debug(f"Metrics buffer contains {metrics_count} entries")
+                # Log a sample of the first entry to help diagnose format issues
+                if metrics_count > 0:
+                    logger.debug(f"Sample metrics entry: {self.metrics_buffer[0]}")
+            else:
+                logger.debug("Metrics buffer is empty - this could indicate a collection issue")
+                
             if not self.metrics_buffer:
                 logger.warning("No metrics to save, creating empty metrics file")
                 # Create an empty metrics file so we know the collection happened
@@ -304,6 +313,14 @@ class TrainingService:
         async with self._lock:
             logger.info(f"Received metrics - State: is_collecting_normal={self.is_collecting_normal}, current_case={self.current_case}")
             
+            # Debug information about received metrics 
+            node_count = len(metrics) if metrics else 0
+            if node_count > 0:
+                sample_node = next(iter(metrics))
+                sample_categories = list(metrics[sample_node].keys())
+                logger.debug(f"Received metrics for {node_count} nodes. Sample node: {sample_node}")
+                logger.debug(f"Sample node has these metric categories: {sample_categories}")
+                
             if not self.current_case:
                 logger.warning("No active case - metrics will not be collected")
                 logger.info(f"Collection state: is_collecting_normal={self.is_collecting_normal}, collection_start_time={self.collection_start_time}")
@@ -419,6 +436,10 @@ class TrainingService:
                     if metrics_count > 0:
                         processed_metrics.append(filtered_metrics)
                         timestamp_count += 1
+                        
+                        # Debug log for the first few processed entries
+                        if len(processed_metrics) <= 3:
+                            logger.debug(f"Processed metrics for node {node_ip}, timestamp {timestamp}, containing {metrics_count} metrics")
                     else:
                         logger.warning(f"No metrics found for timestamp {timestamp} on node {node_ip}")
                 except Exception as e:

@@ -274,6 +274,18 @@ class MetricsService:
                     # Log the decision factors
                     logger.debug(f"Metrics collection: send_to_training={self.send_to_training}, check_workload_active={self.check_workload_active}, workload_active={self.workload_active}, is_training_collecting={is_training_collecting}")
                     
+                    # Add detailed debug logging about the metrics
+                    if metrics:
+                        logger.debug(f"Collected metrics from {len(metrics)} nodes.")
+                        if len(metrics) > 0:
+                            first_node = next(iter(metrics))
+                            logger.debug(f"First node metrics categories: {list(metrics[first_node].keys())}")
+                            # Sample a metric from each category
+                            for category, data in metrics[first_node].items():
+                                if isinstance(data, dict) and len(data) > 0:
+                                    sample_metric = next(iter(data))
+                                    logger.debug(f"Sample {category} metric: {sample_metric}")
+                    
                     # If metrics were collected and should be sent, send to training service
                     if metrics and training_loop and should_send_to_training:
                         logger.info(f"Sending metrics to training service: {len(metrics)} nodes of data")
