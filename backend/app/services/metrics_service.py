@@ -766,8 +766,8 @@ class MetricsService:
         return metrics
 
     @timed_lru_cache(seconds=30, maxsize=1)
-    def get_metrics(self) -> Dict[str, Any]:
-        """Get the latest collected metrics with fluctuation analysis."""
+    def get_last_metric_point(self) -> Dict[str, Any]:
+        """Get the last collected metrics point with fluctuation analysis."""
         if not self.metrics_history:
             return {"metrics": {}, "timestamp": None}
 
@@ -788,20 +788,9 @@ class MetricsService:
                         processed_metrics[node_ip][category][metric_name] = history
                         continue
                     
-                    # Process delay metrics as cumulative counters
-                    if 'delay' in metric_name.lower():
-                        processed_history = []
-                        for i in range(1, len(history)):
-                            current = history[i]
-                            previous = history[i-1]
-                            delta = current['value'] - previous['value']
-                            # Ensure delta is non-negative
-                            delta = max(0, delta)
-                            processed_history.append({
-                                'timestamp': current['timestamp'],
-                                'value': delta
-                            })
-                        history = processed_history
+                    # Skip delta calculation for metrics that are already processed as counters
+                    clean_name = metric_name.strip().lower()
+                    is_counter = clean_name in self._counter_metrics
                     
                     # Get current and historical values
                     current_entry = history[-1]
@@ -863,8 +852,16 @@ class MetricsService:
                     
                     processed_metrics[node_ip][category][metric_name] = processed_history
         
+        last_metric_point = {}
+        for node_ip in processed_metrics:
+            last_metric_point[node_ip] = {}
+            for category in processed_metrics[node_ip]:
+                last_metric_point[node_ip][category] = {}
+                for metric_name in processed_metrics[node_ip][category]:
+                    last_metric_point[node_ip][category][metric_name] = processed_metrics[node_ip][category][metric_name][-1]
+
         return {
-            "metrics": processed_metrics,
+            "metrics": last_metric_point,
             "timestamp": self.timestamp
         }
 

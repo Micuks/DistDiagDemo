@@ -10,7 +10,7 @@ router = APIRouter()
 @router.get("/")
 async def get_metrics():
     """Get current system metrics."""
-    return metrics_service.get_metrics()
+    return metrics_service.get_last_metric_point()
 
 @router.get("/detailed", deprecated=True)
 async def get_detailed_metrics(node_ip: str, category: str):
