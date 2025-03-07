@@ -28,7 +28,7 @@ spec:
                 echo "System was updated recently, skipping update"
               fi && \
               # Check and install required packages if not present
-              for pkg in git gcc make pcre-devel cronie util-linux zip perf; do
+              for pkg in git gcc make pcre-devel cronie util-linux zip perf fuse-libs; do
                 if ! rpm -q $pkg >/dev/null 2>&1; then
                   echo "Installing $pkg..."
                   yum install -y $pkg
@@ -45,7 +45,7 @@ spec:
               # Install toda for Chaos Mesh disk experiments
               if [ ! -f /usr/local/bin/toda ]; then
                 echo "Installing toda..."
-                curl -LO https://mirrors.chaos-mesh.org/v1.2.3/toda-$(uname -m).tar.gz && \
+                curl -LO https://github.com/chaos-mesh/toda/releases/download/v0.2.4/toda-linux-amd64.tar.gz && \
                 tar zxvf toda-*.tar.gz && \
                 mv toda /usr/local/bin/ && \
                 chmod +x /usr/local/bin/toda && \

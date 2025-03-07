@@ -933,6 +933,56 @@ class MetricsService:
             }
             
         return self.metrics_history
+        
+    def _dict_to_hashable(self, d):
+        """Convert a dictionary to a hashable tuple of (key, value) pairs sorted by key."""
+        return tuple(sorted((k, v) for k, v in d.items()))
+        
+    def get_selected_detailed_metrics(self, node_address: str, selected_metrics: Dict[str, str]) -> Dict[str, Any]:
+        """Get detailed time series metrics for specific node, but only for selected metrics in each category.
+        
+        Args:
+            node_address: IP address of the node
+            selected_metrics: Dictionary mapping category names to metric names
+            
+        Returns:
+            Dictionary with categories as keys and dictionaries of selected metrics as values
+        """
+        # Convert selected_metrics to a hashable format and call the cached implementation
+        hashable_metrics = self._dict_to_hashable(selected_metrics)
+        return self._get_selected_detailed_metrics_cached(node_address, hashable_metrics)
+    
+    @timed_lru_cache(seconds=30, maxsize=100)
+    def _get_selected_detailed_metrics_cached(self, node_address: str, hashable_metrics) -> Dict[str, Any]:
+        """Implementation of get_selected_detailed_metrics with cacheable parameters."""
+        if not self.metrics_history or node_address not in self.metrics_history:
+            return {"error": f"No metrics history for node {node_address}"}
+            
+        node_metrics = self.metrics_history[node_address]
+        result = {}
+        
+        # Convert hashable metrics tuple back to a dict for processing
+        selected_metrics = dict(hashable_metrics)
+        
+        # For each category in selected_metrics, get only the specified metric
+        for category, metric_name in selected_metrics.items():
+            if category not in node_metrics:
+                # Skip categories that don't exist
+                continue
+                
+            category_metrics = node_metrics[category]
+            if metric_name not in category_metrics:
+                # Skip metrics that don't exist
+                continue
+                
+            # Initialize category in result if it doesn't exist
+            if category not in result:
+                result[category] = {}
+                
+            # Add only the selected metric for this category
+            result[category][metric_name] = category_metrics[metric_name]
+            
+        return result
 
     def set_workload_active(self, active: bool):
         """Set the workload active state to control metrics flow to training service."""

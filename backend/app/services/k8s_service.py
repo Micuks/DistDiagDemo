@@ -48,6 +48,7 @@ class K8sService:
         self.CACHE_TTL = 5  # Cache TTL in seconds
         self._last_cache_update = None
         self._last_request_time = 0  # This will force a refresh on next request
+        self.collection_duration = 180  # Collection duration in seconds
         self.experiment_types = ["cpu_stress", "io_bottleneck", "network_bottleneck", "cache_bottleneck", "too_many_indexes"]
         
         # Force immediate refresh of active anomalies on startup
@@ -73,6 +74,30 @@ class K8sService:
             'user': os.getenv('OB_USER', 'root@sys'),
             'password': os.getenv('OB_PASSWORD', 'password'),
             'database': os.getenv('OB_DATABASE', 'oceanbase'),
+        }
+
+        # Add severity variations for experiments
+        self.severity_variations = {
+            "cpu_stress": [
+                {"workers": 16, "load": 50},
+                {"workers": 24, "load": 75},
+                {"workers": 32, "load": 100}
+            ],
+            "io_bottleneck": [
+                {"delay": "500ms", "percent": 75},
+                {"delay": "1000ms", "percent": 85},
+                {"delay": "2000ms", "percent": 100}
+            ],
+            "network_bottleneck": [
+                {"latency": "1000ms", "correlation": "75"},
+                {"latency": "2000ms", "correlation": "85"},
+                {"latency": "3000ms", "correlation": "100"}
+            ],
+            "cache_bottleneck": [
+                {"workers": 4, "size": "1GB"},
+                {"workers": 6, "size": "1.5GB"},
+                {"workers": 8, "size": "2GB"}
+            ]
         }
 
     def _should_update_cache(self) -> bool:
@@ -403,7 +428,7 @@ class K8sService:
                         for exp in experiments.get('items', []):
                             # Get the phase, default to empty string if not found
                             phase = exp.get('status', {}).get('phase', '').lower()
-                            logger.debug(f"Experiment {exp['metadata']['name']} has phase: '{phase}'")
+                            # logger.debug(f"Experiment {exp['metadata']['name']} has phase: '{phase}'")
                             
                             # Be more flexible with phase detection - consider any experiment without a failed/deleted status as active
                             if phase and phase not in ['failed', 'finished', 'deleted', 'completed', 'terminating']:
@@ -494,7 +519,7 @@ class K8sService:
             return list(self.active_anomalies.values())
 
     def _get_experiment_template(self, anomaly_type: str) -> Dict[str, Any]:
-        """Get the chaos experiment template optimized for metric impact"""
+        """Get the chaos experiment template with varying severity"""
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         experiment_name = f"ob-{anomaly_type.replace('_', '-')}-{timestamp}"
         
@@ -514,29 +539,33 @@ class K8sService:
             }
         }
 
-        # Experiment configurations targeting critical metrics
+        # Get severity variation based on previous experiments
+        severity_index = len(self.active_anomalies) % len(self.severity_variations.get(anomaly_type, [{"default": "default"}]))
+        severity = self.severity_variations.get(anomaly_type, [{}])[severity_index]
+
+        # Experiment configurations with varying severity
         experiments = {
             "cpu_stress": {
                 "kind": "StressChaos",
                 "spec": {
                     "stressors": {
                         "cpu": {
-                            "workers": 32,  # Increased to match external process contention
-                            "load": 100
+                            "workers": severity.get("workers", 32),
+                            "load": severity.get("load", 100)
                         }
                     },
-                    "duration": "300s"
+                    "duration": f"{self.collection_duration}s"
                 }
             },
-            "io_bottleneck": {  # Renamed from disk_stress for clarity
+            "io_bottleneck": {
                 "kind": "IOChaos",
                 "spec": {
                     "action": "latency",
-                    "delay": "1000ms",  # Increased latency for more impact
-                    "path": "/home/admin/oceanbase/store",  # OceanBase data path
-                    "percent": 100,
-                    "methods": ["write", "read"],  # Both read and write operations
-                    "duration": "300s"
+                    "delay": severity.get("delay", "1000ms"),
+                    "path": "/home/admin/oceanbase/store",
+                    "percent": severity.get("percent", 100),
+                    "methods": ["write", "read"],
+                    "duration": f"{self.collection_duration}s"
                 }
             },
             "network_bottleneck": {
@@ -544,9 +573,9 @@ class K8sService:
                 "spec": {
                     "action": "delay",
                     "delay": {
-                        "latency": "2000ms",  # Increased for more noticeable impact
-                        "correlation": "100",
-                        "jitter": "0ms"  # Removed jitter for consistent delay
+                        "latency": severity.get("latency", "2000ms"),
+                        "correlation": severity.get("correlation", "100"),
+                        "jitter": "0ms"
                     },
                     "target": {
                         "selector": {
@@ -555,19 +584,20 @@ class K8sService:
                         },
                         "mode": "all"
                     },
-                    "direction": "both"  # Affect both inbound and outbound traffic
+                    "direction": "both",
+                    "duration": f"{self.collection_duration}s"
                 }
             },
-            "cache_bottleneck": {  # New type for cache bottleneck
+            "cache_bottleneck": {
                 "kind": "StressChaos",
                 "spec": {
                     "stressors": {
                         "memory": {
-                            "workers": 8,
-                            "size": "2GB"  # Large memory allocation to trigger cache pressure
+                            "workers": severity.get("workers", 8),
+                            "size": severity.get("size", "2GB")
                         }
                     },
-                    "duration": "300s"
+                    "duration": f"{self.collection_duration}s"
                 }
             }
         }
@@ -967,3 +997,16 @@ class K8sService:
             logger.info(f"Initialized active anomalies on startup: {list(self.active_anomalies.keys())}")
         except Exception as e:
             logger.error(f"Error initializing active anomalies: {str(e)}")
+
+    async def get_available_nodes(self) -> List[str]:
+        """Get list of available nodes for running experiments"""
+        try:
+            v1 = client.CoreV1Api()
+            nodes = await asyncio.to_thread(
+                v1.list_node,
+                label_selector="ref-obcluster"
+            )
+            return [node.metadata.name for node in nodes.items]
+        except Exception as e:
+            logger.error(f"Error getting available nodes: {str(e)}")
+            return []

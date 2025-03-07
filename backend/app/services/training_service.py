@@ -90,6 +90,20 @@ class TrainingService:
         self.normal_samples = 0
         self.anomaly_samples = 0
         self.balance_threshold = 0.3  # 30% threshold for balance
+        self.anomaly_groups = defaultdict(int)  # Track collected groups per anomaly type
+        self.target_groups_per_type = 10  # 10 groups per anomaly type
+        self.required_anomaly_types = 16  # 16 different anomaly scenarios
+        self.collection_duration = 180  # Collection duration in seconds
+        self.anomaly_variations = defaultdict(set)  # Track variations (nodes/severity) per type
+        
+        # Add experiment types (anomaly scenarios) list
+        self.experiment_types = [
+            "cpu_stress",
+            "io_bottleneck", 
+            "network_bottleneck",
+            "cache_bottleneck",
+            "too_many_indexes"
+        ]
         
         # Log existing data
         self._log_existing_data()
@@ -125,9 +139,23 @@ class TrainingService:
         async with self._lock:
             # Validate node parameter
             if not node:
-                logger.warning("No node specified for anomaly collection. Using default node.")
-                node = "default"  # Use a default node if none specified
+                # Get list of available nodes that haven't been used for this type
+                from app.services.k8s_service import k8s_service
+                available_nodes = await k8s_service.get_available_nodes()
+                used_nodes = self.anomaly_variations[anomaly_type]
+                unused_nodes = [n for n in available_nodes if n not in used_nodes]
                 
+                if not unused_nodes:
+                    # If all nodes used, clear history to allow reuse
+                    self.anomaly_variations[anomaly_type].clear()
+                    unused_nodes = available_nodes
+                
+                node = unused_nodes[0] if unused_nodes else available_nodes[0]
+                logger.info(f"Selected node {node} for anomaly type {anomaly_type}")
+                
+            # Track this variation
+            self.anomaly_variations[anomaly_type].add(node)
+            
             # Make sure metrics service is aware we're collecting data
             try:
                 from app.services.metrics_service import metrics_service
@@ -142,7 +170,8 @@ class TrainingService:
             self.current_anomaly = {
                 "type": anomaly_type,
                 "node": node,
-                "start_time": self.collection_start_time
+                "start_time": self.collection_start_time,
+                "duration": self.collection_duration
             }
             
             # Ensure the metrics buffer is initialized as an empty list
@@ -152,6 +181,19 @@ class TrainingService:
             self.is_collecting_normal = False
             logger.info(f"Started anomaly data collection for {self.current_case} at {self.collection_start_time}")
             logger.info(f"Metrics buffer initialized: {self.metrics_buffer is not None}, length: {len(self.metrics_buffer)}")
+            
+            # Schedule automatic stop after collection_duration
+            asyncio.create_task(self._auto_stop_collection())
+
+    async def _auto_stop_collection(self):
+        """Automatically stop collection after the specified duration"""
+        try:
+            await asyncio.sleep(self.collection_duration)
+            if self.current_case:  # Only stop if still collecting
+                logger.info(f"Auto-stopping collection after {self.collection_duration} seconds")
+                await self.stop_collection(save_post_data=True)
+        except Exception as e:
+            logger.error(f"Error in auto-stop collection: {str(e)}")
 
     async def _clear_collection_state(self):
         """Clear all collection state variables"""
@@ -226,6 +268,12 @@ class TrainingService:
                     return
 
                 logger.info("Starting anomaly collection cleanup")
+                
+                # Update group counter when saving anomaly data
+                anomaly_type = self.current_anomaly["type"]
+                self.anomaly_groups[anomaly_type] += 1
+                logger.info(f"Completed group {self.anomaly_groups[anomaly_type]} for {anomaly_type}")
+                
                 # Move file operations to thread pool
                 await asyncio.to_thread(self._save_anomaly_data)
                 logger.info("Anomaly data saved successfully")
@@ -630,41 +678,16 @@ class TrainingService:
         
         # Get current stats
         stats = await self.get_dataset_stats()
-        total = stats["normal"] + stats["anomaly"]
         
-        if total == 0:
-            # If no data, start with normal collection
-            logger.info("No data available. Starting with normal collection")
-            await self.start_normal_collection()
-            return
-            
-        # Calculate ratios
-        normal_ratio = stats["normal"] / total if total > 0 else 0
-        anomaly_ratio = stats["anomaly"] / total if total > 0 else 0
+        # Check if we need to collect more anomaly variations
+        for anomaly_type in self.experiment_types:
+            # Check if this type has enough groups collected
+            if self.anomaly_groups[anomaly_type] < self.target_groups_per_type:
+                logger.info(f"Collecting variation {self.anomaly_groups[anomaly_type]+1} for {anomaly_type}")
+                await self.start_collection(anomaly_type, None)  # Let the system choose the node
+                return
         
-        # Check normal vs anomaly balance first
-        if abs(normal_ratio - anomaly_ratio) > self.balance_threshold:
-            if normal_ratio < anomaly_ratio:
-                logger.info("Normal samples underrepresented. Starting normal collection")
-                await self.start_normal_collection()
-            else:
-                # Find least represented anomaly type
-                anomaly_types = stats["anomaly_types"]
-                min_type = min(anomaly_types.items(), key=lambda x: x[1])[0]
-                logger.info(f"Anomaly type {min_type} underrepresented. Starting collection")
-                await self.start_collection(min_type, None)  # Let the system choose the node
-        else:
-            # Balance anomaly types
-            anomaly_types = stats["anomaly_types"]
-            avg_anomaly_count = stats["anomaly"] / len(anomaly_types)
-            
-            # Find most underrepresented type
-            min_type = min(anomaly_types.items(), key=lambda x: x[1])[0]
-            if anomaly_types[min_type] < avg_anomaly_count * 0.7:  # Allow 30% variance
-                logger.info(f"Anomaly type {min_type} below average. Starting collection")
-                await self.start_collection(min_type, None)
-            else:
-                logger.info("Dataset is well balanced")
+        logger.info("All required anomaly variations have been collected")
 
     def get_training_data(self) -> tuple:
         """Get all training data for model training"""
@@ -828,6 +851,8 @@ class TrainingService:
         self.normal_state_buffer = []
         self.is_collecting_normal = False
         self.collection_start_time = None
+        self.anomaly_groups.clear()  # Clear group tracking
+        self.anomaly_variations.clear()  # Clear variation tracking
         logger.info("Training service state has been reset")
 
     async def reset_state(self):
