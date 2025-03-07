@@ -76,6 +76,7 @@ class MetricsService:
         self._metrics_cache = {}
         self._last_collection = None
         self.MAX_HISTORY_POINTS = 720  # 1 hour of data at 5s intervals
+        self._previous_counter_values = {}  # Track previous values for counter metrics
         
         # Collection method configuration
         self.collection_method = os.getenv('METRICS_COLLECTION_METHOD', MetricsCollectionMethod.SQL)
@@ -189,6 +190,15 @@ class MetricsService:
                 'sql distributed count',
             ]
         }
+        
+        # Get counter metrics
+        self._counter_metrics = set()
+        for metrics in self.essential_metrics.values():
+            for metric in metrics:
+                if any(kw in metric.lower() for kw in ['delay', 'count', 'time', 'total', 'hit', 'miss', 'packet', 'sessions']):
+                    # Skip if it contains 'memstore' and 'total', skip 'io read count'
+                    if not ('total memstore used' in metric.lower() or 'request queue time' in metric.lower()):
+                        self._counter_metrics.add(metric.strip().lower())
 
         # Create reverse mapping from metric name to category
         self.metric_to_category = {}
@@ -372,6 +382,21 @@ class MetricsService:
                         
                         if category:
                             value = float(value)
+                            
+                            # Check if this is a counter metric
+                            is_counter = clean_name in self._counter_metrics
+                            counter_key = (node_ip, category, name)
+                            
+                            if is_counter:
+                                # Get previous value, defaulting to current value for first occurrence
+                                prev_value = self._previous_counter_values.get(counter_key, value)
+                                # Calculate delta
+                                delta = value - prev_value
+                                # Store current value for next iteration
+                                self._previous_counter_values[counter_key] = value
+                                # Use delta as the value, ensure non-negative
+                                value = max(delta, 0)
+                            
                             node_metrics[category][name] = value
                             metrics_found.add(clean_name)
                             

@@ -44,25 +44,23 @@ const formatValue = (value, category, metric) => {
         return `${(value / (1024 * 1024)).toFixed(2).toLocaleString()}`;
     }
     
-    // Handle network bytes (convert to MB/GB)
+    // Handle network bytes (convert to B/KB/MB/GB)
     if (category === 'network' && (typeof metric === 'string' ? metric.includes('bytes') : metric.name.includes('bytes'))) {
-        const mbValue = value / (1024 * 1024);
-        if (mbValue >= 1000) {
-            return `${(mbValue / 1024).toFixed(2).toLocaleString()}`;  // Convert to GB
-        }
-        return `${mbValue.toFixed(2).toLocaleString()}`;
+        if (value < 1024) return `${value.toFixed(0)}`; // Bytes
+        if (value < 1024 * 1024) return `${(value / 1024).toFixed(2)}`; // KB
+        if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)}`; // MB
+        return `${(value / (1024 * 1024 * 1024)).toFixed(2)}`; // GB
     }
 
-    // Handle disk write size (convert to MB/GB)
+    // Handle disk write size (convert to B/KB/MB/GB)
     if ((typeof metric === 'string' ? 
         (metric.includes('write size') || metric.includes('log total size')) :
         (metric.name.includes('write size') || metric.name.includes('log total size'))
     )) {
-        const mbValue = value / (1024 * 1024);
-        if (mbValue >= 1000) {
-            return `${(mbValue / 1024).toFixed(2).toLocaleString()}`;  // Convert to GB
-        }
-        return `${mbValue.toFixed(2).toLocaleString()}`;
+        if (value < 1024) return `${value.toFixed(0)}`; // Bytes
+        if (value < 1024 * 1024) return `${(value / 1024).toFixed(2)}`; // KB
+        if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)}`; // MB
+        return `${(value / (1024 * 1024 * 1024)).toFixed(2)}`; // GB
     }
     
     // Handle percentages
@@ -88,7 +86,6 @@ const MetricsPanel = () => {
     const [loading, setLoading] = useState(true);
     const [metricSeries, setMetricSeries] = useState({});
     const [chartModal, setChartModal] = useState({ visible: false, title: '', data: [], suffix: '', loading: false });
-    const nodeRefs = useRef({});
     const [selectedMetrics, setSelectedMetrics] = useState({
         cpu: 'cpu usage',
         memory: 'total memstore used',
@@ -296,7 +293,7 @@ const MetricsPanel = () => {
                 
                 // Validate node metrics data
                 const nodeIps = Object.keys(data.metrics);
-                console.log(`Found ${nodeIps.length} nodes:`, nodeIps);
+                console.debug(`Found ${nodeIps.length} nodes:`, nodeIps);
                 
                 if (nodeIps.length === 0) {
                     console.warn('No nodes found in metrics data');
@@ -358,12 +355,6 @@ const MetricsPanel = () => {
             return newSelectedMetrics;
         });
         
-        if (nodeRefs.current[nodeIp]) {
-            nodeRefs.current[nodeIp].scrollIntoView({
-                behavior: 'smooth',
-                block: 'start'
-            });
-        }
     };
 
     const formatChartValue = (value, category, metric) => {
@@ -394,6 +385,22 @@ const MetricsPanel = () => {
     const getMetricSuffix = (category, metric) => {
         const metricName = typeof metric === 'string' ? metric : metric.name;
         const metricValue = typeof metric === 'object' ? metric.value : 0;
+
+        // Handle network bytes suffix
+        if (category === 'network' && metricName.includes('bytes')) {
+            if (metricValue < 1024) return 'B';
+            if (metricValue < 1024 * 1024) return 'KB';
+            if (metricValue < 1024 * 1024 * 1024) return 'MB';
+            return 'GB';
+        }
+
+        // Handle disk write size suffix
+        if (metricName.includes('write size') || metricName.includes('log total size')) {
+            if (metricValue < 1024) return 'B';
+            if (metricValue < 1024 * 1024) return 'KB';
+            if (metricValue < 1024 * 1024 * 1024) return 'MB';
+            return 'GB';
+        }
 
         if (category === 'memory') return 'MB';
         if (metricName.includes('time') && category === 'cpu') return 's';
@@ -730,11 +737,6 @@ const MetricsPanel = () => {
         const network = nodeData.network && typeof nodeData.network === 'object' ? nodeData.network : {};
         const transactions = nodeData.transactions && typeof nodeData.transactions === 'object' ? nodeData.transactions : {};
 
-        // Create a ref for this node if it doesn't exist
-        if (!nodeRefs.current[nodeIp]) {
-            nodeRefs.current[nodeIp] = React.createRef();
-        }
-
         // Use the timestamp to help prevent unnecessary re-renders
         const nodeKey = `node-${nodeIp}-${metricPoint?.timestamp || Date.now()}`;
 
@@ -743,7 +745,6 @@ const MetricsPanel = () => {
                 title={`Node: ${nodeIp}`} 
                 key={nodeKey}
                 style={{ marginBottom: 16 }}
-                ref={nodeRefs.current[nodeIp]}
             >
                 <Row gutter={[16, 16]}>
                     {Object.keys(cpu).length > 0 && (
