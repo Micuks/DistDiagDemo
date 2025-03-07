@@ -97,6 +97,7 @@ const MetricsPanel = () => {
         transactions: 'trans commit count'
     });
     const [loadedSeries, setLoadedSeries] = useState({});
+    const activeFetches = useRef(new Set()); // Track active fetch operations to prevent duplicates
     const fetchInterval = 5000;
 
     const fetchChartData = async (nodeIp, category, metric) => {
@@ -108,8 +109,14 @@ const MetricsPanel = () => {
             return;
         }
 
-        // Don't set immediately to avoid disruptive UI changes
-        // First fetch the data, then update state if successful
+        // Check if this request is already in progress
+        if (activeFetches.current.has(seriesKey)) {
+            console.debug(`Already fetching data for ${nodeIp}/${category}/${metric}, skipping duplicate request`);
+            return;
+        }
+
+        // Mark this request as in progress
+        activeFetches.current.add(seriesKey);
         
         try {
             // Use the optimized endpoint that fetches only the selected metrics
@@ -155,6 +162,9 @@ const MetricsPanel = () => {
                 ...prev,
                 [seriesKey]: null
             }));
+        } finally {
+            // Remove this request from the in-progress set
+            activeFetches.current.delete(seriesKey);
         }
     };
 
@@ -164,6 +174,9 @@ const MetricsPanel = () => {
         // Get the list of selected metrics for each category
         const categories = Object.keys(selectedMetrics);
         const metrics = {...selectedMetrics};
+        
+        // Create a unique key for this batch fetch
+        const batchKey = `batch-${nodeIp}`;
         
         // Check if we need to update any of the series for this node
         let needsUpdate = false;
@@ -180,6 +193,22 @@ const MetricsPanel = () => {
         
         if (!needsUpdate) {
             return;
+        }
+        
+        // Check if this batch request is already in progress
+        if (activeFetches.current.has(batchKey)) {
+            console.debug(`Already fetching batch data for ${nodeIp}, skipping duplicate request`);
+            return;
+        }
+        
+        // Mark this batch request as in progress
+        activeFetches.current.add(batchKey);
+        
+        // Also mark individual series as being fetched to prevent redundant individual requests
+        for (const category of categories) {
+            const metric = metrics[category];
+            const seriesKey = `${nodeIp}-${category}-${metric}`;
+            activeFetches.current.add(seriesKey);
         }
         
         try {
@@ -236,6 +265,16 @@ const MetricsPanel = () => {
             
         } catch (error) {
             console.error(`Error fetching all detailed metrics for ${nodeIp}:`, error);
+        } finally {
+            // Remove all tracking for this batch
+            activeFetches.current.delete(batchKey);
+            
+            // Also remove tracking for individual series
+            for (const category of categories) {
+                const metric = metrics[category];
+                const seriesKey = `${nodeIp}-${category}-${metric}`;
+                activeFetches.current.delete(seriesKey);
+            }
         }
     };
 
@@ -303,12 +342,21 @@ const MetricsPanel = () => {
     }, [selectedMetrics]);
 
     const handleMetricClick = (nodeIp, category, metric) => {
-        setSelectedMetrics(prev => ({
-            ...prev,
-            [category]: metric
-        }));
-        
-        fetchChartData(nodeIp, category, metric);
+        // Update the selected metrics
+        setSelectedMetrics(prev => {
+            const newSelectedMetrics = {
+                ...prev,
+                [category]: metric
+            };
+            
+            // Use the batch fetch approach to get all selected metrics at once
+            // But first update the state, so the nodeIp will have the latest selected metrics
+            setTimeout(() => {
+                fetchAllNodeMetrics(nodeIp);
+            }, 0);
+            
+            return newSelectedMetrics;
+        });
         
         if (nodeRefs.current[nodeIp]) {
             nodeRefs.current[nodeIp].scrollIntoView({
@@ -375,11 +423,18 @@ const MetricsPanel = () => {
         const now = Date.now();
         const isExpired = lastUpdated && (now - lastUpdated >= fetchInterval);
         
-        // Only trigger fetch if data is expired AND we're not already fetching it
-        if (isExpired && lastUpdated !== now) {
+        // For normal auto-refresh, don't trigger individual fetches
+        // The main useEffect with fetchAllNodeMetrics will handle periodic updates
+        // Only fetch individually for:
+        // 1. Initial loading when no data exists yet
+        // 2. When data has been expired for much longer than the fetchInterval (indicating the automatic refresh might have failed)
+        const manualFetchNeeded = !data || (isExpired && (now - lastUpdated >= fetchInterval * 2));
+        
+        if (manualFetchNeeded && lastUpdated !== now) {
             // Prevent duplicate fetches during the same render cycle
-            const timeSinceLastUpdate = now - lastUpdated;
+            const timeSinceLastUpdate = now - lastUpdated || fetchInterval * 3; // Use a fallback if lastUpdated is null
             if (timeSinceLastUpdate > 100) { // Add a small buffer to prevent edge case rapid fetches
+                console.debug(`Triggering manual fetch for ${nodeIp}/${category}/${metric} (lastUpdated: ${lastUpdated ? new Date(lastUpdated).toISOString() : 'never'})`);
                 fetchChartData(nodeIp, category, metric);
             }
         }
