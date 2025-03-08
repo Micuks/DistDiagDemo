@@ -49,9 +49,148 @@ class DistDiagnosis:
     def __init__(self, num_classifier=1, classes_for_each_node=None, node_num=1):
         self.num_classifier = num_classifier
         self.node_num = node_num
-        self.classes = classes_for_each_node if classes_for_each_node else ['cpu', 'memory', 'io', 'network']
+        self.classes = classes_for_each_node if classes_for_each_node else [
+            "cpu_stress",
+            "io_bottleneck", 
+            "network_bottleneck",
+            "cache_bottleneck",
+            "too_many_indexes"
+        ]
         self.clf_list = [XGBClassifier(objective='binary:logistic') for _ in range(num_classifier)]
+        self.time_window = 5  # Default 5-minute window
         logger.info(f"Initialized {len(self.clf_list)} classifiers for {len(self.classes)} classes")
+
+    def _get_time_window_values(self, metrics: Dict[str, Any], metric_name: str) -> List[float]:
+        """Extract time window values for a metric"""
+        try:
+            values = []
+            if not metrics:
+                return [0.0] * self.time_window
+
+            # Check if metric exists directly in metrics
+            if metric_name in metrics:
+                metric_data = metrics[metric_name]
+                
+                # Handle case where metric_data is a direct float value
+                if isinstance(metric_data, (int, float)):
+                    return [float(metric_data)] * self.time_window
+                    
+                # Handle case where metric_data is a dict with 'latest' key
+                elif isinstance(metric_data, dict) and 'latest' in metric_data:
+                    return [float(metric_data['latest'])] * self.time_window
+                    
+                # Handle case where metric_data is a dict of timestamps
+                elif isinstance(metric_data, dict):
+                    timestamps = sorted(metric_data.keys(), reverse=True)[:self.time_window]
+                    for ts in timestamps:
+                        if isinstance(metric_data[ts], dict) and 'latest' in metric_data[ts]:
+                            values.append(float(metric_data[ts]['latest']))
+                        elif isinstance(metric_data[ts], (int, float)):
+                            values.append(float(metric_data[ts]))
+                        else:
+                            values.append(0.0)
+            
+            # If metrics is a dict of timestamps containing metric_name
+            elif isinstance(next(iter(metrics.values()), {}), dict):
+                timestamps = sorted(metrics.keys(), reverse=True)[:self.time_window]
+                for ts in timestamps:
+                    ts_data = metrics[ts]
+                    if metric_name in ts_data:
+                        if isinstance(ts_data[metric_name], dict) and 'latest' in ts_data[metric_name]:
+                            values.append(float(ts_data[metric_name]['latest']))
+                        elif isinstance(ts_data[metric_name], (int, float)):
+                            values.append(float(ts_data[metric_name]))
+                        else:
+                            values.append(0.0)
+                    else:
+                        values.append(0.0)
+
+            # Pad with zeros if we don't have enough values
+            while len(values) < self.time_window:
+                values.append(0.0)
+
+            return values[:self.time_window]  # Ensure we only return time_window values
+        except Exception as e:
+            logger.error(f"Error getting time window values for {metric_name}: {str(e)}")
+            return [0.0] * self.time_window
+
+    def _calculate_time_features(self, values: List[float]) -> List[float]:
+        """Calculate statistical features from time window values"""
+        try:
+            values = np.array(values)
+            features = []
+            
+            # Basic statistics
+            features.append(np.mean(values))  # Mean
+            features.append(np.std(values))   # Standard deviation
+            features.append(np.max(values))   # Maximum
+            
+            # Trend (slope of linear fit)
+            if len(values) > 1:
+                x = np.arange(len(values))
+                slope = np.polyfit(x, values, 1)[0]
+                features.append(slope)
+            else:
+                features.append(0.0)
+            
+            # Rate of change (using last two points)
+            if len(values) > 1:
+                rate = values[-1] - values[-2]
+                features.append(rate)
+            else:
+                features.append(0.0)
+                
+            return features
+        except Exception as e:
+            logger.error(f"Error calculating time features: {str(e)}")
+            return [0.0] * 5  # Return zeros for all features
+
+    def _process_metrics(self, metrics: Dict[str, Any]) -> np.ndarray:
+        """Process metrics into feature vector using time window statistics"""
+        try:
+            feature_vector = []
+            
+            # CPU metrics
+            cpu_metrics = metrics.get('cpu', {})
+            for metric in ['cpu usage', 'worker time', 'cpu time']:
+                values = self._get_time_window_values(cpu_metrics, metric)
+                feature_vector.extend(self._calculate_time_features(values))
+            
+            # Memory metrics
+            memory_metrics = metrics.get('memory', {})
+            for metric in ['total memstore used', 'active memstore used', 'memstore limit', 
+                         'memory usage', 'observer memory hold size']:
+                values = self._get_time_window_values(memory_metrics, metric)
+                feature_vector.extend(self._calculate_time_features(values))
+            
+            # IO metrics
+            io_metrics = metrics.get('io', {})
+            for metric in ['palf write io count to disk', 'palf write size to disk',
+                         'io read count', 'io write count', 'io read delay', 'io write delay',
+                         'data micro block cache hit', 'index micro block cache hit', 'row cache hit']:
+                values = self._get_time_window_values(io_metrics, metric)
+                feature_vector.extend(self._calculate_time_features(values))
+            
+            # Network metrics
+            network_metrics = metrics.get('network', {})
+            for metric in ['rpc packet in', 'rpc packet in bytes', 'rpc packet out',
+                         'rpc packet out bytes', 'rpc net delay', 'mysql packet in',
+                         'mysql packet out']:
+                values = self._get_time_window_values(network_metrics, metric)
+                feature_vector.extend(self._calculate_time_features(values))
+            
+            # Transaction metrics
+            trans_metrics = metrics.get('transactions', {})
+            for metric in ['trans commit count', 'trans timeout count', 'sql update count',
+                         'sql select count', 'active sessions', 'sql fail count',
+                         'request queue time', 'DB time']:
+                values = self._get_time_window_values(trans_metrics, metric)
+                feature_vector.extend(self._calculate_time_features(values))
+            
+            return np.array(feature_vector)
+        except Exception as e:
+            logger.error(f"Error processing metrics: {str(e)}")
+            return None
 
     def calculate_score_for_node(self, node_metrics):
         """Calculate PageRank scores for nodes based on metric correlations"""
@@ -97,8 +236,29 @@ class DistDiagnosis:
 
         return sum(rvalue) / len(rvalue) if rvalue else 0
 
-    def diagnose(self, node_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Diagnose anomalies using the original algorithm's mechanics"""
+    def diagnose(self, node_metrics: dict) -> dict:
+        """
+        Diagnose anomalies from node metrics
+        
+        Args:
+            node_metrics: Dict of node metrics in format:
+                {
+                    'node_name': {
+                        'metric_name': {
+                            'latest': value,
+                            ...
+                        },
+                        ...
+                    },
+                    ...
+                }
+                
+        Returns:
+            Dict containing:
+                - scores: Dict of anomaly scores per node
+                - anomalies: List of detected anomalies with types
+                - propagation_graph: Dict showing anomaly propagation
+        """
         try:
             # Process metrics into feature vectors
             features = []
@@ -148,7 +308,7 @@ class DistDiagnosis:
                     max_score = max(node_results.values())
                     max_type = max(node_results.items(), key=lambda x: x[1])[0]
                     
-                    if max_score > 0.1:  # Configurable threshold
+                    if max_score > 0.15:  # Threshold aligned with reference implementation
                         anomalies.append({
                             'node': node,
                             'type': max_type,
@@ -162,7 +322,7 @@ class DistDiagnosis:
                 for j, node2 in enumerate(node_names):
                     if i != j:
                         correlation = self.calculate_rank(node_metrics_list[i], node_metrics_list[j])
-                        if correlation > 0.3:  # Configurable threshold
+                        if correlation > 0.3:  # Correlation threshold from reference
                             propagation_graph[node1].append({
                                 'target': node2,
                                 'correlation': correlation
@@ -248,49 +408,6 @@ class DistDiagnosis:
             else:
                 raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    def _process_metrics(self, metrics: Dict[str, Any]) -> np.ndarray:
-        """Process metrics into feature vector"""
-        try:
-            feature_vector = []
-            
-            # CPU metrics
-            cpu_metrics = metrics.get('cpu', {})
-            feature_vector.extend([
-                float(cpu_metrics.get('util', {}).get('latest', 0)),
-                float(cpu_metrics.get('system', {}).get('latest', 0)),
-                float(cpu_metrics.get('user', {}).get('latest', 0)),
-                float(cpu_metrics.get('wait', {}).get('latest', 0))
-            ])
-            
-            # Memory metrics
-            memory_metrics = metrics.get('memory', {})
-            feature_vector.extend([
-                float(memory_metrics.get('used', {}).get('latest', 0)),
-                float(memory_metrics.get('free', {}).get('latest', 0)),
-                float(memory_metrics.get('cach', {}).get('latest', 0))
-            ])
-            
-            # IO metrics
-            io_metrics = metrics.get('io', {}).get('aggregated', {})
-            feature_vector.extend([
-                float(io_metrics.get('rs', {}).get('latest', 0)),
-                float(io_metrics.get('ws', {}).get('latest', 0)),
-                float(io_metrics.get('util', {}).get('latest', 0))
-            ])
-            
-            # Network metrics
-            network_metrics = metrics.get('network', {})
-            feature_vector.extend([
-                float(network_metrics.get('bytin', {}).get('latest', 0)),
-                float(network_metrics.get('bytout', {}).get('latest', 0)),
-                float(network_metrics.get('pktin', {}).get('latest', 0))
-            ])
-            
-            return np.array(feature_vector)
-        except Exception as e:
-            logger.error(f"Error processing metrics: {str(e)}")
-            return None
-
     def decompose_train_x(self, composed_train_x):
         """Decompose training features"""
         try:
@@ -358,10 +475,19 @@ class DiagnosisService:
         ))
         
         # Define anomaly types that can be detected
-        self.anomaly_types = ['cpu', 'memory', 'io', 'network']
+        self.anomaly_types = [
+            "cpu_stress",
+            "io_bottleneck", 
+            "network_bottleneck",
+            "cache_bottleneck",
+            "too_many_indexes"
+        ]
         
         # Get node count from environment or config
         self.node_count = int(os.getenv('NODE_COUNT', '3'))
+        
+        # Get time window size from environment or use default
+        self.time_window = int(os.getenv('METRICS_TIME_WINDOW', '5'))
         
         # Initialize DistDiagnosis with multi-node support
         self.diagnosis = DistDiagnosis(
@@ -369,6 +495,7 @@ class DiagnosisService:
             classes_for_each_node=self.anomaly_types,
             node_num=self.node_count
         )
+        self.diagnosis.time_window = self.time_window  # Set time window for metric processing
         
         # Select model to use - either specified or latest available
         available_models = self.get_available_models()
@@ -410,8 +537,8 @@ class DiagnosisService:
             # Train model
             self.diagnosis.train(X_train, y_train)
             
-            # Generate model name with timestamp
-            model_name = f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            # Generate model name with dist-diagnosis prefix
+            model_name = f"dist-diagnosis-model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             
             # Create new model directory
             new_model_path = os.path.join(self.models_path, model_name)
@@ -461,9 +588,16 @@ class DiagnosisService:
     def evaluate_model(self, X_test, y_test, model_name):
         """Evaluate model performance and store metrics"""
         try:
-            model = self.diagnosis.clf_list[0]  # Get primary classifier
-            y_pred = model.predict(X_test)
+            # Get predictions from all classifiers
+            all_preds = []
+            for clf in self.diagnosis.clf_list:
+                pred = clf.predict(X_test)
+                all_preds.append(pred)
             
+            # Use majority voting for final prediction
+            y_pred = np.round(np.mean(all_preds, axis=0))
+            
+            # Standard performance metrics
             metrics = {
                 'accuracy': float(accuracy_score(y_test, y_pred)),
                 'precision': float(precision_score(y_test, y_pred, average='weighted')),
@@ -471,6 +605,10 @@ class DiagnosisService:
                 'f1_score': float(f1_score(y_test, y_pred, average='weighted')),
                 'training_time': time.time() - self.training_start_time
             }
+            
+            # Add RCA performance metrics
+            rca_metrics = self._evaluate_rca_performance(X_test, y_test)
+            metrics.update(rca_metrics)
             
             # Save metrics
             metrics_file = os.path.join(self.metrics_path, f"{model_name}_metrics.json")
@@ -483,26 +621,181 @@ class DiagnosisService:
             logger.error(f"Error evaluating model: {str(e)}")
             raise
 
-    def get_model_performance(self, model_name):
-        """Get stored performance metrics for a model"""
+    def _evaluate_rca_performance(self, X_test, y_test):
+        """Evaluate RCA-specific performance metrics"""
         try:
-            # If looking for current active model metrics
-            if model_name == self.active_model:
-                metrics_path = self.metrics_path
-            else:
-                # Look for metrics in the specific model directory
-                model_dir = os.path.join(self.models_path, model_name)
-                metrics_path = os.path.join(model_dir, 'metrics')
-                
-            metrics_file = os.path.join(metrics_path, f"{model_name}_metrics.json")
-            if os.path.exists(metrics_file):
-                with open(metrics_file) as f:
-                    return json.load(f)
+            # Start timer for RCA performance measurement
+            start_time = time.time()
             
-            return None
+            # Create a synthetic test scenario from test data
+            test_metrics = self._create_test_metrics(X_test)
+            
+            # Get RCA results
+            diagnosis_result = self.diagnosis.diagnose(test_metrics)
+            
+            # Calculate RCA accuracy (how often did the model identify the correct root cause)
+            true_root_causes = self._extract_root_causes_from_labels(y_test)
+            predicted_root_causes = self._extract_root_causes_from_diagnosis(diagnosis_result)
+            
+            # Calculate RCA metrics
+            rca_accuracy = self._calculate_rca_accuracy(true_root_causes, predicted_root_causes)
+            rca_time = time.time() - start_time
+            
+            return {
+                'rca_accuracy': float(rca_accuracy),
+                'rca_time': float(rca_time),
+                'rca_precision': float(self._calculate_rca_precision(true_root_causes, predicted_root_causes)),
+                'propagation_accuracy': float(self._evaluate_propagation_graph(diagnosis_result.get('propagation_graph', {})))
+            }
+            
         except Exception as e:
-            logger.error(f"Error loading model metrics for {model_name}: {str(e)}")
-            return None
+            logger.error(f"Error evaluating RCA performance: {str(e)}")
+            return {
+                'rca_accuracy': 0.0,
+                'rca_time': 0.0,
+                'rca_precision': 0.0,
+                'propagation_accuracy': 0.0
+            }
+
+    def _create_test_metrics(self, X_test):
+        """Create synthetic test metrics from test feature vectors"""
+        # This is a simplified implementation - in real scenarios,
+        # you would need a more sophisticated approach to recreate realistic metrics
+        test_metrics = {}
+        
+        # Create metrics for each test node (assuming first 10 samples for demonstration)
+        for i, features in enumerate(X_test[:10]):
+            node_name = f"test-node-{i}"
+            
+            # Recreate metrics structure from feature vector
+            test_metrics[node_name] = {
+                'cpu': {
+                    'util': {'latest': features[0]},
+                    'system': {'latest': features[1]},
+                    'user': {'latest': features[2]},
+                    'wait': {'latest': features[3]}
+                },
+                'memory': {
+                    'used': {'latest': features[4]},
+                    'free': {'latest': features[5]},
+                    'cach': {'latest': features[6]}
+                },
+                'io': {
+                    'aggregated': {
+                        'rs': {'latest': features[7]},
+                        'ws': {'latest': features[8]},
+                        'util': {'latest': features[9]}
+                    }
+                },
+                'network': {
+                    'bytin': {'latest': features[10]},
+                    'bytout': {'latest': features[11]},
+                    'pktin': {'latest': features[12]}
+                }
+            }
+            
+        return test_metrics
+        
+    def _extract_root_causes_from_labels(self, y_test):
+        """Extract root causes from test labels"""
+        root_causes = []
+        for i, label_vector in enumerate(y_test):
+            if np.any(label_vector):  # If any anomaly is present
+                # Find the index of highest value (most significant anomaly type)
+                anomaly_type_idx = np.argmax(label_vector)
+                root_causes.append({
+                    'node_idx': i,
+                    'type_idx': anomaly_type_idx,
+                    'type': self.anomaly_types[anomaly_type_idx] if anomaly_type_idx < len(self.anomaly_types) else 'unknown'
+                })
+        return root_causes
+        
+    def _extract_root_causes_from_diagnosis(self, diagnosis_result):
+        """Extract predicted root causes from diagnosis result"""
+        root_causes = []
+        
+        # Extract from anomalies ranked by score
+        for anomaly in diagnosis_result.get('anomalies', []):
+            node = anomaly.get('node', '')
+            anomaly_type = anomaly.get('type', '')
+            
+            # Map type name to index
+            type_idx = self.anomaly_types.index(anomaly_type) if anomaly_type in self.anomaly_types else -1
+            
+            # Extract node index from node name
+            node_idx = -1
+            if node.startswith('test-node-'):
+                try:
+                    node_idx = int(node.split('-')[-1])
+                except ValueError:
+                    pass
+                    
+            root_causes.append({
+                'node_idx': node_idx,
+                'type_idx': type_idx,
+                'type': anomaly_type
+            })
+            
+        return root_causes
+        
+    def _calculate_rca_accuracy(self, true_root_causes, predicted_root_causes):
+        """Calculate accuracy of root cause identification"""
+        if not true_root_causes or not predicted_root_causes:
+            return 0.0
+            
+        # Consider only top predictions (equal to number of true causes)
+        top_predictions = predicted_root_causes[:len(true_root_causes)]
+        
+        # Count matches (both node and type match)
+        matches = 0
+        for true_cause in true_root_causes:
+            for pred_cause in top_predictions:
+                if (true_cause['node_idx'] == pred_cause['node_idx'] and
+                    true_cause['type_idx'] == pred_cause['type_idx']):
+                    matches += 1
+                    break
+                    
+        return matches / len(true_root_causes)
+        
+    def _calculate_rca_precision(self, true_root_causes, predicted_root_causes):
+        """Calculate precision of root cause identification"""
+        if not predicted_root_causes:
+            return 0.0
+            
+        # Consider only top predictions (equal to number of true causes)
+        top_predictions = predicted_root_causes[:len(true_root_causes)] if true_root_causes else predicted_root_causes[:1]
+        
+        # Count correct predictions
+        correct = 0
+        for pred_cause in top_predictions:
+            for true_cause in true_root_causes:
+                if (true_cause['node_idx'] == pred_cause['node_idx'] and
+                    true_cause['type_idx'] == pred_cause['type_idx']):
+                    correct += 1
+                    break
+                    
+        return correct / len(top_predictions)
+        
+    def _evaluate_propagation_graph(self, propagation_graph):
+        """Evaluate accuracy of the propagation graph"""
+        # In a real implementation, you would compare against ground truth
+        # This is a placeholder implementation
+        if not propagation_graph:
+            return 0.0
+            
+        # Since we don't have ground truth for the propagation graph in this example,
+        # we'll return a synthetic metric based on graph connectivity
+        total_connections = 0
+        strong_connections = 0  # Connections with correlation > 0.5
+        
+        for node, connections in propagation_graph.items():
+            total_connections += len(connections)
+            for conn in connections:
+                if conn.get('correlation', 0) > 0.5:
+                    strong_connections += 1
+                    
+        # Return ratio of strong connections to total
+        return strong_connections / total_connections if total_connections > 0 else 0.0
 
     def get_available_models(self):
         """Get list of available models"""

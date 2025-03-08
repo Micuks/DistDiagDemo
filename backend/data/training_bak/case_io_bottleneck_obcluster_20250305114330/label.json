@@ -1,0 +1,7 @@
+{
+    "type": "io_bottleneck",
+    "node": "obcluster",
+    "start_time": "2025-03-05T11:43:30.379452",
+    "end_time": "2025-03-05T11:44:40.017481",
+    "metrics_count": 36
+}

@@ -262,10 +262,11 @@ async def get_active_anomalies():
 @router.get("/ranks", response_model=List[AnomalyRankResponse])
 @cache(expire=5)
 async def get_anomaly_ranks(response: Response):
-    """Get ranked list of potential anomalies"""
+    """Get ranked list of potential anomalies using time series metrics"""
     try:
-        metrics = metrics_service.get_metrics()
-        if not metrics or not metrics.get("metrics"):
+        # Get detailed metrics with time series data
+        metrics = metrics_service.get_detailed_metrics()
+        if not metrics:
             return JSONResponse(
                 content=[],
                 headers={
@@ -274,7 +275,9 @@ async def get_anomaly_ranks(response: Response):
                 }
             )
             
-        ranks = diagnosis_service.analyze_metrics(metrics["metrics"])
+        # Pass the detailed metrics directly to diagnosis service
+        # The diagnosis service's _process_metrics method will handle the time window processing
+        ranks = diagnosis_service.analyze_metrics(metrics)
         return JSONResponse(
             content=ranks,
             headers={

@@ -722,8 +722,10 @@ class TrainingService:
                         features = self._process_metrics(metrics_data)
                         if features is not None:
                             X.extend(features)
-                            y.extend([self._create_label_vector(label_data) for _ in range(len(features))])
-                            logger.info(f"Processed {len(features)} anomaly samples from {case_dir}")
+                            # Create labels for each feature
+                            for _ in range(len(features)):
+                                y.append(self._create_label_vector(label_data))
+                            logger.info(f"Processed {len(features)} samples from {case_dir} ({label_data.get('type', 'unknown')})")
                             
             except Exception as e:
                 logger.error(f"Error loading training data from {case_dir}: {str(e)}")
@@ -732,76 +734,72 @@ class TrainingService:
         if not X or not y:
             logger.warning("No valid training data found")
             return [], []
+        
+        # Convert to numpy arrays
+        X_array = np.array(X)
+        y_array = np.array(y)
+        
+        # Balance classes if needed
+        logger.info("Balancing dataset classes...")
+        
+        # Identify normal vs anomaly samples
+        # A sample is an anomaly if any of its label values is 1
+        is_anomaly = y_array.any(axis=1)
+        normal_indices = np.where(~is_anomaly)[0]
+        anomaly_indices = np.where(is_anomaly)[0]
+        
+        logger.info(f"Dataset composition before balancing: {len(normal_indices)} normal, " 
+                   f"{len(anomaly_indices)} anomaly samples")
+        
+        # If there are too many normal samples compared to anomalies, subsample them
+        if len(normal_indices) > len(anomaly_indices):
+            # Randomly select a subset of normal samples equal to the number of anomaly samples
+            np.random.shuffle(normal_indices)
+            selected_normal_indices = normal_indices[:len(anomaly_indices)]
             
-        logger.info(f"Total samples loaded: {len(X)}")
-        return np.array(X), np.array(y)
+            # Combine selected normal samples with all anomaly samples
+            balanced_indices = np.concatenate([selected_normal_indices, anomaly_indices])
+            np.random.shuffle(balanced_indices)  # Shuffle to mix normal and anomaly samples
+            
+            X_array = X_array[balanced_indices]
+            y_array = y_array[balanced_indices]
+            
+            logger.info(f"Balanced dataset: {len(X_array)} total samples "
+                       f"({len(selected_normal_indices)} normal, {len(anomaly_indices)} anomaly)")
+        
+        return X_array, y_array
 
     def _process_metrics(self, metrics_data: List[Dict]) -> List[np.ndarray]:
-        """Process raw metrics into feature vectors"""
+        """Process raw metrics into feature vectors using time window processing from diagnosis service"""
         if not metrics_data:
             logger.warning("No metrics data to process")
             return None
             
-        # Extract features from metrics
-        features = []
-        for entry in metrics_data:
-            metrics = entry["metrics"]
+        try:
+            # Get reference to diagnosis service
+            from app.services.diagnosis_service import diagnosis_service
             
-            # Process metrics for each node
-            for node_ip, node_metrics in metrics.items():
-                feature_vector = []
-                
+            # Extract features from metrics using diagnosis service's processor
+            features = []
+            for entry in metrics_data:
                 try:
-                    # CPU metrics
-                    cpu_metrics = node_metrics.get("cpu", {})
-                    if isinstance(cpu_metrics, dict) and "util" in cpu_metrics:
-                        feature_vector.extend([
-                            float(cpu_metrics.get("util", {}).get("latest", 0)),
-                            float(cpu_metrics.get("system", {}).get("latest", 0)),
-                            float(cpu_metrics.get("user", {}).get("latest", 0)),
-                            float(cpu_metrics.get("wait", {}).get("latest", 0))
-                        ])
-                    else:
-                        # Handle psutil format
-                        feature_vector.extend([
-                            float(cpu_metrics.get("latest", 0)),
-                            0, 0, 0  # No detailed CPU metrics in psutil
-                        ])
-                    
-                    # Memory metrics
-                    memory_metrics = node_metrics.get("memory", {})
-                    feature_vector.extend([
-                        float(memory_metrics.get("used", {}).get("latest", 0)),
-                        float(memory_metrics.get("free", {}).get("latest", 0)),
-                        float(memory_metrics.get("cach", {}).get("latest", 0))
-                    ])
-                    
-                    # IO metrics
-                    io_metrics = node_metrics.get("io", {}).get("aggregated", {})
-                    feature_vector.extend([
-                        float(io_metrics.get("rs", {}).get("latest", 0)),  # read ops
-                        float(io_metrics.get("ws", {}).get("latest", 0)),  # write ops
-                        float(io_metrics.get("util", {}).get("latest", 0))  # disk utilization
-                    ])
-                    
-                    # Network metrics
-                    network_metrics = node_metrics.get("network", {})
-                    feature_vector.extend([
-                        float(network_metrics.get("bytin", {}).get("latest", 0)),  # bytes in
-                        float(network_metrics.get("bytout", {}).get("latest", 0)), # bytes out
-                        float(network_metrics.get("pktin", {}).get("latest", 0))   # packets in
-                    ])
-                    
-                    features.append(np.array(feature_vector))
+                    # Process metrics using diagnosis service's time window processing
+                    feature_vector = diagnosis_service.diagnosis._process_metrics(entry["metrics"])
+                    if feature_vector is not None:
+                        features.append(feature_vector)
                 except Exception as e:
-                    logger.error(f"Error processing metrics for node {node_ip}: {str(e)}")
+                    logger.error(f"Error processing metrics entry: {str(e)}")
                     continue
+                    
+            if not features:
+                logger.warning("No valid feature vectors extracted from metrics data")
+                return None
                 
-        if not features:
-            logger.warning("No valid feature vectors extracted from metrics data")
-            return None
+            return features
             
-        return features
+        except Exception as e:
+            logger.error(f"Error in _process_metrics: {str(e)}")
+            return None
 
     def _create_label_vector(self, label_data: Dict) -> np.ndarray:
         """Create a label vector for the anomaly type"""
@@ -823,6 +821,11 @@ class TrainingService:
         label_vector = np.zeros(5)  # 5 basic types: cpu, io, network, cache, indexes
         
         anomaly_type = label_data.get("type")
+        
+        # Special handling for 'normal' samples - return zeros vector
+        if anomaly_type == "normal":
+            return label_vector
+            
         if anomaly_type in anomaly_types:
             label_vector[anomaly_types[anomaly_type]] = 1
             logger.debug(f"Created label vector for anomaly type {anomaly_type}: {label_vector}")

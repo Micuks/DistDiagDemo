@@ -2,11 +2,16 @@ from fastapi import APIRouter, HTTPException
 from app.services.diagnosis_service import DiagnosisService
 from fastapi.responses import JSONResponse
 import logging
+from typing import List
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 diagnosis_service = DiagnosisService()
+
+class CompareModelsRequest(BaseModel):
+    model_names: List[str] 
 
 @router.get("/list")
 async def list_models():
@@ -30,15 +35,3 @@ async def list_models():
                 "Access-Control-Allow-Credentials": "true"
             }
         )
-
-@router.get("/{model_name}/performance")
-async def get_model_performance(model_name: str):
-    """Get performance metrics for a specific model"""
-    try:
-        metrics = diagnosis_service.get_model_performance(model_name)
-        if not metrics:
-            raise HTTPException(status_code=404, detail="Model metrics not found")
-        return metrics
-    except Exception as e:
-        logger.error(f"Error getting model performance: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 

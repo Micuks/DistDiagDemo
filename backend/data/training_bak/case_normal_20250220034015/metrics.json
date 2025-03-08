@@ -1,0 +1,146 @@
+[
+    {
+        "timestamp": "latest",
+        "node": "10.244.2.15",
+        "metrics": {
+            "cpu": {
+                "cpu usage": 47.0,
+                "worker time": 2100024789916.0,
+                "cpu time": 39774490000.0
+            },
+            "memory": {
+                "active memstore used": 308281344.0,
+                "total memstore used": 306184192.0,
+                "memstore limit": 2147483640.0,
+                "memory usage": 3043622912.0,
+                "observer memory hold size": 4042887168.0
+            },
+            "io": {
+                "io read count": 350069.0,
+                "io read delay": 14083720217.0,
+                "io write count": 1724586.0,
+                "io write delay": 174958553355.0,
+                "palf write io count to disk": 1656646.0,
+                "palf write size to disk": 11983454208.0,
+                "clog trans log total size": 0.0
+            },
+            "network": {
+                "rpc packet in bytes": 13252260998.0,
+                "rpc packet out bytes": 11546112223.0,
+                "rpc deliver fail": 0.0,
+                "rpc net delay": 2019916955.0,
+                "rpc net frame delay": 8041774.0,
+                "mysql packet in bytes": 355242992.0,
+                "mysql packet out bytes": 239584.0,
+                "mysql deliver fail": 0.0
+            },
+            "transactions": {
+                "request queue time": 260933242.0,
+                "trans system trans count": 0.0,
+                "trans commit count": 231619.0,
+                "trans rollback count": 64.0,
+                "trans timeout count": 0.0,
+                "sql select count": 936056.0,
+                "sql update count": 0.0,
+                "active sessions": -1824824.0,
+                "sql fail count": 8611.0
+            }
+        }
+    },
+    {
+        "timestamp": "latest",
+        "node": "10.244.3.18",
+        "metrics": {
+            "cpu": {
+                "cpu usage": 41.0,
+                "worker time": 2099715334844.0,
+                "cpu time": 39218940000.0
+            },
+            "memory": {
+                "active memstore used": 329252864.0,
+                "total memstore used": 327155712.0,
+                "memstore limit": 2147483640.0,
+                "memory usage": 3028963328.0,
+                "observer memory hold size": 4012605440.0
+            },
+            "io": {
+                "io read count": 348769.0,
+                "io read delay": 13937348666.0,
+                "io write count": 1724844.0,
+                "io write delay": 175778805368.0,
+                "palf write io count to disk": 1656847.0,
+                "palf write size to disk": 11984277504.0,
+                "clog trans log total size": 0.0
+            },
+            "network": {
+                "rpc packet in bytes": 13224729746.0,
+                "rpc packet out bytes": 10905084129.0,
+                "rpc deliver fail": 31.0,
+                "rpc net delay": 2083298854.0,
+                "rpc net frame delay": 6845853.0,
+                "mysql packet in bytes": 331337326.0,
+                "mysql packet out bytes": 239872.0,
+                "mysql deliver fail": 0.0
+            },
+            "transactions": {
+                "request queue time": 263943543.0,
+                "trans system trans count": 0.0,
+                "trans commit count": 233732.0,
+                "trans rollback count": 64.0,
+                "trans timeout count": 0.0,
+                "sql select count": 811599.0,
+                "sql update count": 0.0,
+                "active sessions": -1839116.0,
+                "sql fail count": 8670.0
+            }
+        }
+    },
+    {
+        "timestamp": "latest",
+        "node": "10.244.1.12",
+        "metrics": {
+            "cpu": {
+                "cpu usage": 45.0,
+                "worker time": 2186173625447.0,
+                "cpu time": 68369750000.0
+            },
+            "memory": {
+                "active memstore used": 318767104.0,
+                "total memstore used": 316669952.0,
+                "memstore limit": 2147483640.0,
+                "memory usage": 3022565376.0,
+                "observer memory hold size": 4074455040.0
+            },
+            "io": {
+                "io read count": 574825.0,
+                "io read delay": 20841802209.0,
+                "io write count": 1738077.0,
+                "io write delay": 170076204872.0,
+                "palf write io count to disk": 1657514.0,
+                "palf write size to disk": 11987009536.0,
+                "clog trans log total size": 4999220591.0
+            },
+            "network": {
+                "rpc packet in bytes": 21068092730.0,
+                "rpc packet out bytes": 24017634345.0,
+                "rpc deliver fail": 21.0,
+                "rpc net delay": 7891460166.0,
+                "rpc net frame delay": 23509502.0,
+                "mysql packet in bytes": 1988574778.0,
+                "mysql packet out bytes": 89621960.0,
+                "mysql deliver fail": 0.0
+            },
+            "transactions": {
+                "request queue time": 2516827653.0,
+                "trans system trans count": 0.0,
+                "trans commit count": 1910963.0,
+                "trans rollback count": 8715.0,
+                "trans timeout count": 0.0,
+                "sql select count": 11152303.0,
+                "sql update count": 3475875.0,
+                "active sessions": 533760.0,
+                "sql fail count": 5862.0
+            }
+        }
+    }
+]

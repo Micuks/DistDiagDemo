@@ -1,16 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Button, Space, Table, message, Row, Col, Progress, Select } from 'antd';
+import { Card, Button, Space, Table, message, Row, Col, Select } from 'antd';
 import { workloadService } from '../services/workloadService';
 
 const WorkloadControlPanel = () => {
     const [activeWorkloads, setActiveWorkloads] = useState([]);
     const [loading, setLoading] = useState(false);
     const [selectedWorkload, setSelectedWorkload] = useState(null);
-    const [systemMetrics, setSystemMetrics] = useState({
-        cpu_usage: 0,
-        memory_usage: 0,
-        disk_usage: 0
-    });
 
     const workloadOptions = [
         { value: 'sysbench', label: 'Sysbench OLTP' },
@@ -118,11 +113,6 @@ const WorkloadControlPanel = () => {
         try {
             const data = await workloadService.getActiveWorkloads();
             setActiveWorkloads(data.workloads || []);
-            setSystemMetrics(data.systemMetrics || {
-                cpu_usage: 0,
-                memory_usage: 0,
-                disk_usage: 0
-            });
         } catch (err) {
             message.error(err.message || 'Failed to fetch active workloads');
         }
@@ -168,24 +158,6 @@ const WorkloadControlPanel = () => {
                     </Col>
                 </Row>
 
-                {activeWorkloads.length > 0 && (
-                    <Card title="System Metrics" size="small" style={{ marginTop: 16 }}>
-                        <Row gutter={16}>
-                            <Col span={8}>
-                                <div>CPU Usage</div>
-                                <Progress percent={Math.round(systemMetrics.cpu_usage)} status="active" />
-                            </Col>
-                            <Col span={8}>
-                                <div>Memory Usage</div>
-                                <Progress percent={Math.round(systemMetrics.memory_usage)} status="active" />
-                            </Col>
-                            <Col span={8}>
-                                <div>Disk Usage</div>
-                                <Progress percent={Math.round(systemMetrics.disk_usage)} status="active" />
-                            </Col>
-                        </Row>
-                    </Card>
-                )}
                 {activeWorkloads.length > 0 && (
                     <>
                         <Button

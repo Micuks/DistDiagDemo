@@ -848,7 +848,7 @@ const MetricsPanel = () => {
             );
         }
 
-        const suffix = getMetricSuffix(category, metric);
+        const suffix = getMetricSuffix(category, metric, pointData);
 
         // Don't include lastUpdated in the key to prevent complete re-renders when data refreshes
         // Instead, use a stable key based on the chart's identity

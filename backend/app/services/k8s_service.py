@@ -174,7 +174,7 @@ class K8sService:
         """Delete a specific chaos mesh experiment with optimized retries"""
         try:
             # Special handling for cache bottleneck
-            if anomaly_type == "cache_stress":
+            if anomaly_type == "cache_bottleneck":
                 # Restore default memstore_limit_percentage
                 await self._update_ob_parameter({
                     "memstore_limit_percentage": "0"  # Restore default value 0
@@ -191,43 +191,43 @@ class K8sService:
                 tpcc_drop_commands = [
                     "USE tpcc",
                     # Drop customer table indexes
-                    "DROP INDEX IF EXISTS idx_customer_1 ON customer",
-                    "DROP INDEX IF EXISTS idx_customer_2 ON customer",
-                    "DROP INDEX IF EXISTS idx_customer_3 ON customer",
-                    "DROP INDEX IF EXISTS idx_customer_4 ON customer",
-                    "DROP INDEX IF EXISTS idx_customer_5 ON customer",
+                    "DROP INDEX idx_customer_1 ON customer",
+                    "DROP INDEX idx_customer_2 ON customer",
+                    "DROP INDEX idx_customer_3 ON customer",
+                    "DROP INDEX idx_customer_4 ON customer",
+                    "DROP INDEX idx_customer_5 ON customer",
                     # Drop district table indexes
-                    "DROP INDEX IF EXISTS idx_district_1 ON district",
-                    "DROP INDEX IF EXISTS idx_district_2 ON district",
-                    "DROP INDEX IF EXISTS idx_district_3 ON district",
+                    "DROP INDEX idx_district_1 ON district",
+                    "DROP INDEX idx_district_2 ON district",
+                    "DROP INDEX idx_district_3 ON district",
                     # Drop history table indexes
-                    "DROP INDEX IF EXISTS idx_history_1 ON history",
-                    "DROP INDEX IF EXISTS idx_history_2 ON history",
-                    "DROP INDEX IF EXISTS idx_history_3 ON history",
+                    "DROP INDEX idx_history_1 ON history",
+                    "DROP INDEX idx_history_2 ON history",
+                    "DROP INDEX idx_history_3 ON history",
                     # Drop item table indexes
-                    "DROP INDEX IF EXISTS idx_item_1 ON item",
-                    "DROP INDEX IF EXISTS idx_item_2 ON item",
-                    "DROP INDEX IF EXISTS idx_item_3 ON item",
+                    "DROP INDEX idx_item_1 ON item",
+                    "DROP INDEX idx_item_2 ON item",
+                    "DROP INDEX idx_item_3 ON item",
                     # Drop new_orders table indexes
-                    "DROP INDEX IF EXISTS idx_new_orders_1 ON new_orders",
-                    "DROP INDEX IF EXISTS idx_new_orders_2 ON new_orders",
+                    "DROP INDEX idx_new_orders_1 ON new_orders",
+                    "DROP INDEX idx_new_orders_2 ON new_orders",
                     # Drop order_line table indexes
-                    "DROP INDEX IF EXISTS idx_order_line_1 ON order_line",
-                    "DROP INDEX IF EXISTS idx_order_line_2 ON order_line",
-                    "DROP INDEX IF EXISTS idx_order_line_3 ON order_line",
-                    "DROP INDEX IF EXISTS idx_order_line_4 ON order_line",
+                    "DROP INDEX idx_order_line_1 ON order_line",
+                    "DROP INDEX idx_order_line_2 ON order_line",
+                    "DROP INDEX idx_order_line_3 ON order_line",
+                    "DROP INDEX idx_order_line_4 ON order_line",
                     # Drop orders table indexes
-                    "DROP INDEX IF EXISTS idx_orders_1 ON orders",
-                    "DROP INDEX IF EXISTS idx_orders_2 ON orders",
-                    "DROP INDEX IF EXISTS idx_orders_3 ON orders",
-                    "DROP INDEX IF EXISTS idx_orders_4 ON orders",
+                    "DROP INDEX idx_orders_1 ON orders",
+                    "DROP INDEX idx_orders_2 ON orders",
+                    "DROP INDEX idx_orders_3 ON orders",
+                    "DROP INDEX idx_orders_4 ON orders",
                     # Drop stock table indexes
-                    "DROP INDEX IF EXISTS idx_stock_1 ON stock",
-                    "DROP INDEX IF EXISTS idx_stock_2 ON stock",
-                    "DROP INDEX IF EXISTS idx_stock_3 ON stock",
+                    "DROP INDEX idx_stock_1 ON stock",
+                    "DROP INDEX idx_stock_2 ON stock",
+                    "DROP INDEX idx_stock_3 ON stock",
                     # Drop warehouse table indexes
-                    "DROP INDEX IF EXISTS idx_warehouse_1 ON warehouse",
-                    "DROP INDEX IF EXISTS idx_warehouse_2 ON warehouse"
+                    "DROP INDEX idx_warehouse_1 ON warehouse",
+                    "DROP INDEX idx_warehouse_2 ON warehouse"
                 ]
                 
                 sbtest_drop_commands = [
@@ -238,9 +238,9 @@ class K8sService:
                 # Generate drop commands for all sbtest tables (1-10)
                 for i in range(1, 11):
                     sbtest_drop_commands.extend([
-                        f"DROP INDEX IF EXISTS idx_sbtest{i}_1 ON sbtest{i}",
-                        f"DROP INDEX IF EXISTS idx_sbtest{i}_2 ON sbtest{i}",
-                        f"DROP INDEX IF EXISTS idx_sbtest{i}_3 ON sbtest{i}"
+                        f"DROP INDEX idx_sbtest{i}_1 ON sbtest{i}",
+                        f"DROP INDEX idx_sbtest{i}_2 ON sbtest{i}",
+                        f"DROP INDEX idx_sbtest{i}_3 ON sbtest{i}"
                     ])
                 
                 # Combine all drop commands
@@ -794,11 +794,6 @@ class K8sService:
             conn.commit()
             conn.close()
             
-            # Track the SQL commands for cleanup
-            if "sql_commands" not in self.active_anomalies:
-                self.active_anomalies["sql_commands"] = []
-            self.active_anomalies["sql_commands"].extend(commands)
-            
             logger.info(f"Successfully executed SQL commands")
             
         except Exception as e:
@@ -809,7 +804,7 @@ class K8sService:
         """Apply a chaos mesh experiment based on the anomaly type with optimized retries"""
         try:
             # Special handling for cache bottleneck
-            if anomaly_type == "cache_stress":
+            if anomaly_type == "cache_bottleneck":
                 # Update memstore_limit_percentage
                 await self._update_ob_parameter({
                     "memstore_limit_percentage": "20"  # Reduce from default 0
@@ -856,12 +851,12 @@ class K8sService:
                         "selector": {
                             "namespaces": [self.namespace],
                             "labelSelectors": {"ref-obcluster": "obcluster"}
-                        }
+                        },
+                        "sqlCommands": sql_commands
                     }
                 }
                 
-                # Track the experiment
-                experiment_name = experiment["metadata"]["name"]
+                # Track the experiment with SQL commands included
                 target = experiment["spec"]["selector"]["labelSelectors"].get("ref-obcluster", "obcluster")
                 self.active_anomalies[experiment_name] = {
                     "start_time": datetime.now().isoformat(),
@@ -869,7 +864,8 @@ class K8sService:
                     "type": anomaly_type,
                     "name": experiment_name,
                     "target": target,
-                    "node": target
+                    "node": target,
+                    "sql_commands": sql_commands
                 }
                 
                 logger.info(f"Created {anomaly_type} experiment {experiment_name}")
@@ -885,7 +881,7 @@ class K8sService:
             experiment_name = experiment["metadata"]["name"]
             
             # Only create chaos mesh experiment for non-special cases
-            if anomaly_type not in ["cache_stress", "too_many_indexes"]:
+            if anomaly_type not in ["cache_bottleneck", "too_many_indexes"]:
                 # Create experiment with retry logic
                 max_retries = 5
                 retry_delay = 2

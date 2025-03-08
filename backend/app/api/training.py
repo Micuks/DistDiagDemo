@@ -185,22 +185,39 @@ async def get_collection_status():
 
 @router.post("/train")
 async def train_model():
-    """Train the anomaly detection model."""
+    """Train the anomaly detection model using existing collected data."""
     try:
-        # Get training data
+        logger.info("Starting model training process with existing collected data")
+        
+        # Temporarily disable workload check to ensure training can proceed
+        metrics_service.set_check_workload_active(False)
+        
+        # Get training data from disk (not from current metrics collection)
         X, y = training_service.get_training_data()
         if len(X) == 0 or len(y) == 0:
-            raise HTTPException(status_code=400, detail="No training data available")
+            logger.error("No training data available in the dataset")
+            raise HTTPException(status_code=400, detail="No training data available in the dataset")
             
         # Get access to diagnosis service
         from app.services.diagnosis_service import DiagnosisService
         diagnosis_service = DiagnosisService()
-            
-        # Train the model
-        diagnosis_service.train(X, y)
-        return {"status": "success", "message": "Model trained successfully"}
+        
+        # Train the model with the collected data
+        result = diagnosis_service.train(X, y)
+        logger.info(f"Model training completed successfully: {result['model_name']}")
+        
+        # Restore workload check setting
+        metrics_service.set_check_workload_active(True)
+        
+        return {
+            "status": "success", 
+            "message": "Model trained successfully", 
+            "model": result['model_name']
+        }
     except Exception as e:
         logger.error(f"Failed to train model: {str(e)}")
+        # Ensure workload check is restored even on error
+        metrics_service.set_check_workload_active(True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/reset")

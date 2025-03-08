@@ -60,7 +60,7 @@ const AnomalyControlPanel = () => {
             key: 'status',
             render: (status) => (
                 <Tag color={status === 'active' ? 'green' : 'red'}>
-                    {status.toUpperCase()}
+                    {String(status).toUpperCase()}
                 </Tag>
             )
         },

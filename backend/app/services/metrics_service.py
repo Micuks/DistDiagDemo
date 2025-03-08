@@ -1007,18 +1007,38 @@ class MetricsService:
         return result
 
     def set_workload_active(self, active: bool):
-        """Set the workload active state to control metrics flow to training service."""
-        previous_state = self.workload_active
+        """Set whether a workload is currently active"""
         self.workload_active = active
-        logger.info(f"Workload active state changed from {previous_state} to {active}")
-        return {"status": "success", "previous_state": previous_state, "current_state": active}
-
+        logger.info(f"Workload active status set to: {active}")
+        
     def toggle_send_to_training(self, enabled: bool):
-        """Enable or disable sending metrics to training service."""
-        previous_state = self.send_to_training
+        """Toggle whether metrics should be sent to training"""
         self.send_to_training = enabled
-        logger.info(f"Send metrics to training changed from {previous_state} to {enabled}")
-        return {"status": "success", "previous_state": previous_state, "current_state": enabled}
+        logger.info(f"Send to training set to: {enabled}")
+        
+    def set_check_workload_active(self, check: bool):
+        """Set whether to check for active workload before sending to training"""
+        self.check_workload_active = check
+        logger.info(f"Check workload active before training set to: {check}")
+        
+    def _send_metrics_to_training(self, metrics: Dict[str, Any]) -> None:
+        """Send metrics to training service if configured to do so."""
+        # Only send metrics if enabled and either not checking workload or workload is active
+        if (self.send_to_training and 
+            (not self.check_workload_active or self.workload_active)):
+            
+            try:
+                from app.services.training_service import training_service
+                asyncio.create_task(training_service.add_metrics(metrics))
+            except Exception as e:
+                logger.error(f"Failed to send metrics to training: {str(e)}")
+        else:
+            logger.info(
+                f"Not sending metrics to training service due to configuration or workload state: "
+                f"send_to_training={self.send_to_training}, "
+                f"check_workload_active={self.check_workload_active}, "
+                f"workload_active={self.workload_active}"
+            )
 
 # Create a singleton instance
 metrics_service = MetricsService()

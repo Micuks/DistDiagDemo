@@ -180,9 +180,9 @@ const ModelTrainingPanel = () => {
                     </Select.Option>
                   ))}
                 </Select>
-                {selectedModel && (
+                {/*{selectedModel && (
                   <ModelPerformanceView modelName={selectedModel} />
-                )}
+                )}*/}
               </Space>
             </Col>
           </Row>
