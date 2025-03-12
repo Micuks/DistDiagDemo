@@ -39,7 +39,6 @@ const { TabPane } = Tabs;
 
 const RanksPanel = () => {
   const [loading, setLoading] = useState(false);
-  const [anomalyRanks, setAnomalyRanks] = useState([]);
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModels, setSelectedModels] = useState([]);
   const [comparisonLoading, setComparisonLoading] = useState(false);
@@ -124,24 +123,21 @@ const RanksPanel = () => {
       width: 150,
       render: (type) => {
         let color = "default";
-        switch (type?.toLowerCase()) {
-          case "cpu":
-          case "cpu_bottleneck":
+        const lowerType = type?.toLowerCase();
+        switch (true) {
+          case lowerType?.includes('cpu'):
             color = "red";
             break;
-          case "io":
-          case "io_bottleneck":
+          case lowerType?.includes('io'):
             color = "orange";
             break;
-          case "network":
-          case "network_bottleneck":
+          case lowerType?.includes('network'):
             color = "green";
             break;
-          case "cache":
-          case "cache_bottleneck":
+          case lowerType?.includes('cache'):
             color = "blue";
             break;
-          case "too many indexes":
+          case lowerType?.includes('index'):
             color = "purple";
             break;
           default:
@@ -156,34 +152,16 @@ const RanksPanel = () => {
     },
   ];
 
-  const fetchAnomalyRanks = async () => {
-    try {
-      setLoading(true);
-      const ranks = await anomalyService.getAnomalyRanks();
-      setAnomalyRanks(ranks);
-
-      // Extract unique nodes from the ranks data
-      if (ranks && ranks.length > 0) {
-        const uniqueNodes = [...new Set(ranks.map((rank) => rank.node))];
-        setNodeData(uniqueNodes.map((node) => ({ node })));
-      }
-    } catch (error) {
-      console.error("Error fetching anomaly ranks:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const fetchAvailableModels = async () => {
     try {
       const models = await anomalyService.getAvailableModels();
-      setAvailableModels(models);
+      // Filter out any models with null or undefined names
+      const validModels = models.filter(model => model !== null && ((typeof model === 'string' && model !== '') || (typeof model === 'object' && model.name !== '')));
+      setAvailableModels(validModels);
 
-      // Default select the first two models
-      if (models.length >= 2) {
-        setSelectedModels([models[0].name, models[1].name]);
-      } else if (models.length === 1) {
-        setSelectedModels([models[0].name]);
+      // Default select the first model if available
+      if (validModels.length > 0) {
+        setSelectedModels([validModels[0]]);
       }
     } catch (error) {
       console.error("Error fetching available models:", error);
@@ -191,42 +169,75 @@ const RanksPanel = () => {
   };
 
   const handleCompareModels = async () => {
-    if (selectedModels.length !== 2) {
-      setComparisonError("Please select exactly 2 models to compare.");
+    if (selectedModels.length === 0) {
+      setComparisonError("Please select at least one model to analyze.");
       return;
     }
 
     try {
       setComparisonError(null);
       setComparisonLoading(true);
-      const comparisonResult = await anomalyService.compareModels(
-        selectedModels
-      );
-      setComparisonData(comparisonResult);
+      const response = await anomalyService.compareModels(selectedModels);
+      
+      // Check for model-specific errors and show them as warnings
+      const modelErrors = [];
+      selectedModels.forEach(model => {
+        if (response[model] && response[model].error) {
+          modelErrors.push(`${model}: ${response[model].error}`);
+        }
+      });
+      
+      if (modelErrors.length > 0) {
+        // Show model errors as a warning
+        setComparisonError(`Some models had errors: ${modelErrors.join('; ')}`);
+      }
+      
+      // Response contains the data directly
+      setComparisonData(response);
 
       // Create RCA comparison columns dynamically based on selected models
       const newColumns = [...initialRcaComparisonColumns];
 
       // Add model-specific columns
       selectedModels.forEach((model, index) => {
-        const baseColor = `hsl(${index * 180}, 70%, 50%)`;
+        // Always add column even if model has errors - we'll show placeholder data
+        const baseColor = `hsl(${(index * 360) / selectedModels.length}, 70%, 50%)`;
+        const hasError = response[model] && response[model].error;
 
         // Root Cause column for this model
         newColumns.push({
-          title: `${model} Root Cause`,
-          dataIndex: `${model}_rootCause`,
-          key: `${model}_rootCause`,
-          width: 160,
-          render: (text) => text || <Text type="secondary">None detected</Text>,
+          title: (
+            <span>
+              {model} Root Cause
+              {hasError && <Tag color="red" style={{ marginLeft: 5 }}>Error</Tag>}
+            </span>
+          ),
+          dataIndex: `${model}_root_cause`,
+          key: `${model}_root_cause`,
+          width: 150,
+          render: (text) => (
+            <Text style={{ 
+              color: hasError ? '#999' : baseColor, 
+              fontWeight: hasError ? 'normal' : 'bold' 
+            }}>
+              {text}
+            </Text>
+          ),
         });
 
-        // Confidence Score column for this model
+        // Confidence column for this model
         newColumns.push({
-          title: `${model} Confidence`,
+          title: (
+            <span>
+              {model} Confidence
+              {hasError && <Tag color="red" style={{ marginLeft: 5 }}>Error</Tag>}
+            </span>
+          ),
           dataIndex: `${model}_confidence`,
           key: `${model}_confidence`,
           width: 130,
           render: (score) => {
+            if (hasError) return <Text type="secondary">N/A</Text>;
             if (!score && score !== 0) return <Text type="secondary">N/A</Text>;
 
             const percent = Math.round(score * 100);
@@ -241,7 +252,7 @@ const RanksPanel = () => {
                 percent={percent}
                 size="small"
                 strokeColor={color}
-                style={{ marginRight: 8 }}
+                format={(percent) => `${percent}%`}
               />
             );
           },
@@ -250,47 +261,53 @@ const RanksPanel = () => {
 
       setRcaComparisonColumns(newColumns);
 
-      // Get all unique nodes from the comparison result
-      const allNodes = new Set();
+      // Prepare rows for RCA comparison table
+      // First, collect all unique nodes across all models
+      const uniqueNodes = new Set();
       
-      // If we have structured root_causes data, use it to populate node list
+      // Only iterate through models that exist in the response
       selectedModels.forEach(model => {
-        if (comparisonResult[model]?.root_causes) {
-          comparisonResult[model].root_causes.forEach(rc => {
-            if (rc.node) allNodes.add(rc.node);
+        if (response[model] && Array.isArray(response[model].ranks)) {
+          response[model].ranks.forEach(rank => {
+            if (rank && rank.node) {
+              uniqueNodes.add(rank.node);
+            }
           });
         }
       });
-      
-      // If no nodes found in root_causes, try to use the sample nodes
-      if (allNodes.size === 0) {
-        // Use any nodes we might have from anomaly ranks
-        if (nodeData && nodeData.length > 0) {
-          nodeData.forEach(node => allNodes.add(node.node));
-        } else {
-          // Fallback to some default nodes
-          ["zone1","zone2","zone3"].forEach(node => allNodes.add(node));
-        }
+
+      // If no nodes found, add a default node for displaying model errors
+      if (uniqueNodes.size === 0) {
+        uniqueNodes.add("No data available");
       }
 
-      // Build the table data with per-node results
-      const tableData = Array.from(allNodes).map((node) => {
-        const rowData = {
-          key: node,
-          node: node,
-          anomalyType: getNodeAnomalyType(node),
-        };
+      // Create a row for each unique node
+      const rows = Array.from(uniqueNodes).map(node => {
+        const row = { node, anomalyType: getNodeAnomalyType(node) };
 
         // Add data for each model
-        selectedModels.forEach((model) => {
-          rowData[`${model}_rootCause`] = getModelRootCause(model, node);
-          rowData[`${model}_confidence`] = getModelConfidence(model, node);
+        selectedModels.forEach(model => {
+          const hasError = response[model] && response[model].error;
+          
+          if (hasError) {
+            // If model has an error, show that in the row
+            row[`${model}_root_cause`] = "Error: " + response[model].error;
+            row[`${model}_confidence`] = null;
+          } else if (response[model]) {
+            // Normal case - get data from the model
+            row[`${model}_root_cause`] = getModelRootCause(model, node);
+            row[`${model}_confidence`] = getModelConfidence(model, node);
+          } else {
+            // Model not in response at all
+            row[`${model}_root_cause`] = "Model data unavailable";
+            row[`${model}_confidence`] = null;
+          }
         });
 
-        return rowData;
+        return row;
       });
 
-      setRcaComparisonData(tableData);
+      setRcaComparisonData(rows);
     } catch (error) {
       console.error("Error comparing models:", error);
       setComparisonError(`Failed to compare models: ${error.message}`);
@@ -299,100 +316,71 @@ const RanksPanel = () => {
     }
   };
 
-  // Helper function to get anomaly type for a node
+  // Helper function to get the anomaly type for a node
   const getNodeAnomalyType = (nodeName) => {
-    const nodeRanks = anomalyRanks.filter((rank) => rank.node === nodeName);
-
-    if (nodeRanks.length === 0) return null;
-
-    // Get the highest confidence anomaly
-    const highestConfidenceAnomaly = nodeRanks.reduce(
-      (highest, current) => (current.score > highest.score ? current : highest),
-      nodeRanks[0]
-    );
-
-    return highestConfidenceAnomaly.type;
-  };
-
-  // Helper function to get model root cause from comparison data
-  const getModelRootCause = (model, node) => {
-    if (!comparisonData || !comparisonData[model]) return null;
-
-    // If we have structured RCA data from backend
-    if (comparisonData[model].root_causes && Array.isArray(comparisonData[model].root_causes)) {
-      // Find root cause for this node
-      const nodeRootCause = comparisonData[model].root_causes.find(
-        rc => rc.node === node || rc.node_id === node
+    if (!comparisonData || !nodeName) return "Normal";
+    
+    // Check each model's results for this node's anomaly type
+    for (const model of selectedModels) {
+      if (!comparisonData[model] || !comparisonData[model].ranks) continue;
+      
+      const nodeData = comparisonData[model].ranks.find(
+        rank => rank && rank.node === nodeName
       );
       
-      if (nodeRootCause) {
-        return nodeRootCause.cause || nodeRootCause.type || "Unknown issue";
+      if (nodeData && nodeData.type && nodeData.score > 1) {
+        return nodeData.type;
       }
     }
     
-    // Fallback: use prediction precision as an indicator
-    const precision = comparisonData[model].rca_precision;
-    if (precision && precision > 0.7) {
-      // Generate plausible root causes based on node name
-      if (node.includes('db') || node.includes('sql')) {
-        return "Database bottleneck";
-      } else if (node.includes('web') || node.includes('ui')) {
-        return "Frontend slowdown";
-      } else if (node.includes('cache')) {
-        return "Cache miss rate";
-      } else {
-        return "Resource contention";
-      }
-    }
-    
-    return "Insufficient data";
+    return "Normal";
   };
 
-  const getModelConfidence = (model, node) => {
-    if (!comparisonData || !comparisonData[model]) return null;
+  // Helper function to get the root cause for a node from a specific model
+  const getModelRootCause = (model, node) => {
+    if (!comparisonData || !comparisonData[model] || !node) return "No data";
+    
+    // First check if we have direct rank data for this node
+    if (comparisonData[model].ranks && Array.isArray(comparisonData[model].ranks)) {
+      const rankData = comparisonData[model].ranks.find(
+        rank => rank && rank.node === node
+      );
+      
+      if (rankData && rankData.type) {
+        return rankData.type;
+      }
+    }
+    
+    return "Normal";
+  };
 
-    // If we have structured confidence data from backend
-    if (comparisonData[model].confidences && typeof comparisonData[model].confidences === 'object') {
-      const nodeConfidence = comparisonData[model].confidences[node];
-      if (nodeConfidence !== undefined) {
-        return nodeConfidence;
+  // Helper function to get confidence score for a node from a specific model
+  const getModelConfidence = (model, node) => {
+    if (!comparisonData || !comparisonData[model] || !node) return null;
+
+    // Check ranks data first for node-specific confidence
+    if (comparisonData[model].ranks && Array.isArray(comparisonData[model].ranks)) {
+      const rankData = comparisonData[model].ranks.find(
+        rank => rank && rank.node === node
+      );
+      
+      if (rankData && rankData.score !== undefined) {
+        return rankData.score / 100; // Convert to decimal for consistency
       }
     }
     
     // Fallback to model's overall precision
-    return comparisonData[model].rca_precision || 
-           comparisonData[model].accuracy || 
-           comparisonData[model].detection_rate || 0.5;
+    return comparisonData[model].rca_precision || 0.5;
   };
 
   const handleModelSelectionChange = (values) => {
-    // Limit to exactly 2 models
+    // Filter out null and undefined values
     const filteredValues = values.filter(
       (value) => value !== null && value !== undefined
     );
-
-    // If more than 2 models are selected, only keep the most recent 2
-    if (filteredValues.length > 2) {
-      // Get the two most recently added models
-      const newModels = filteredValues
-        .filter((model) => !selectedModels.includes(model))
-        .slice(-1); // Take the last one added
-
-      // Keep one of the previously selected models if only one new model was added
-      let modelsToKeep;
-      if (newModels.length === 0) {
-        // No new models, keep first two
-        modelsToKeep = filteredValues.slice(0, 2);
-      } else if (newModels.length === 1) {
-        // One new model, keep it plus the first previously selected model
-        modelsToKeep = [selectedModels[0], newModels[0]];
-      } else {
-        // Multiple new models, keep the two most recent
-        modelsToKeep = newModels.slice(-2);
-      }
-
-      setSelectedModels(modelsToKeep);
-    } else {
+    
+    // Only update if at least one model is selected
+    if (filteredValues.length > 0) {
       setSelectedModels(filteredValues);
     }
   };
@@ -404,14 +392,11 @@ const RanksPanel = () => {
   const [rcaComparisonData, setRcaComparisonData] = useState([]);
 
   useEffect(() => {
-    fetchAnomalyRanks();
     fetchAvailableModels();
-    const interval = setInterval(fetchAnomalyRanks, 5000);
-    return () => clearInterval(interval);
   }, []);
 
   return (
-    <Card title="Per-Node RCA Diagnosis Comparison" bordered={false}>
+    <Card title="Per-Node RCA Diagnosis Results" bordered={false}>
       {/* Model Selection Controls */}
       <div style={{ marginBottom: 16 }}>
         <Row gutter={16} align="middle">
@@ -419,22 +404,19 @@ const RanksPanel = () => {
             <Select
               mode="multiple"
               style={{ width: '100%' }}
-              placeholder="Select models to compare (max 2)"
+              placeholder="Select models to analyze"
               value={selectedModels}
               onChange={handleModelSelectionChange}
               optionLabelProp="label"
             >
               {availableModels.map((model) => (
-                <Option key={model.name} value={model.name} label={model.name}>
+                <Option 
+                  key={model || `model-${Math.random()}`} 
+                  value={model || ""}
+                  label={model || "Unknown model"}
+                >
                   <div>
-                    <Text>{model.name}</Text>
-                    {model.description && (
-                      <div>
-                        <Text type="secondary" style={{ fontSize: '0.8em' }}>
-                          {model.description}
-                        </Text>
-                      </div>
-                    )}
+                    <Text>{model || "Unknown model"}</Text>
                   </div>
                 </Option>
               ))}
@@ -445,9 +427,9 @@ const RanksPanel = () => {
               type="primary"
               onClick={handleCompareModels}
               loading={comparisonLoading}
-              disabled={selectedModels.length !== 2}
+              disabled={selectedModels.length === 0}
             >
-              Compare RCA
+              Analyze Models
             </Button>
           </Col>
         </Row>
@@ -474,8 +456,8 @@ const RanksPanel = () => {
         />
       ) : (
         <Empty
-          description="Select exactly 2 models and click Compare RCA to view results"
-          style={{ margin: "40px 0" }}
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="Select one or more models and click Analyze Models to view results"
         />
       )}
     </Card>

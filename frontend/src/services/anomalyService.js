@@ -249,24 +249,13 @@ class AnomalyService {
     }
 
     async compareModels(modelNames) {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/models/compare`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
+        return this._retryableRequest(() => 
+            this.client.get('/api/models/ranks', {
+                params: {
+                    model_names: modelNames
                 },
-                body: JSON.stringify({ model_names: modelNames })
-            });
-            
-            if (!response.ok) {
-                throw new Error(`Error comparing models: ${response.statusText}`);
-            }
-            
-            return await response.json();
-        } catch (error) {
-            console.error('Error comparing models:', error);
-            throw error;
-        }
+            })
+        )
     }
 
     async startAnomalyCollection(type, node) {

@@ -15,6 +15,8 @@ const ModelTrainingPanel = () => {
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(null);
   const { data: activeAnomalies = [] } = useAnomalyData();
+  const [isTraining, setIsTraining] = useState(false);
+  const [isCollectionToggling, setIsCollectionToggling] = useState(false);
 
   // Fetch available models
   useEffect(() => {
@@ -63,31 +65,52 @@ const ModelTrainingPanel = () => {
   }, []);
 
   const handleCollectionToggle = async () => {
+    if (isCollectionToggling) return;
+    
     try {
+      setIsCollectionToggling(true);
       setLoading(true);
+      
+      let response;
+      
       if (collectionStatus.isCollecting) {
         // Stop collection based on current type
         if (collectionStatus.currentType === "normal") {
-          await trainingService.stopNormalCollection();
+          response = await trainingService.stopNormalCollection();
         } else {
           // We're no longer using postCollect option
-          await trainingService.stopAnomalyCollection(true);
+          response = await trainingService.stopAnomalyCollection(true);
         }
-        message.success("Successfully stopped data collection");
+        
+        if (response && response.status === 'pending') {
+          message.warning(response.message || "No collection in progress to stop");
+        } else {
+          message.success("Successfully stopped data collection");
+        }
       } else {
         // Start collection based on presence of anomalies
         if (activeAnomalies.length > 0) {
           const activeAnomaly = activeAnomalies[0];
           // Start collection for existing anomaly without injecting new one
-          const response = await trainingService.startAnomalyCollection(
+          response = await trainingService.startAnomalyCollection(
             activeAnomaly.type,
             activeAnomaly.node
           );
-          console.log("Start anomaly collection response:", response);
-          message.success(`Started data collection for ${activeAnomaly.type}`);
+          
+          if (response && response.status === 'pending') {
+            message.warning(response.message || "Collection already in progress");
+          } else {
+            console.log("Start anomaly collection response:", response);
+            message.success(`Started data collection for ${activeAnomaly.type}`);
+          }
         } else {
-          await trainingService.startNormalCollection();
-          message.success("Started normal data collection");
+          response = await trainingService.startNormalCollection();
+          
+          if (response && response.status === 'pending') {
+            message.warning(response.message || "Normal collection already in progress");
+          } else {
+            message.success("Started normal data collection");
+          }
         }
       }
 
@@ -102,22 +125,32 @@ const ModelTrainingPanel = () => {
       console.error(error);
     } finally {
       setLoading(false);
+      setIsCollectionToggling(false);
     }
   };
 
   const handleAutoBalance = async () => {
+    if (isAutoBalancing) return;
+    
     try {
+      setIsAutoBalancing(true);
       setLoading(true);
-      await trainingService.autoBalanceDataset(!isAutoBalancing);
-      setIsAutoBalancing(!isAutoBalancing);
-      message.success(
-        `${!isAutoBalancing ? "Enabled" : "Disabled"} auto-balancing`
-      );
+      
+      message.info('Auto-balancing dataset...');
+      const response = await trainingService.autoBalanceDataset();
+      
+      if (response && response.success) {
+        message.success('Dataset balanced successfully');
+        fetchTrainingStats();
+      } else {
+        message.error('Failed to balance dataset');
+      }
     } catch (error) {
-      message.error("Failed to toggle auto-balancing");
+      message.error('Failed to balance dataset');
       console.error(error);
     } finally {
       setLoading(false);
+      setIsAutoBalancing(false);
     }
   };
 
@@ -136,7 +169,11 @@ const ModelTrainingPanel = () => {
     };
 
     const handleTrainModel = async () => {
+        // Don't allow multiple simultaneous requests
+        if (isTraining) return;
+        
         try {
+            setIsTraining(true);
             setLoading(true);
             message.info('Training model with collected data...');
             
@@ -148,16 +185,20 @@ const ModelTrainingPanel = () => {
                 const models = await trainingService.getAvailableModels();
                 setAvailableModels(models);
                 if (models.length > 0) {
-                    setSelectedModel(models[0]);
+                    setSelectedModel(models[0].name);
                 }
+            } else if (response && response.status === 'pending') {
+                // Handle the case where training is already in progress
+                message.warning(response.message || 'Training is already in progress');
             } else {
-                message.error('Failed to train model: ' + (response?.message || 'Unknown error'));
+                message.error('Failed to train model');
             }
         } catch (error) {
             console.error("Error training model", error);
             message.error(`Failed to train model: ${error.message}`);
         } finally {
             setLoading(false);
+            setIsTraining(false);
         }
     };
 

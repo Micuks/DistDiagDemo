@@ -4,9 +4,21 @@ from pydantic import BaseModel
 import logging
 from app.services.training_service import training_service
 from app.services.metrics_service import metrics_service
+import threading
+import asyncio
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Add global variables for tracking training state
+_training_in_progress = False
+_training_lock = asyncio.Lock()
+
+# Add global variables for tracking collection state
+_normal_collection_in_progress = False
+_anomaly_collection_in_progress = False
+_collection_lock = asyncio.Lock()
 
 class AnomalyRequest(BaseModel):
     type: str
@@ -21,6 +33,21 @@ class TrainingStopRequest(BaseModel):
 @router.post("/collect")
 async def start_training_collection(request: AnomalyRequest):
     """Start collecting training data for a specific anomaly type"""
+    global _anomaly_collection_in_progress
+    
+    # Check if collection is already in progress
+    async with _collection_lock:
+        if _anomaly_collection_in_progress:
+            logger.warning("Anomaly collection already in progress, ignoring duplicate request")
+            return {
+                "status": "pending", 
+                "message": "Anomaly collection is already in progress",
+                "type": request.type,
+                "node": request.node
+            }
+        # Mark collection as in progress
+        _anomaly_collection_in_progress = True
+    
     try:
         metrics_service.toggle_send_to_training(True);
         await training_service.start_collection(
@@ -34,12 +61,26 @@ async def start_training_collection(request: AnomalyRequest):
             "node": request.node
         }
     except Exception as e:
+        # Reset collection flag on error
+        async with _collection_lock:
+            _anomaly_collection_in_progress = False
         logger.error(f"Error starting training collection: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error starting training collection: {str(e)}")
 
 @router.post("/stop")
 async def stop_training_collection(request: TrainingStopRequest):
     """Stop collecting training data for an anomaly type"""
+    global _anomaly_collection_in_progress
+    
+    # Check if there's no collection to stop
+    async with _collection_lock:
+        if not _anomaly_collection_in_progress:
+            logger.warning("No anomaly collection in progress, ignoring stop request")
+            return {
+                "status": "warning", 
+                "message": "No anomaly collection was in progress"
+            }
+    
     try:
         metrics_service.toggle_send_to_training(False);
         if hasattr(training_service, "stop_anomaly_collection"):
@@ -47,6 +88,10 @@ async def stop_training_collection(request: TrainingStopRequest):
         else:
             # Fallback to generic stop
             training_service.stop_collection()
+            
+        # Mark collection as stopped
+        async with _collection_lock:
+            _anomaly_collection_in_progress = False
             
         return {
             "status": "success",
@@ -59,18 +104,50 @@ async def stop_training_collection(request: TrainingStopRequest):
 @router.post("/normal/start")
 async def start_normal_collection():
     """Start collecting normal state data"""
+    global _normal_collection_in_progress
+    
+    # Check if collection is already in progress
+    async with _collection_lock:
+        if _normal_collection_in_progress:
+            logger.warning("Normal collection already in progress, ignoring duplicate request")
+            return {
+                "status": "pending", 
+                "message": "Normal state collection is already in progress"
+            }
+        # Mark normal collection as in progress
+        _normal_collection_in_progress = True
+    
     try:
         await training_service.start_normal_collection()
         return {"status": "success", "message": "Started normal state data collection"}
     except Exception as e:
+        # Reset collection flag on error
+        async with _collection_lock:
+            _normal_collection_in_progress = False
         logger.error(f"Failed to start normal state collection: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/normal/stop")
 async def stop_normal_collection():
     """Stop collecting normal state data"""
+    global _normal_collection_in_progress
+    
+    # Check if there's no collection to stop
+    async with _collection_lock:
+        if not _normal_collection_in_progress:
+            logger.warning("No normal collection in progress, ignoring stop request")
+            return {
+                "status": "warning", 
+                "message": "No normal state collection was in progress"
+            }
+    
     try:
         await training_service.stop_normal_collection()
+        
+        # Mark collection as stopped
+        async with _collection_lock:
+            _normal_collection_in_progress = False
+            
         return {"status": "success", "message": "Stopped normal state data collection"}
     except Exception as e:
         logger.error(f"Failed to stop normal state collection: {str(e)}")
@@ -186,11 +263,29 @@ async def get_collection_status():
 @router.post("/train")
 async def train_model():
     """Train the anomaly detection model using existing collected data."""
+    global _training_in_progress
+    
+    # Check if training is already in progress
+    async with _training_lock:
+        if _training_in_progress:
+            logger.warning("Training already in progress, ignoring duplicate request")
+            return {
+                "status": "pending", 
+                "message": "Training is already in progress, please wait"
+            }
+        # Mark training as in progress
+        _training_in_progress = True
+    
     try:
         logger.info("Starting model training process with existing collected data")
         
         # Temporarily disable workload check to ensure training can proceed
         metrics_service.set_check_workload_active(False)
+        
+        # Temporarily disable sending metrics to training to avoid deadlocks
+        original_send_setting = metrics_service.send_to_training
+        metrics_service.toggle_send_to_training(False)
+        logger.info("Temporarily disabled sending metrics to training service during model training")
         
         # Get training data from disk (not from current metrics collection)
         X, y = training_service.get_training_data()
@@ -209,6 +304,10 @@ async def train_model():
         # Restore workload check setting
         metrics_service.set_check_workload_active(True)
         
+        # Restore original metrics-to-training setting
+        metrics_service.toggle_send_to_training(original_send_setting)
+        logger.info("Restored original metrics collection settings")
+        
         return {
             "status": "success", 
             "message": "Model trained successfully", 
@@ -218,7 +317,18 @@ async def train_model():
         logger.error(f"Failed to train model: {str(e)}")
         # Ensure workload check is restored even on error
         metrics_service.set_check_workload_active(True)
+        
+        # Ensure metrics-to-training setting is restored
+        if 'original_send_setting' in locals():
+            metrics_service.toggle_send_to_training(original_send_setting)
+            logger.info("Restored original metrics collection settings after error")
+            
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Always mark training as complete, even if there was an error
+        async with _training_lock:
+            _training_in_progress = False
+            logger.info("Training process marked as complete")
 
 @router.post("/reset")
 async def reset_training_state():
@@ -247,3 +357,13 @@ async def set_workload_active(active: bool = True):
     except Exception as e:
         logger.error(f"Error setting workload active state: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error setting workload active state: {str(e)}")
+
+@router.get("/process-status")
+async def get_process_status():
+    """Get the status of all training processes (training, anomaly collection, normal collection)"""
+    async with _collection_lock, _training_lock:
+        return {
+            "training_in_progress": _training_in_progress,
+            "anomaly_collection_in_progress": _anomaly_collection_in_progress,
+            "normal_collection_in_progress": _normal_collection_in_progress
+        }

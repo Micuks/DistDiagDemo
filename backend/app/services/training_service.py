@@ -690,47 +690,85 @@ class TrainingService:
         logger.info("All required anomaly variations have been collected")
 
     def get_training_data(self) -> tuple:
-        """Get all training data for model training"""
-        if not os.path.exists(self.data_dir):
-            logger.warning("Training data directory does not exist")
-            return [], []
-            
-        X = []  # Metrics data
-        y = []  # Labels
+        """Get training data from all cases"""
+        logger.info("Loading training data from all cases...")
+        X = []
+        y = []
         
-        # Load all case directories
+        # Get list of all case directories first
+        case_dirs = []
         for case_dir in os.listdir(self.data_dir):
             case_path = os.path.join(self.data_dir, case_dir)
-            if not os.path.isdir(case_path):
-                continue
-                
-            try:
-                # Load label file first to determine data type
+            if os.path.isdir(case_path):
                 label_file = os.path.join(case_path, "label.json")
-                if not os.path.exists(label_file):
-                    logger.warning(f"Missing label file in {case_dir}")
-                    continue
-                    
-                with open(label_file) as f:
-                    label_data = json.load(f)
-                    
-                # Process anomaly data
                 metrics_file = os.path.join(case_path, "metrics.json")
-                if os.path.exists(metrics_file):
-                    with open(metrics_file) as f:
-                        metrics_data = json.load(f)
-                        features = self._process_metrics(metrics_data)
-                        if features is not None:
-                            X.extend(features)
-                            # Create labels for each feature
-                            for _ in range(len(features)):
-                                y.append(self._create_label_vector(label_data))
-                            logger.info(f"Processed {len(features)} samples from {case_dir} ({label_data.get('type', 'unknown')})")
-                            
-            except Exception as e:
-                logger.error(f"Error loading training data from {case_dir}: {str(e)}")
-                continue
+                if os.path.exists(label_file) and os.path.exists(metrics_file):
+                    case_dirs.append((case_dir, case_path))
+        
+        total_cases = len(case_dirs)
+        logger.info(f"Found {total_cases} valid case directories")
+        
+        # Use ThreadPoolExecutor for parallel processing
+        import time
+        
+        start_time = time.time()
+        processed_cases = 0
+        total_samples = 0
+        
+        # Define a function to process a single case
+        def process_case(case_info):
+            case_dir, case_path = case_info
+            case_X = []
+            case_y = []
+            
+            try:
+                # Load label file
+                with open(os.path.join(case_path, "label.json")) as f:
+                    label_data = json.load(f)
                 
+                # Process metrics data
+                with open(os.path.join(case_path, "metrics.json")) as f:
+                    metrics_data = json.load(f)
+                    
+                features = self._process_metrics(metrics_data)
+                if features is not None:
+                    case_X.extend(features)
+                    # Create labels for each feature
+                    for _ in range(len(features)):
+                        case_y.append(self._create_label_vector(label_data))
+                    
+                    return {
+                        'case_dir': case_dir,
+                        'X': case_X, 
+                        'y': case_y, 
+                        'count': len(features),
+                        'type': label_data.get('type', 'unknown')
+                    }
+            except Exception as e:
+                logger.error(f"Error processing case {case_dir}: {str(e)}")
+                return None
+        
+        # Process cases in parallel with a maximum of 4 worker threads
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # Submit all processing tasks
+            future_to_case = {executor.submit(process_case, case_info): case_info for case_info in case_dirs}
+            
+            # Process results as they complete
+            for future in future_to_case:
+                result = future.result()
+                if result:
+                    X.extend(result['X'])
+                    y.extend(result['y'])
+                    processed_cases += 1
+                    total_samples += result['count']
+                    
+                    # Log progress periodically
+                    if processed_cases % 10 == 0 or processed_cases == total_cases:
+                        elapsed = time.time() - start_time
+                        logger.info(f"Processed {processed_cases}/{total_cases} cases ({processed_cases/total_cases*100:.1f}%) in {elapsed:.1f}s - {total_samples} samples")
+                    
+                    logger.info(f"Processed {result['count']} samples from {result['case_dir']} ({result['type']})")
+        
         if not X or not y:
             logger.warning("No valid training data found")
             return [], []
@@ -738,6 +776,11 @@ class TrainingService:
         # Convert to numpy arrays
         X_array = np.array(X)
         y_array = np.array(y)
+        
+        # Log final stats
+        elapsed = time.time() - start_time
+        logger.info(f"Completed processing {total_samples} samples from {processed_cases} cases in {elapsed:.1f}s ({total_samples/elapsed:.1f} samples/s)")
+        logger.info(f"Training data shapes - X: {X_array.shape}, y: {y_array.shape}")
         
         # Balance classes if needed
         logger.info("Balancing dataset classes...")
@@ -781,24 +824,43 @@ class TrainingService:
             
             # Extract features from metrics using diagnosis service's processor
             features = []
-            for entry in metrics_data:
-                try:
-                    # Process metrics using diagnosis service's time window processing
-                    feature_vector = diagnosis_service.diagnosis._process_metrics(entry["metrics"])
-                    if feature_vector is not None:
-                        features.append(feature_vector)
-                except Exception as e:
-                    logger.error(f"Error processing metrics entry: {str(e)}")
-                    continue
-                    
-            if not features:
-                logger.warning("No valid feature vectors extracted from metrics data")
-                return None
-                
-            return features
             
+            # Process metrics in chunks to avoid memory issues with large datasets
+            chunk_size = 100  # Process 100 metrics at a time
+            for i in range(0, len(metrics_data), chunk_size):
+                chunk = metrics_data[i:i+chunk_size]
+                chunk_features = []
+                
+                for entry in chunk:
+                    try:
+                        # Make sure 'metrics' key exists
+                        if 'metrics' not in entry:
+                            logger.warning(f"Missing 'metrics' key in entry: {entry.keys()}")
+                            continue
+                            
+                        # Process metrics using diagnosis service's time window processing
+                        feature_vector = diagnosis_service.diagnosis._process_metrics(entry["metrics"])
+                        if feature_vector is not None:
+                            chunk_features.append(feature_vector)
+                    except Exception as e:
+                        logger.error(f"Error processing metrics entry: {str(e)}")
+                        import traceback
+                        logger.debug(f"Traceback: {traceback.format_exc()}")
+                        continue
+                
+                # Add chunk features to main features list
+                features.extend(chunk_features)
+                
+                # Log progress for large datasets
+                if len(metrics_data) > chunk_size and i % (chunk_size * 10) == 0:
+                    logger.debug(f"Processed {i}/{len(metrics_data)} metrics entries ({i/len(metrics_data)*100:.1f}%)")
+            
+            logger.info(f"Successfully processed {len(features)} feature vectors from {len(metrics_data)} metrics entries")
+            return features
         except Exception as e:
             logger.error(f"Error in _process_metrics: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 
     def _create_label_vector(self, label_data: Dict) -> np.ndarray:

@@ -14,6 +14,7 @@ import time
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
 import glob
+import traceback
 
 # Add project root and dist_diagnosis root to Python path
 project_root = Path(__file__).parent.parent.parent.parent
@@ -56,7 +57,13 @@ class DistDiagnosis:
             "cache_bottleneck",
             "too_many_indexes"
         ]
-        self.clf_list = [XGBClassifier(objective='binary:logistic') for _ in range(num_classifier)]
+        # Enable GPU acceleration with CUDA
+        self.clf_list = [XGBClassifier(
+            objective='binary:logistic',
+            tree_method='gpu_hist',  # Use GPU for histogram calculation
+            gpu_id=0,               # Use first GPU
+            predictor='gpu_predictor'  # Use GPU for prediction
+        ) for _ in range(num_classifier)]
         self.time_window = 5  # Default 5-minute window
         logger.info(f"Initialized {len(self.clf_list)} classifiers for {len(self.classes)} classes")
 
@@ -79,33 +86,24 @@ class DistDiagnosis:
                 elif isinstance(metric_data, dict) and 'latest' in metric_data:
                     return [float(metric_data['latest'])] * self.time_window
                     
-                # Handle case where metric_data is a dict of timestamps
-                elif isinstance(metric_data, dict):
-                    timestamps = sorted(metric_data.keys(), reverse=True)[:self.time_window]
-                    for ts in timestamps:
-                        if isinstance(metric_data[ts], dict) and 'latest' in metric_data[ts]:
-                            values.append(float(metric_data[ts]['latest']))
-                        elif isinstance(metric_data[ts], (int, float)):
-                            values.append(float(metric_data[ts]))
-                        else:
-                            values.append(0.0)
-            
-            # If metrics is a dict of timestamps containing metric_name
-            elif isinstance(next(iter(metrics.values()), {}), dict):
-                timestamps = sorted(metrics.keys(), reverse=True)[:self.time_window]
-                for ts in timestamps:
-                    ts_data = metrics[ts]
-                    if metric_name in ts_data:
-                        if isinstance(ts_data[metric_name], dict) and 'latest' in ts_data[metric_name]:
-                            values.append(float(ts_data[metric_name]['latest']))
-                        elif isinstance(ts_data[metric_name], (int, float)):
-                            values.append(float(ts_data[metric_name]))
-                        else:
-                            values.append(0.0)
-                    else:
+                # Handle case where metric_data is a list of dictionaries with 'timestamp' and 'value' keys
+                elif isinstance(metric_data, list) and metric_data and isinstance(metric_data[0], dict) and 'timestamp' in metric_data[0] and 'value' in metric_data[0]:
+                    # Sort by timestamp (newest first) and take up to time_window values
+                    sorted_data = sorted(metric_data, key=lambda x: x['timestamp'], reverse=True)[:self.time_window]
+                    values = [float(item['value']) for item in sorted_data]
+                    # Pad with zeros if we don't have enough values
+                    while len(values) < self.time_window:
                         values.append(0.0)
+                    return values
+                else:
+                    logger.warning(f"Unexpected metric data type for {metric_name}: {type(metric_data)}")
+                    return [0.0] * self.time_window
+            else:
+                # Metric not found in the metrics dictionary
+                logger.warning(f"Metric {metric_name} not found in metrics")
+                return [0.0] * self.time_window
 
-            # Pad with zeros if we don't have enough values
+            # Pad with zeros if we don't have enough values (this is now unreachable but kept for safety)
             while len(values) < self.time_window:
                 values.append(0.0)
 
@@ -115,30 +113,19 @@ class DistDiagnosis:
             return [0.0] * self.time_window
 
     def _calculate_time_features(self, values: List[float]) -> List[float]:
-        """Calculate statistical features from time window values"""
+        """Calculate statistical features over time window values"""
         try:
-            values = np.array(values)
-            features = []
+            # Convert to numpy array for vectorized operations
+            values_array = np.array(values, dtype=np.float64)
             
-            # Basic statistics
-            features.append(np.mean(values))  # Mean
-            features.append(np.std(values))   # Standard deviation
-            features.append(np.max(values))   # Maximum
-            
-            # Trend (slope of linear fit)
-            if len(values) > 1:
-                x = np.arange(len(values))
-                slope = np.polyfit(x, values, 1)[0]
-                features.append(slope)
-            else:
-                features.append(0.0)
-            
-            # Rate of change (using last two points)
-            if len(values) > 1:
-                rate = values[-1] - values[-2]
-                features.append(rate)
-            else:
-                features.append(0.0)
+            # Calculate features in a vectorized way
+            features = [
+                np.mean(values_array),                         # mean
+                np.std(values_array) if len(values_array) > 1 else 0.0,  # std dev
+                np.max(values_array) if values_array.size > 0 else 0.0,  # max
+                np.min(values_array) if values_array.size > 0 else 0.0,  # min
+                np.median(values_array) if values_array.size > 0 else 0.0 # median
+            ]
                 
             return features
         except Exception as e:
@@ -148,20 +135,34 @@ class DistDiagnosis:
     def _process_metrics(self, metrics: Dict[str, Any]) -> np.ndarray:
         """Process metrics into feature vector using time window statistics"""
         try:
-            feature_vector = []
+            # Pre-allocate the feature vector with the correct size
+            # Each metric produces 5 features, and we're processing multiple metrics from different categories
+            num_metrics = (
+                3 +  # CPU metrics
+                5 +  # Memory metrics
+                9 +  # IO metrics
+                7 +  # Network metrics
+                8    # Transaction metrics
+            )
+            feature_vector = np.zeros(num_metrics * 5)  # 5 features per metric
+            feature_idx = 0
             
             # CPU metrics
             cpu_metrics = metrics.get('cpu', {})
             for metric in ['cpu usage', 'worker time', 'cpu time']:
                 values = self._get_time_window_values(cpu_metrics, metric)
-                feature_vector.extend(self._calculate_time_features(values))
+                features = self._calculate_time_features(values)
+                feature_vector[feature_idx:feature_idx+len(features)] = features
+                feature_idx += len(features)
             
             # Memory metrics
             memory_metrics = metrics.get('memory', {})
             for metric in ['total memstore used', 'active memstore used', 'memstore limit', 
                          'memory usage', 'observer memory hold size']:
                 values = self._get_time_window_values(memory_metrics, metric)
-                feature_vector.extend(self._calculate_time_features(values))
+                features = self._calculate_time_features(values)
+                feature_vector[feature_idx:feature_idx+len(features)] = features
+                feature_idx += len(features)
             
             # IO metrics
             io_metrics = metrics.get('io', {})
@@ -169,7 +170,9 @@ class DistDiagnosis:
                          'io read count', 'io write count', 'io read delay', 'io write delay',
                          'data micro block cache hit', 'index micro block cache hit', 'row cache hit']:
                 values = self._get_time_window_values(io_metrics, metric)
-                feature_vector.extend(self._calculate_time_features(values))
+                features = self._calculate_time_features(values)
+                feature_vector[feature_idx:feature_idx+len(features)] = features
+                feature_idx += len(features)
             
             # Network metrics
             network_metrics = metrics.get('network', {})
@@ -177,7 +180,9 @@ class DistDiagnosis:
                          'rpc packet out bytes', 'rpc net delay', 'mysql packet in',
                          'mysql packet out']:
                 values = self._get_time_window_values(network_metrics, metric)
-                feature_vector.extend(self._calculate_time_features(values))
+                features = self._calculate_time_features(values)
+                feature_vector[feature_idx:feature_idx+len(features)] = features
+                feature_idx += len(features)
             
             # Transaction metrics
             trans_metrics = metrics.get('transactions', {})
@@ -185,9 +190,11 @@ class DistDiagnosis:
                          'sql select count', 'active sessions', 'sql fail count',
                          'request queue time', 'DB time']:
                 values = self._get_time_window_values(trans_metrics, metric)
-                feature_vector.extend(self._calculate_time_features(values))
-            
-            return np.array(feature_vector)
+                features = self._calculate_time_features(values)
+                feature_vector[feature_idx:feature_idx+len(features)] = features
+                feature_idx += len(features)
+                
+            return feature_vector
         except Exception as e:
             logger.error(f"Error processing metrics: {str(e)}")
             return None
@@ -224,17 +231,34 @@ class DistDiagnosis:
             try:
                 # Check if either array is constant
                 if np.std(x_a) == 0 or np.std(y_a) == 0:
-                    logger.debug(f"Skipping constant array in feature {i}")
+                    logger.debug(f"Skipping constant array in feature {i}.")
                     continue
-                    
-                coef, _ = pearsonr(x_a, y_a)
-                if -1 <= coef <= 1:
-                    rvalue.append(abs(coef))
+                else:
+                    # Convert numpy arrays to lists for safe logging
+                    x_preview = x_a.tolist()[:3] if len(x_a) > 3 else x_a.tolist()
+                    y_preview = y_a.tolist()[:3] if len(y_a) > 3 else y_a.tolist()
+                    logger.debug(f"Calculating correlation for feature {i} - x shape: {x_a.shape}, y shape: {y_a.shape}")
+                    logger.debug(f"Sample values - x: {x_preview}..., y: {y_preview}...")
+                
+                # Calculate correlation only if arrays have valid data
+                if len(x_a) > 1 and len(y_a) > 1:
+                    coef, _ = pearsonr(x_a, y_a)
+                    if -1 <= coef <= 1:  # Valid correlation coefficient
+                        rvalue.append(abs(coef))
+                else:
+                    logger.debug(f"Skipping correlation for feature {i} - insufficient data points")
             except Exception as e:
-                logger.warning(f"Error calculating correlation: {str(e)}")
+                logger.warning(f"Error calculating correlation for feature {i}: {str(e)}")
                 continue
 
-        return sum(rvalue) / len(rvalue) if rvalue else 0
+        # Return average correlation or 0 if no valid correlations
+        if rvalue:
+            avg_correlation = sum(rvalue) / len(rvalue)
+            logger.debug(f"Average correlation across {len(rvalue)} features: {avg_correlation:.4f}")
+            return avg_correlation
+        else:
+            logger.debug("No valid correlations calculated")
+            return 0.0
 
     def diagnose(self, node_metrics: dict) -> dict:
         """
@@ -284,6 +308,7 @@ class DistDiagnosis:
             anomalies = []
             propagation_graph = {}
 
+            # check node_names
             for node_idx, node in enumerate(node_names):
                 node_results = {}
                 feature = np.array([features[node_idx]])
@@ -291,14 +316,34 @@ class DistDiagnosis:
                 # Get classifier predictions
                 for clf_idx, clf in enumerate(self.clf_list):
                     try:
-                        proba = clf.predict_proba(feature)[0]
-                        score = float(proba[1]) if len(proba) > 1 else float(proba[0])
+                        # Ensure we don't go out of bounds with the classifier index
+                        if clf_idx >= len(self.classes):
+                            logger.warning(f"Classifier index {clf_idx} exceeds available classes ({len(self.classes)})")
+                            continue
+                            
+                        # Make prediction and get probabilities
+                        prediction = clf.predict_proba(feature)
+                        if prediction is None or len(prediction) == 0:
+                            logger.warning(f"Empty prediction from classifier {clf_idx} for node {node}")
+                            continue
+                            
+                        proba = prediction[0]
+                        
+                        # Safe access to probability values
+                        if len(proba) > 1:
+                            # Binary classification case - use probability of positive class
+                            score = float(proba[1])
+                        else:
+                            # Single class case - use the only probability available
+                            score = float(proba[0])
+                            
                         # Weight the score by node importance
                         weighted_score = score * node_scores[node_idx]
                         anomaly_type = self.classes[clf_idx]
                         node_results[anomaly_type] = weighted_score
                     except Exception as e:
                         logger.error(f"Error predicting with classifier {clf_idx}: {str(e)}")
+                        logger.debug(f"Exception details: {traceback.format_exc()}")
                         continue
                 
                 results[node] = node_results
@@ -331,10 +376,25 @@ class DistDiagnosis:
             # Sort anomalies by score
             anomalies.sort(key=lambda x: x['score'], reverse=True)
             
+            # After calculating all scores
+            all_possible_anomalies = []
+            for node_idx, node in enumerate(node_names):
+                for anomaly_type, score in results[node].items():
+                    all_possible_anomalies.append({
+                        'node': node,
+                        'type': anomaly_type,
+                        'score': score,
+                        'timestamp': datetime.now().isoformat()
+                    })
+            
+            # Sort all possibilities by score
+            all_possible_anomalies.sort(key=lambda x: x['score'], reverse=True)
+            
             return {
                 'scores': {node: max(node_results.values()) if node_results else 0.0 for node, node_results in results.items()},
                 'anomalies': anomalies,
-                'propagation_graph': propagation_graph
+                'propagation_graph': propagation_graph,
+                'all_ranked_anomalies': all_possible_anomalies
             }
 
         except Exception as e:
@@ -348,7 +408,8 @@ class DistDiagnosis:
         return {
             'scores': {node: 0.0 for node in node_metrics.keys()},
             'anomalies': [],
-            'propagation_graph': {}
+            'propagation_graph': {},
+            'all_ranked_anomalies': []
         }
 
     def train(self, x_train, y_train):
@@ -359,8 +420,10 @@ class DistDiagnosis:
             logger.debug(f"y data sample: {y_train[0] if len(y_train) > 0 else 'empty'}")
             
             # Decompose training data
+            start_time = time.time()
             train_x = self.decompose_train_x(x_train)
             train_y = self.decompose_train_y(y_train)
+            logger.info(f"Decomposition completed in {time.time() - start_time:.2f} seconds")
             
             logger.debug(f"Decomposed training data shapes - X: {train_x.shape}, y: {train_y.shape}")
             logger.debug(f"Decomposed X sample: {train_x[0] if len(train_x) > 0 else 'empty'}")
@@ -372,17 +435,38 @@ class DistDiagnosis:
             # Ensure we have enough classifiers for the number of classes
             while len(self.clf_list) < train_y.shape[1]:
                 logger.info(f"Adding classifier {len(self.clf_list)} to match training data dimensions")
-                self.clf_list.append(XGBClassifier(objective='binary:logistic'))
-
-            for i in range(min(len(self.clf_list), train_y.shape[1])):
+                self.clf_list.append(XGBClassifier(
+                    objective='binary:logistic',
+                    tree_method='gpu_hist',
+                    gpu_id=0,
+                    predictor='gpu_predictor',
+                    n_jobs=-1  # Use all available CPU cores for parallel processing
+                ))
+            
+            # Use parallel processing for training multiple classifiers
+            from concurrent.futures import ThreadPoolExecutor
+            
+            def train_classifier(i):
                 current_clf = self.clf_list[i]
                 current_labels = train_y[:, i].reshape(-1, 1)
                 
                 logger.debug(f"Training classifier {i} with {len(train_x)} samples")
                 logger.debug(f"Labels for classifier {i}: shape={current_labels.shape}, unique values={np.unique(current_labels)}")
                 current_clf.fit(train_x, current_labels.ravel())  # Use ravel() to flatten labels
+                return i
+            
+            # Train classifiers in parallel
+            start_time = time.time()
+            with ThreadPoolExecutor() as executor:
+                # Submit all training tasks
+                futures = [executor.submit(train_classifier, i) 
+                          for i in range(min(len(self.clf_list), train_y.shape[1]))]
                 
-            logger.info("Successfully trained all classifiers")
+                # Wait for all tasks to complete
+                for future in futures:
+                    future.result()
+            
+            logger.info(f"Successfully trained all classifiers in {time.time() - start_time:.2f} seconds")
             
         except Exception as e:
             logger.error(f"Error during training: {str(e)}")
@@ -421,6 +505,28 @@ class DistDiagnosis:
                 logger.debug(f"Using numpy array directly with shape: {composed_train_x.shape}")
                 return composed_train_x
             
+            # Pre-allocate the array if we can determine the size
+            if isinstance(composed_train_x, list) and all(isinstance(x, np.ndarray) for x in composed_train_x):
+                # Get the shape of the first element to determine dimensions
+                first_shape = composed_train_x[0].shape if isinstance(composed_train_x[0], np.ndarray) else None
+                if isinstance(composed_train_x[0], list) and composed_train_x[0] and isinstance(composed_train_x[0][0], np.ndarray):
+                    # We have a list of lists of arrays
+                    total_samples = sum(len(case) for case in composed_train_x)
+                    sample_shape = composed_train_x[0][0].shape
+                    if total_samples > 0 and all(len(sample_shape) == 1 for case in composed_train_x for sample in case if isinstance(sample, np.ndarray)):
+                        # Pre-allocate the result array
+                        feature_dim = sample_shape[0]
+                        result = np.zeros((total_samples, feature_dim))
+                        idx = 0
+                        for case in composed_train_x:
+                            for node_x in case:
+                                if isinstance(node_x, np.ndarray) and len(node_x.shape) == 1:
+                                    result[idx] = node_x
+                                    idx += 1
+                        logger.debug(f"Pre-allocated and filled result array with shape: {result.shape}")
+                        return result
+            
+            # Fall back to list append method if pre-allocation not possible
             train_x = []
             for case in composed_train_x:
                 if isinstance(case, (list, np.ndarray)):
@@ -590,19 +696,21 @@ class DiagnosisService:
         try:
             # Get predictions from all classifiers
             all_preds = []
-            for clf in self.diagnosis.clf_list:
+            for i, clf in enumerate(self.diagnosis.clf_list):
                 pred = clf.predict(X_test)
                 all_preds.append(pred)
             
-            # Use majority voting for final prediction
-            y_pred = np.round(np.mean(all_preds, axis=0))
+            # Combine predictions into a multilabel format to match y_test
+            y_pred = np.zeros_like(y_test)
+            for i, preds in enumerate(all_preds):
+                y_pred[:, i] = preds
             
-            # Standard performance metrics
+            # Standard performance metrics - using samples average for multilabel
             metrics = {
                 'accuracy': float(accuracy_score(y_test, y_pred)),
-                'precision': float(precision_score(y_test, y_pred, average='weighted')),
-                'recall': float(recall_score(y_test, y_pred, average='weighted')),
-                'f1_score': float(f1_score(y_test, y_pred, average='weighted')),
+                'precision': float(precision_score(y_test, y_pred, average='samples')),
+                'recall': float(recall_score(y_test, y_pred, average='samples')),
+                'f1_score': float(f1_score(y_test, y_pred, average='samples')),
                 'training_time': time.time() - self.training_start_time
             }
             
@@ -659,41 +767,88 @@ class DiagnosisService:
 
     def _create_test_metrics(self, X_test):
         """Create synthetic test metrics from test feature vectors"""
-        # This is a simplified implementation - in real scenarios,
-        # you would need a more sophisticated approach to recreate realistic metrics
         test_metrics = {}
         
-        # Create metrics for each test node (assuming first 10 samples for demonstration)
-        for i, features in enumerate(X_test[:10]):
+        # We'll use the actual number of samples, but limit to first 10 for performance
+        max_samples = min(len(X_test), 10)
+        
+        # Create metrics for each test node
+        for i, features in enumerate(X_test[:max_samples]):
             node_name = f"test-node-{i}"
             
-            # Recreate metrics structure from feature vector
+            # Create sample feature value index tracker
+            feature_idx = 0
+            
+            # Initialize metrics structure that matches expected format
             test_metrics[node_name] = {
-                'cpu': {
-                    'util': {'latest': features[0]},
-                    'system': {'latest': features[1]},
-                    'user': {'latest': features[2]},
-                    'wait': {'latest': features[3]}
-                },
-                'memory': {
-                    'used': {'latest': features[4]},
-                    'free': {'latest': features[5]},
-                    'cach': {'latest': features[6]}
-                },
-                'io': {
-                    'aggregated': {
-                        'rs': {'latest': features[7]},
-                        'ws': {'latest': features[8]},
-                        'util': {'latest': features[9]}
-                    }
-                },
-                'network': {
-                    'bytin': {'latest': features[10]},
-                    'bytout': {'latest': features[11]},
-                    'pktin': {'latest': features[12]}
-                }
+                'cpu': {},
+                'memory': {},
+                'io': {},
+                'network': {},
+                'transactions': {}
             }
             
+            # Add CPU metrics (3 metrics)
+            cpu_metrics = ['cpu usage', 'worker time', 'cpu time']
+            for metric in cpu_metrics:
+                base_value = abs(float(features[feature_idx % len(features)]))
+                test_metrics[node_name]['cpu'][metric] = {
+                    'latest': base_value
+                }
+                feature_idx += 1
+            
+            # Add Memory metrics (5 metrics)
+            memory_metrics = [
+                'total memstore used', 'active memstore used', 'memstore limit', 
+                'memory usage', 'observer memory hold size'
+            ]
+            for metric in memory_metrics:
+                base_value = abs(float(features[feature_idx % len(features)]))
+                test_metrics[node_name]['memory'][metric] = {
+                    'latest': base_value
+                }
+                feature_idx += 1
+            
+            # Add IO metrics (9 metrics)
+            io_metrics = [
+                'palf write io count to disk', 'palf write size to disk',
+                'io read count', 'io write count', 'io read delay', 'io write delay',
+                'data micro block cache hit', 'index micro block cache hit', 'row cache hit'
+            ]
+            for metric in io_metrics:
+                base_value = abs(float(features[feature_idx % len(features)]))
+                test_metrics[node_name]['io'][metric] = {
+                    'latest': base_value
+                }
+                feature_idx += 1
+            
+            # Add Network metrics (7 metrics)
+            network_metrics = [
+                'rpc packet in', 'rpc packet in bytes', 'rpc packet out',
+                'rpc packet out bytes', 'rpc net delay', 'mysql packet in',
+                'mysql packet out'
+            ]
+            for metric in network_metrics:
+                base_value = abs(float(features[feature_idx % len(features)]))
+                test_metrics[node_name]['network'][metric] = {
+                    'latest': base_value
+                }
+                feature_idx += 1
+            
+            # Add Transaction metrics (8 metrics)
+            transaction_metrics = [
+                'trans commit count', 'trans timeout count', 'sql update count',
+                'sql select count', 'active sessions', 'sql fail count',
+                'request queue time', 'DB time'
+            ]
+            for metric in transaction_metrics:
+                base_value = abs(float(features[feature_idx % len(features)]))
+                test_metrics[node_name]['transactions'][metric] = {
+                    'latest': base_value
+                }
+                feature_idx += 1
+        
+        logger.debug(f"Created synthetic test metrics for {len(test_metrics)} nodes")
         return test_metrics
         
     def _extract_root_causes_from_labels(self, y_test):
@@ -708,34 +863,6 @@ class DiagnosisService:
                     'type_idx': anomaly_type_idx,
                     'type': self.anomaly_types[anomaly_type_idx] if anomaly_type_idx < len(self.anomaly_types) else 'unknown'
                 })
-        return root_causes
-        
-    def _extract_root_causes_from_diagnosis(self, diagnosis_result):
-        """Extract predicted root causes from diagnosis result"""
-        root_causes = []
-        
-        # Extract from anomalies ranked by score
-        for anomaly in diagnosis_result.get('anomalies', []):
-            node = anomaly.get('node', '')
-            anomaly_type = anomaly.get('type', '')
-            
-            # Map type name to index
-            type_idx = self.anomaly_types.index(anomaly_type) if anomaly_type in self.anomaly_types else -1
-            
-            # Extract node index from node name
-            node_idx = -1
-            if node.startswith('test-node-'):
-                try:
-                    node_idx = int(node.split('-')[-1])
-                except ValueError:
-                    pass
-                    
-            root_causes.append({
-                'node_idx': node_idx,
-                'type_idx': type_idx,
-                'type': anomaly_type
-            })
-            
         return root_causes
         
     def _calculate_rca_accuracy(self, true_root_causes, predicted_root_causes):
@@ -821,24 +948,33 @@ class DiagnosisService:
     def switch_model(self, model_name):
         """Switch to using a different model"""
         try:
+            logger.info(f"Attempting to switch to model: {model_name}")
             available_models = self.get_available_models()
             
             if model_name not in available_models:
-                logger.error(f"Model '{model_name}' not found. Available models: {available_models}")
+                logger.error(f"Model '{model_name}' not found in available models: {available_models}")
                 return False
                 
-            # Set new active model
-            self.active_model = model_name
-            self.model_path = os.path.join(self.models_path, model_name)
-            self.metrics_path = os.path.join(self.model_path, 'metrics')
+            # Full path verification
+            model_path = os.path.join(self.models_path, model_name)
+            if not os.path.exists(model_path):
+                logger.error(f"Model directory not found: {model_path}")
+                return False
+                
+            logger.info(f"Loading model from: {model_path}")
+            self.diagnosis.load_model(model_path)
             
-            # Load the model
-            self.diagnosis.load_model(self.model_path)
-            logger.info(f"Switched to model '{model_name}'")
+            # Verify classifier loading
+            if not self.diagnosis.clf_list:
+                logger.error("No classifiers loaded after model switch")
+                return False
+                
+            logger.info(f"Successfully loaded {len(self.diagnosis.clf_list)} classifiers")
+            self.active_model = model_name
             return True
             
         except Exception as e:
-            logger.error(f"Error switching to model '{model_name}': {str(e)}")
+            logger.error(f"Model switch failed: {str(e)}")
             return False
 
 # Create singleton instance
