@@ -29,21 +29,22 @@ class WPRNNode:
         self.w = w
         self.node_num = node_num
         self.d = 0.85
+        self.p = [0.15] * node_num  # Match initialization in page_rank.py
 
     def page_rank(self, iter_num):
-        pr = [1.0 / self.node_num] * self.node_num
-        
         for _ in range(iter_num):
-            next_pr = [(1 - self.d) / self.node_num] * self.node_num
-            
+            new_p = [0] * self.node_num
             for i in range(self.node_num):
+                tmp = 0
                 for j in range(self.node_num):
-                    if i != j:
-                        next_pr[i] += self.d * pr[j] * self.w[j][i]
+                    if j != i:
+                        # Match weight squared pattern from page_rank.py
+                        tmp += self.p[j] * self.w[i][j] * self.w[i][j]
+                new_p[i] = (1 - self.d) + self.d * tmp
             
-            pr = next_pr
+            self.p = new_p
             
-        return pr
+        return self.p
 
 class DistDiagnosis:
     """Integrated version of DistDiagnosis for anomaly detection"""
