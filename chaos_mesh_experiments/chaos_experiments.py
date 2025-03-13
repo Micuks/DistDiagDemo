@@ -102,7 +102,7 @@ class CPUSaturation:
     def __init__(self, namespace="oceanbase"):
         self.chaos = ChaosMeshExperiment(namespace)
 
-    def trigger(self, duration="180s"):
+    def trigger(self, duration="300s"):
         cpu_chaos = {
             "apiVersion": "chaos-mesh.org/v1alpha1",
             "kind": "StressChaos",
@@ -136,7 +136,7 @@ class IOSaturation:
     def __init__(self, namespace="oceanbase"):
         self.chaos = ChaosMeshExperiment(namespace)
 
-    def trigger(self, duration="180s"):
+    def trigger(self, duration="300s"):
         io_chaos = {
             "apiVersion": "chaos-mesh.org/v1alpha1",
             "kind": "IOChaos",
@@ -168,7 +168,7 @@ class NetSaturation:
     def __init__(self, namespace="oceanbase"):
         self.chaos = ChaosMeshExperiment(namespace)
 
-    def trigger(self, duration="180s"):
+    def trigger(self, duration="300s"):
         network_chaos = {
             "apiVersion": "chaos-mesh.org/v1alpha1",
             "kind": "NetworkChaos",

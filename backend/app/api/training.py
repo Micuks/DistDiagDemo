@@ -14,6 +14,13 @@ router = APIRouter()
 # Add global variables for tracking training state
 _training_in_progress = False
 _training_lock = asyncio.Lock()
+_training_status = {
+    "stage": "idle",  # idle, preprocessing, training, evaluating, saving, completed, failed
+    "progress": 0,    # 0-100 percentage
+    "message": "",    # Detailed status message
+    "error": None,    # Error message if any
+    "stats": {}       # Training stats like accuracy, etc.
+}
 
 # Add global variables for tracking collection state
 _normal_collection_in_progress = False
@@ -260,10 +267,16 @@ async def get_collection_status():
             }
         )
 
+@router.get("/training-status")
+async def get_training_status():
+    """Get the current status of model training."""
+    async with _training_lock:
+        return _training_status
+
 @router.post("/train")
 async def train_model():
     """Train the anomaly detection model using existing collected data."""
-    global _training_in_progress
+    global _training_in_progress, _training_status
     
     # Check if training is already in progress
     async with _training_lock:
@@ -275,6 +288,14 @@ async def train_model():
             }
         # Mark training as in progress
         _training_in_progress = True
+        # Reset training status
+        _training_status = {
+            "stage": "preprocessing",
+            "progress": 0,
+            "message": "Preparing training data...",
+            "error": None,
+            "stats": {}
+        }
     
     try:
         logger.info("Starting model training process with existing collected data")
@@ -287,19 +308,72 @@ async def train_model():
         metrics_service.toggle_send_to_training(False)
         logger.info("Temporarily disabled sending metrics to training service during model training")
         
+        # Update status - data fetching
+        async with _training_lock:
+            _training_status.update({
+                "stage": "preprocessing",
+                "progress": 10,
+                "message": "Loading training data from disk..."
+            })
+        
         # Get training data from disk (not from current metrics collection)
         X, y = training_service.get_training_data()
         if len(X) == 0 or len(y) == 0:
             logger.error("No training data available in the dataset")
+            async with _training_lock:
+                _training_status.update({
+                    "stage": "failed",
+                    "message": "No training data available in the dataset",
+                    "error": "No training data available in the dataset",
+                    "progress": 0
+                })
             raise HTTPException(status_code=400, detail="No training data available in the dataset")
             
+        # Update status - preprocessing
+        async with _training_lock:
+            _training_status.update({
+                "stage": "preprocessing",
+                "progress": 30,
+                "message": f"Processing training data: {len(X)} samples..."
+            })
+        
         # Get access to diagnosis service
         from app.services.diagnosis_service import DiagnosisService
         diagnosis_service = DiagnosisService()
         
+        # Update status - training
+        async with _training_lock:
+            _training_status.update({
+                "stage": "training",
+                "progress": 50,
+                "message": "Training model..."
+            })
+        
         # Train the model with the collected data
         result = diagnosis_service.train(X, y)
         logger.info(f"Model training completed successfully: {result['model_name']}")
+        
+        # Update status - evaluating
+        async with _training_lock:
+            _training_status.update({
+                "stage": "evaluating",
+                "progress": 80,
+                "message": "Evaluating model performance..."
+            })
+        
+        # Evaluate model if result contains evaluation metrics
+        model_metrics = {}
+        if 'metrics' in result:
+            model_metrics = result['metrics']
+        
+        # Update status - completed
+        async with _training_lock:
+            _training_status.update({
+                "stage": "completed",
+                "progress": 100,
+                "message": "Model training completed successfully",
+                "stats": model_metrics
+            })
         
         # Restore workload check setting
         metrics_service.set_check_workload_active(True)
@@ -311,10 +385,20 @@ async def train_model():
         return {
             "status": "success", 
             "message": "Model trained successfully", 
-            "model": result['model_name']
+            "model": result['model_name'],
+            "metrics": model_metrics
         }
     except Exception as e:
         logger.error(f"Failed to train model: {str(e)}")
+        # Update status - failed
+        async with _training_lock:
+            _training_status.update({
+                "stage": "failed",
+                "progress": 0,
+                "message": f"Training failed: {str(e)}",
+                "error": str(e)
+            })
+        
         # Ensure workload check is restored even on error
         metrics_service.set_check_workload_active(True)
         

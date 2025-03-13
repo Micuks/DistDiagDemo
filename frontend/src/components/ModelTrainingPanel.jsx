@@ -1,8 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select } from 'antd';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select, Tabs } from 'antd';
+import { DatabaseOutlined, ApiOutlined, ExperimentOutlined, LineChartOutlined } from '@ant-design/icons';
 import { trainingService } from '../services/trainingService';
 import { useAnomalyData } from '../hooks/useAnomalyData';
 import ModelPerformanceView from './ModelPerformanceView';
+import ModelTrainingProgress from './ModelTrainingProgress';
+
+const { TabPane } = Tabs;
 
 const ModelTrainingPanel = () => {
   const [loading, setLoading] = useState(false);
@@ -17,8 +21,13 @@ const ModelTrainingPanel = () => {
   const { data: activeAnomalies = [] } = useAnomalyData();
   const [isTraining, setIsTraining] = useState(false);
   const [isCollectionToggling, setIsCollectionToggling] = useState(false);
+  const [trainingStatus, setTrainingStatus] = useState({ stage: 'idle', progress: 0 });
+  const [activeTab, setActiveTab] = useState('1');
+  
+  const fetchStatusIntervalRef = useRef(null);
+  const fetchStatsIntervalRef = useRef(null);
+  const fetchTrainingStatusIntervalRef = useRef(null);
 
-  // Fetch available models
   useEffect(() => {
     const fetchModels = async () => {
       try {
@@ -33,36 +42,92 @@ const ModelTrainingPanel = () => {
       }
     };
     fetchModels();
+    
+    return () => {
+      if (fetchStatusIntervalRef.current) clearInterval(fetchStatusIntervalRef.current);
+      if (fetchStatsIntervalRef.current) clearInterval(fetchStatsIntervalRef.current);
+      if (fetchTrainingStatusIntervalRef.current) clearInterval(fetchTrainingStatusIntervalRef.current);
+    };
   }, []);
 
-  // Fetch collection status periodically
   useEffect(() => {
     const fetchStatus = async () => {
       try {
         const status = await trainingService.getCollectionStatus();
-        // Update the isCollecting property based on either normal or anomaly collection
         setCollectionStatus({
           isCollecting: status.is_collecting_normal || status.is_collecting_anomaly || false,
           currentType: status.current_type || null,
         });
-        
-        console.log("Collection status updated:", status);
       } catch (error) {
         console.error("Failed to fetch collection status:", error);
       }
     };
 
     fetchStatus();
-    const interval = setInterval(fetchStatus, 5000);
-    return () => clearInterval(interval);
+    
+    if (fetchStatusIntervalRef.current) clearInterval(fetchStatusIntervalRef.current);
+    fetchStatusIntervalRef.current = setInterval(fetchStatus, 5000);
+    
+    return () => {
+      if (fetchStatusIntervalRef.current) clearInterval(fetchStatusIntervalRef.current);
+    };
   }, []);
 
-  // Fetch training stats periodically
   useEffect(() => {
     fetchTrainingStats();
-    const interval = setInterval(fetchTrainingStats, 5000);
-    return () => clearInterval(interval);
+    
+    if (fetchStatsIntervalRef.current) clearInterval(fetchStatsIntervalRef.current);
+    fetchStatsIntervalRef.current = setInterval(fetchTrainingStats, 5000);
+    
+    return () => {
+      if (fetchStatsIntervalRef.current) clearInterval(fetchStatsIntervalRef.current);
+    };
   }, []);
+
+  useEffect(() => {
+    const fetchTrainingStatus = async () => {
+      try {
+        const status = await trainingService.getTrainingStatus();
+        setTrainingStatus(status);
+        
+        if (status.stage !== 'idle' && status.stage !== 'completed' && status.stage !== 'failed') {
+          setActiveTab('2');
+          setIsTraining(true);
+        } else if (status.stage === 'completed' || status.stage === 'failed') {
+          setIsTraining(false);
+          
+          if (status.stage === 'completed') {
+            fetchModels();
+            fetchTrainingStats();
+            message.success("Model training completed successfully!");
+          }
+        }
+      } catch (error) {
+        console.error("Failed to fetch training status:", error);
+      }
+    };
+
+    fetchTrainingStatus();
+    
+    if (fetchTrainingStatusIntervalRef.current) clearInterval(fetchTrainingStatusIntervalRef.current);
+    fetchTrainingStatusIntervalRef.current = setInterval(fetchTrainingStatus, 3000);
+    
+    return () => {
+      if (fetchTrainingStatusIntervalRef.current) clearInterval(fetchTrainingStatusIntervalRef.current);
+    };
+  }, []);
+
+  const fetchModels = async () => {
+    try {
+      const models = await trainingService.getAvailableModels();
+      setAvailableModels(models);
+      if (models.length > 0 && !selectedModel) {
+        setSelectedModel(models[0]);
+      }
+    } catch (error) {
+      console.error("Failed to fetch models:", error);
+    }
+  };
 
   const handleCollectionToggle = async () => {
     if (isCollectionToggling) return;
@@ -74,11 +139,9 @@ const ModelTrainingPanel = () => {
       let response;
       
       if (collectionStatus.isCollecting) {
-        // Stop collection based on current type
         if (collectionStatus.currentType === "normal") {
           response = await trainingService.stopNormalCollection();
         } else {
-          // We're no longer using postCollect option
           response = await trainingService.stopAnomalyCollection(true);
         }
         
@@ -88,10 +151,8 @@ const ModelTrainingPanel = () => {
           message.success("Successfully stopped data collection");
         }
       } else {
-        // Start collection based on presence of anomalies
         if (activeAnomalies.length > 0) {
           const activeAnomaly = activeAnomalies[0];
-          // Start collection for existing anomaly without injecting new one
           response = await trainingService.startAnomalyCollection(
             activeAnomaly.type,
             activeAnomaly.node
@@ -100,7 +161,6 @@ const ModelTrainingPanel = () => {
           if (response && response.status === 'pending') {
             message.warning(response.message || "Collection already in progress");
           } else {
-            console.log("Start anomaly collection response:", response);
             message.success(`Started data collection for ${activeAnomaly.type}`);
           }
         } else {
@@ -114,7 +174,6 @@ const ModelTrainingPanel = () => {
         }
       }
 
-      // Refresh status after toggle
       const newStatus = await trainingService.getCollectionStatus();
       setCollectionStatus({
         isCollecting: newStatus.is_collecting_normal || newStatus.is_collecting_anomaly || false,
@@ -154,129 +213,112 @@ const ModelTrainingPanel = () => {
     }
   };
 
-    const fetchTrainingStats = async () => {
-        try {
-            const response = await trainingService.getTrainingStats();
-            if (response && response.status === 'success' && response.stats) {
-                setTrainingStats(response.stats);
-            } else {
-                setTrainingStats(null);
-            }
-        } catch (error) {
-            console.error("Error loading training stats", error);
-            setTrainingStats(null);
-        }
-    };
+  const fetchTrainingStats = useCallback(async () => {
+    try {
+      const response = await trainingService.getTrainingStats();
+      if (response && response.status === 'success' && response.stats) {
+        setTrainingStats(response.stats);
+      } else {
+      }
+    } catch (error) {
+      console.error("Error loading training stats", error);
+    }
+  }, []);
 
-    const handleTrainModel = async () => {
-        // Don't allow multiple simultaneous requests
-        if (isTraining) return;
-        
-        try {
-            setIsTraining(true);
-            setLoading(true);
-            message.info('Training model with collected data...');
-            
-            const response = await trainingService.trainModel();
-            
-            if (response && response.status === 'success') {
-                message.success('Model trained successfully');
-                // Refresh the list of models
-                const models = await trainingService.getAvailableModels();
-                setAvailableModels(models);
-                if (models.length > 0) {
-                    setSelectedModel(models[0].name);
-                }
-            } else if (response && response.status === 'pending') {
-                // Handle the case where training is already in progress
-                message.warning(response.message || 'Training is already in progress');
-            } else {
-                message.error('Failed to train model');
-            }
-        } catch (error) {
-            console.error("Error training model", error);
-            message.error(`Failed to train model: ${error.message}`);
-        } finally {
-            setLoading(false);
-            setIsTraining(false);
-        }
-    };
+  const handleTrainModel = async () => {
+    if (isTraining || trainingStatus.stage !== 'idle') return;
+    
+    try {
+      setIsTraining(true);
+      setLoading(true);
+      message.info('Initiating model training process...');
+      
+      setActiveTab('2');
+      
+      const response = await trainingService.trainModel();
+      
+      if (response && response.status === 'pending') {
+        message.warning(response.message || 'Training is already in progress');
+      }
+    } catch (error) {
+      console.error("Error training model", error);
+      message.error(`Failed to start model training: ${error.message}`);
+      setIsTraining(false);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  return (
-    <div>
+  const renderDataCollectionTab = () => {
+    return (
       <Row gutter={[16, 16]}>
         <Col span={24}>
-          <Row gutter={[16, 16]}>
-            <Col span={24}>
-              <Space direction="vertical" style={{ width: "100%" }}>
-                <Select
-                  style={{ width: "100%" }}
-                  placeholder="Select model to view performance"
-                  value={selectedModel}
-                  onChange={setSelectedModel}
-                >
-                  {availableModels.map(model => (
-                    <Select.Option key={model} value={model}>
-                      {model.replace(/\.[^/.]+$/, "")}
-                    </Select.Option>
-                  ))}
-                </Select>
-                {/*{selectedModel && (
-                  <ModelPerformanceView modelName={selectedModel} />
-                )}*/}
-              </Space>
-            </Col>
-          </Row>
-          <Divider />
-          <Card title="Training Data Collection">
+          <Card title="Training Data Collection" 
+                extra={
+                  <Space>
+                    <Button 
+                      type="primary" 
+                      onClick={handleTrainModel}
+                      loading={isTraining}
+                      disabled={!trainingStats || trainingStats.total_samples < 10 || isTraining}
+                    >
+                      Train Model
+                    </Button>
+                  </Space>
+                }>
             <Space direction="vertical" style={{ width: "100%" }}>
-              <div>
-                <Switch
-                  checked={collectionStatus.isCollecting}
-                  onChange={handleCollectionToggle}
-                  loading={loading}
-                  disabled={loading}
-                />
-                <span style={{ marginLeft: 8 }}>
-                  {collectionStatus.isCollecting
-                    ? `Collecting ${collectionStatus.currentType} data`
-                    : 'Start data collection'}
-                </span>
-              </div>
+              <Row gutter={[16, 16]} align="middle">
+                <Col span={16}>
+                  <Space>
+                    <Switch
+                      checked={collectionStatus.isCollecting}
+                      onChange={handleCollectionToggle}
+                      loading={loading}
+                      disabled={loading || isTraining}
+                    />
+                    <span>
+                      {collectionStatus.isCollecting
+                        ? `Collecting ${collectionStatus.currentType} data`
+                        : 'Start data collection'}
+                    </span>
+                  </Space>
+                </Col>
+                <Col span={8} style={{ textAlign: 'right' }}>
+                  <Space>
+                    <Switch
+                      checked={isAutoBalancing}
+                      onChange={handleAutoBalance}
+                      loading={loading}
+                      disabled={loading || isTraining}
+                    />
+                    <span>Auto-balance</span>
+                  </Space>
+                </Col>
+              </Row>
+              
               {activeAnomalies.length > 0 && !collectionStatus.isCollecting && (
-                <div style={{ marginLeft: 32 }}>
-                </div>
-              )}
-              <div>
-                <Switch
-                  checked={isAutoBalancing}
-                  onChange={handleAutoBalance}
-                  loading={loading}
+                <Alert
+                  message={`Active anomaly detected: ${activeAnomalies[0].type}`}
+                  description="You can collect training data for this anomaly type."
+                  type="info"
+                  showIcon
+                  style={{ marginTop: 16 }}
                 />
-                <span style={{ marginLeft: 8 }}>Auto-balance Training Data</span>
-              </div>
-              <div style={{ marginTop: 16 }}>
-                <Button 
-                  type="primary" 
-                  onClick={handleTrainModel}
-                  loading={loading}
-                  disabled={!trainingStats || trainingStats.total_samples < 10}
-                >
-                  Train Model
-                </Button>
-                {(!trainingStats || trainingStats.total_samples < 10) && (
-                  <span style={{ marginLeft: 8, color: 'rgba(0, 0, 0, 0.45)' }}>
-                    Need at least 10 samples
-                  </span>
-                )}
-              </div>
+              )}
+              
+              {(!trainingStats || trainingStats.total_samples < 10) && (
+                <Alert
+                  message="Insufficient Training Data"
+                  description="You need at least 10 samples to train a model."
+                  type="warning"
+                  showIcon
+                  style={{ marginTop: 16 }}
+                />
+              )}
             </Space>
           </Card>
         </Col>
-      </Row>
-
-      <Divider />
-      <Row gutter={[16, 16]}>
+        
         <Col span={24}>
           <Card title="Training Statistics">
             {trainingStats ? (
@@ -286,18 +328,23 @@ const ModelTrainingPanel = () => {
                     <Statistic
                       title="Normal Samples"
                       value={trainingStats.normal || 0}
+                      valueStyle={{ color: '#3f8600' }}
+                      prefix={<DatabaseOutlined />}
                     />
                   </Col>
                   <Col span={8}>
                     <Statistic
                       title="Anomaly Samples"
                       value={trainingStats.anomaly || 0}
+                      valueStyle={{ color: '#cf1322' }}
+                      prefix={<ExperimentOutlined />}
                     />
                   </Col>
                   <Col span={8}>
                     <Statistic
                       title="Total Samples"
                       value={trainingStats.total_samples || 0}
+                      prefix={<DatabaseOutlined />}
                     />
                   </Col>
                 </Row>
@@ -314,6 +361,7 @@ const ModelTrainingPanel = () => {
                       <Statistic
                         title={`${type.charAt(0).toUpperCase() + type.slice(1)} Anomalies`}
                         value={count}
+                        valueStyle={{ color: '#1890ff' }}
                       />
                     </Col>
                   ))}
@@ -350,7 +398,75 @@ const ModelTrainingPanel = () => {
           </Card>
         </Col>
       </Row>
-    </div>
+    );
+  };
+
+  const renderTrainingProgressTab = () => {
+    return (
+      <Row gutter={[16, 16]}>
+        <Col span={24}>
+          <ModelTrainingProgress status={trainingStatus} />
+        </Col>
+      </Row>
+    );
+  };
+
+  const renderModelPerformanceTab = () => {
+    return (
+      <Row gutter={[16, 16]}>
+        <Col span={24}>
+          <Card title="Model Performance">
+            <Space direction="vertical" style={{ width: "100%" }}>
+              <Select
+                style={{ width: "100%" }}
+                placeholder="Select model to view performance"
+                value={selectedModel}
+                onChange={setSelectedModel}
+              >
+                {availableModels.map(model => (
+                  <Select.Option key={model} value={model}>
+                    {model.replace(/\.[^/.]+$/, "")}
+                  </Select.Option>
+                ))}
+              </Select>
+              {selectedModel && (
+                <div style={{ marginTop: 16 }}>
+                  <Alert 
+                    message="Model Performance Details" 
+                    description="Detailed model performance metrics will be displayed here."
+                    type="info" 
+                    showIcon 
+                  />
+                </div>
+              )}
+            </Space>
+          </Card>
+        </Col>
+      </Row>
+    );
+  };
+
+  return (
+    <Tabs activeKey={activeTab} onChange={setActiveTab}>
+      <TabPane 
+        tab={<span><DatabaseOutlined />Data Collection</span>} 
+        key="1"
+      >
+        {renderDataCollectionTab()}
+      </TabPane>
+      <TabPane 
+        tab={<span><ApiOutlined />Training Process</span>} 
+        key="2"
+      >
+        {renderTrainingProgressTab()}
+      </TabPane>
+      <TabPane 
+        tab={<span><LineChartOutlined />Model Performance</span>} 
+        key="3"
+      >
+        {renderModelPerformanceTab()}
+      </TabPane>
+    </Tabs>
   );
 };
 

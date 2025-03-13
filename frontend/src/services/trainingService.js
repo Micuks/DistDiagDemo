@@ -111,6 +111,12 @@ class TrainingService {
             this.client.post('/api/training/train')
         );
     }
+
+    async getTrainingStatus() {
+        return this._retryableRequest(() =>
+            this.client.get('/api/training/training-status')
+        );
+    }
 }
 
 export const trainingService = new TrainingService(); 

@@ -4,6 +4,7 @@ import json
 from typing import Dict
 from fastapi.responses import JSONResponse
 import warnings
+import logging
 
 router = APIRouter()
 
@@ -60,3 +61,41 @@ async def stop_metrics_collection():
     """Stop collecting metrics."""
     metrics_service.stop_collection()
     return {"status": "stopped"}
+
+@router.get("/fluctuations")
+async def get_metrics_fluctuations():
+    """Get metrics with fluctuation data for all nodes."""
+    try:
+        metrics = metrics_service.get_last_metric_point()
+        
+        # Count total metrics and metrics with fluctuations
+        total_metrics = 0
+        fluctuating_metrics = 0
+        
+        # Check if any metrics have fluctuations
+        for node_ip, node_data in metrics.get("metrics", {}).items():
+            for category, category_metrics in node_data.items():
+                for metric_name, metric_data in category_metrics.items():
+                    total_metrics += 1
+                    if metric_data.get("has_fluctuation", False):
+                        fluctuating_metrics += 1
+        
+        return {
+            "metrics": metrics.get("metrics", {}),
+            "timestamp": metrics.get("timestamp"),
+            "summary": {
+                "total_metrics": total_metrics,
+                "fluctuating_metrics": fluctuating_metrics,
+                "has_fluctuations": fluctuating_metrics > 0
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting metrics fluctuations: {str(e)}")
+        return JSONResponse(
+            status_code=500, 
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
