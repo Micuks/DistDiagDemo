@@ -297,6 +297,23 @@ async def train_model():
             "stats": {}
         }
     
+    # Create a background task for the training process
+    asyncio.create_task(_run_training_in_background())
+    
+    # Return immediately, letting training continue in background
+    return {
+        "status": "accepted", 
+        "message": "Training started in the background"
+    }
+
+async def _run_training_in_background():
+    """Run the model training process in a background task."""
+    global _training_in_progress, _training_status
+    
+    # Store original settings to restore later
+    original_workload_active = True
+    original_send_setting = True
+    
     try:
         logger.info("Starting model training process with existing collected data")
         
@@ -327,7 +344,7 @@ async def train_model():
                     "error": "No training data available in the dataset",
                     "progress": 0
                 })
-            raise HTTPException(status_code=400, detail="No training data available in the dataset")
+            return
             
         # Update status - preprocessing
         async with _training_lock:
@@ -349,8 +366,8 @@ async def train_model():
                 "message": "Training model..."
             })
         
-        # Train the model with the collected data
-        result = diagnosis_service.train(X, y)
+        # Run the CPU-intensive training in a thread pool to avoid blocking the event loop
+        result = await asyncio.to_thread(diagnosis_service.train, X, y)
         logger.info(f"Model training completed successfully: {result['model_name']}")
         
         # Update status - evaluating
@@ -374,20 +391,9 @@ async def train_model():
                 "message": "Model training completed successfully",
                 "stats": model_metrics
             })
+            
+        logger.info("Training process completed successfully")
         
-        # Restore workload check setting
-        metrics_service.set_check_workload_active(True)
-        
-        # Restore original metrics-to-training setting
-        metrics_service.toggle_send_to_training(original_send_setting)
-        logger.info("Restored original metrics collection settings")
-        
-        return {
-            "status": "success", 
-            "message": "Model trained successfully", 
-            "model": result['model_name'],
-            "metrics": model_metrics
-        }
     except Exception as e:
         logger.error(f"Failed to train model: {str(e)}")
         # Update status - failed
@@ -398,17 +404,14 @@ async def train_model():
                 "message": f"Training failed: {str(e)}",
                 "error": str(e)
             })
-        
+    finally:
         # Ensure workload check is restored even on error
         metrics_service.set_check_workload_active(True)
         
         # Ensure metrics-to-training setting is restored
-        if 'original_send_setting' in locals():
-            metrics_service.toggle_send_to_training(original_send_setting)
-            logger.info("Restored original metrics collection settings after error")
-            
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
+        metrics_service.toggle_send_to_training(original_send_setting)
+        logger.info("Restored original metrics collection settings")
+        
         # Always mark training as complete, even if there was an error
         async with _training_lock:
             _training_in_progress = False

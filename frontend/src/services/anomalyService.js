@@ -242,20 +242,43 @@ class AnomalyService {
         );
     }
 
+    async validateModel(modelName) {
+        return this._retryableRequest(() =>
+            this.client.post('/api/models/validate', {
+                model_name: modelName
+            })
+        ).catch(error => {
+            console.error(`Model validation failed for ${modelName}:`, error);
+            return { valid: false, error: error.message };
+        });
+    }
+
     async getModelPerformance(modelName) {
         return this._retryableRequest(() =>
             this.client.get(`/api/models/${encodeURIComponent(modelName)}/performance`)
         );
     }
 
-    async compareModels(modelNames) {
+    async getModelDiagnosis(modelName, threshold = 0.15) {
+        return this._retryableRequest(() =>
+            this.client.get('/api/models/ranks', {
+                params: {
+                    model_names: [modelName],  // Send as array even for single model
+                    threshold: threshold       // Add threshold parameter
+                }
+            })
+        );
+    }
+
+    async compareModels(modelNames, threshold = 0.15) {
         return this._retryableRequest(() => 
             this.client.get('/api/models/ranks', {
                 params: {
-                    model_names: modelNames
+                    model_names: modelNames,
+                    threshold: threshold       // Add threshold parameter
                 },
             })
-        )
+        );
     }
 
     async startAnomalyCollection(type, node) {
@@ -279,6 +302,33 @@ class AnomalyService {
         return this._retryableRequest(() => 
             this.client.get(`/anomalies/${anomalyId}/status`)
         );
+    }
+
+    async getMetricsFluctuations() {
+        try {
+            // Add timestamp to prevent caching
+            const timestamp = new Date().getTime();
+            return await this._retryableRequest(() => 
+                this.client.get(`/api/metrics/fluctuations?_=${timestamp}`, {
+                    headers: {
+                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                        'Pragma': 'no-cache',
+                        'Expires': '0'
+                    }
+                })
+            );
+        } catch (error) {
+            console.error('Error fetching metrics fluctuations:', error);
+            // Return empty object on error rather than throwing
+            return { 
+                metrics: {},
+                summary: {
+                    total_metrics: 0,
+                    fluctuating_metrics: 0,
+                    has_fluctuations: false
+                }
+            };
+        }
     }
 }
 

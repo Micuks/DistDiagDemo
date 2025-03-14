@@ -11,6 +11,9 @@ importers:
       '@ant-design/charts':
         specifier: ^2.2.6
         version: 2.2.6(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(workerize-loader@2.0.2(webpack@5.98.0))
+      '@ant-design/icons':
+        specifier: ^5.6.1
+        version: 5.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@emotion/react':
         specifier: ^11.11.1
         version: 11.14.0(@types/react@18.3.18)(react@18.3.1)

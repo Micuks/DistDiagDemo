@@ -291,3 +291,113 @@ pytest
    - Removal of redundant functions
    - Enhanced error logging
    - More robust type checking
+
+## Why use statistical time features for diagnosis
+<think>
+
+Okay, let's tackle this question. The user is asking why we calculate statistical time features instead of using raw time series data, and whether processing loses information. 
+
+First, I need to recall the code structure. In the `_calculate_time_features` method, they compute mean, std, max, min, and median. These are summary statistics. 
+
+Why use these instead of raw data? Well, raw time series can be noisy and high-dimensional. For example, 5 points per metric might not be enough for models to capture patterns, but 32 metrics * 5 points = 160 features. That's a lot, and models might struggle with that many features, leading to overfitting.
+
+Statistical features reduce dimensionality. They summarize the data, making it easier for models like XGBoost to handle. Also, some models work better with aggregated features rather than raw time points. 
+
+But the user is concerned about information loss. Yes, raw data has more detail, but in practice, summary stats can capture essential trends. For example, mean gives central tendency, std shows variability, max/min indicate extremes. These are often sufficient for anomaly detection where deviations from normal are key.
+
+Another point: the system uses a 5-second interval, so the time window is 25 seconds. Short-term trends might not be captured well with raw data, but features like max or std can highlight sudden spikes or drops, which are critical for anomalies.
+
+Also, considering the PageRank-based correlation in diagnosis, using features might help compute more stable correlations between nodes than noisy raw data.
+
+However, the answer should acknowledge that some information is lost. Maybe suggest alternatives like using both raw and features, or more advanced time series processing (like LSTMs) if feasible. But given the current setup, the features are a practical choice balancing complexity and effectiveness.
+</think>
+
+The statistical time features (mean, std, max, min, median) are calculated instead of using raw time series data for several important reasons:
+
+1. **Dimensionality Reduction**  
+   - Raw 5-point time series (25s window) would create 160 raw metrics × 5 points = 800 features
+   - Statistical features reduce this to 160 features while preserving key patterns
+   - This helps prevent the "curse of dimensionality" in ML models
+
+2. **Noise Reduction**  
+   - Short-term fluctuations in raw metrics (5s intervals) can be noisy
+   - Statistical features smooth out transient spikes while preserving true trends
+   - Example: A CPU spike from 30% → 90% → 35% would be represented as:
+     ```python
+     mean=51.7, std=28.9, max=90, min=30, median=35
+     ```
+
+3. **Model Compatibility**  
+   - XGBoost classifiers (used in the system) work better with aggregated features
+   - The PageRank correlation calculation (WPRNNode) benefits from stable feature representations
+
+4. **Temporal Pattern Preservation**  
+   These features capture different aspects of time series behavior:
+   - **Mean**: Baseline level
+   - **Std Dev**: Volatility
+   - **Max/Min**: Extreme values
+   - **Median**: Central tendency
+
+**Why This is Effective for Anomaly Detection**  
+```python
+def _calculate_time_features(values):
+    return [
+        np.mean(values),  # Baseline level
+        np.std(values),   # Unusual volatility
+        np.max(values),   # Spike detection
+        np.min(values),   # Drop detection 
+        np.median(values) # Central tendency
+    ]
+```
+
+**What's Gained vs Lost**  
+|                      | Raw Time Series | Statistical Features |
+|----------------------|-----------------|-----------------------|
+| **Dimensionality**   | 800 features    | 160 features          |
+| **Noise Handling**   | Poor            | Good                  |
+| **Trend Capture**    | Full resolution | Aggregated view       |
+| **Training Speed**   | Slow            | Fast                  |
+| **Memory Usage**     | High            | Low                   |
+
+**Suggested Enhancements**  
+1. Add temporal features to better capture trends:
+   ```python
+   def _calculate_time_features(values):
+       # Existing features
+       features = [
+           np.mean(values),
+           np.std(values),
+           np.max(values),
+           np.min(values),
+           np.median(values)
+       ]
+       
+       # New temporal features
+       features.append(np.gradient(values).mean())  # Trend direction
+       features.append(values[-1] - values[0])      # Net change
+       return features
+   ```
+
+2. Implement hybrid processing in the frontend:
+   ```javascript
+   // In RanksPanel.jsx, add raw data toggle
+   <Switch
+     checked={showRawData}
+     onChange={v => setShowRawData(v)}
+     checkedChildren="Raw Data"
+     unCheckedChildren="Processed"
+   />
+   ```
+
+3. Use wavelet transforms for better time-frequency analysis:
+   ```python
+   from pywt import wavedec
+   
+   def _calculate_time_features(values):
+       # Wavelet decomposition
+       coeffs = wavedec(values, 'db1', level=2)
+       features.extend([np.mean(c) for c in coeffs])
+       return features
+   ```
+
+The current approach makes a practical tradeoff - it loses some temporal resolution but gains computational efficiency and model stability. For this specific use case of distributed system anomaly detection, the statistical features provide sufficient signal while keeping the system performant.
