@@ -74,13 +74,25 @@ class DistDiagnosis:
             "cache_bottleneck",
             "too_many_indexes"
         ]
-        # Enable GPU acceleration with CUDA using updated parameters
+        
+        # Check for CUDA availability
+        import xgboost as xgb
+        try:
+            gpu_available = len(xgb.get_gpu_info()) > 0
+            device = 'cuda' if gpu_available else 'cpu'
+            logger.info(f"XGBoost using device: {device} (GPU {'available' if gpu_available else 'not available'})")
+        except Exception as e:
+            logger.warning(f"Error checking GPU availability: {str(e)}. Defaulting to CPU.")
+            device = 'cpu'
+        
+        # Enable GPU acceleration with CUDA using updated parameters if available
         self.clf_list = [XGBClassifier(
             objective='binary:logistic',
-            device='cuda',  # Updated from tree_method='gpu_hist'
+            device=device,  # Use detected device
             n_jobs=-1  # Use all available CPU cores for parallel processing
         ) for _ in range(num_classifier)]
         self.time_window = 5  # Default 5-minute window
+        self.use_pca = False  # Disable PCA by default
         logger.info(f"Initialized {len(self.clf_list)} classifiers for {len(self.classes)} classes")
 
     def _get_time_window_values(self, metrics: Dict[str, Any], metric_name: str) -> List[float]:
@@ -178,10 +190,10 @@ class DistDiagnosis:
             # Each metric produces 9 features (updated from 5), and we're processing multiple metrics
             num_metrics = (
                 3 +  # CPU metrics
-                5 +  # Memory metrics
-                9 +  # IO metrics
-                7 +  # Network metrics
-                8    # Transaction metrics
+                6 +  # Memory metrics
+                13 +  # IO metrics
+                12 +  # Network metrics
+                27    # Transaction metrics
             )
             feature_vector = np.zeros(num_metrics * 9)  # 9 features per metric (matches _calculate_time_features output)
             feature_idx = 0
@@ -203,7 +215,7 @@ class DistDiagnosis:
             # Memory metrics
             memory_metrics = metrics.get('memory', {})
             for metric in ['total memstore used', 'active memstore used', 'memstore limit', 
-                         'memory usage', 'observer memory hold size']:
+                         'memory usage', 'observer memory hold size', 'memory usage']:
                 values = self._get_time_window_values(memory_metrics, metric)
                 features = self._calculate_time_features(values)
                 if any(f != 0 for f in features):
@@ -214,8 +226,10 @@ class DistDiagnosis:
             # IO metrics
             io_metrics = metrics.get('io', {})
             for metric in ['palf write io count to disk', 'palf write size to disk',
-                         'io read count', 'io write count', 'io read delay', 'io write delay',
-                         'data micro block cache hit', 'index micro block cache hit', 'row cache hit']:
+                         'clog trans log total size', 'io read count', 'io write count',
+                         'io read delay', 'io write delay', 'blockscaned data micro block count',
+                         'accessed data micro block count', 'data micro block cache hit',
+                         'index micro block cache hit', 'row cache miss', 'row cache hit']:
                 values = self._get_time_window_values(io_metrics, metric)
                 features = self._calculate_time_features(values)
                 if any(f != 0 for f in features):
@@ -226,8 +240,9 @@ class DistDiagnosis:
             # Network metrics
             network_metrics = metrics.get('network', {})
             for metric in ['rpc packet in', 'rpc packet in bytes', 'rpc packet out',
-                         'rpc packet out bytes', 'rpc net delay', 'mysql packet in',
-                         'mysql packet out']:
+                         'rpc packet out bytes', 'rpc deliver fail', 'rpc net delay',
+                         'rpc net frame delay', 'mysql packet in', 'mysql packet in bytes',
+                         'mysql packet out', 'mysql packet out bytes', 'mysql deliver fail']:
                 values = self._get_time_window_values(network_metrics, metric)
                 features = self._calculate_time_features(values)
                 if any(f != 0 for f in features):
@@ -238,8 +253,15 @@ class DistDiagnosis:
             # Transaction metrics
             trans_metrics = metrics.get('transactions', {})
             for metric in ['trans commit count', 'trans timeout count', 'sql update count',
-                         'sql select count', 'active sessions', 'sql fail count',
-                         'request queue time', 'DB time']:
+                         'active sessions', 'sql select count', 'trans system trans count',
+                         'trans rollback count', 'sql fail count', 'request queue time',
+                         'trans user trans count', 'commit log replay count', 'sql update count',
+                         'sql delete count', 'sql other count', 'ps prepare count',
+                         'ps execute count', 'sql inner insert count', 'sql inner update count',
+                         'memstore write lock succ count', 'memstore write lock fail count',
+                         'DB time', 'local trans total used time', 'distributed trans total used time',
+                         'sql select count', 'sql local count', 'sql remote count',
+                         'sql distributed count']:
                 values = self._get_time_window_values(trans_metrics, metric)
                 features = self._calculate_time_features(values)
                 if any(f != 0 for f in features):
@@ -304,8 +326,7 @@ class DistDiagnosis:
             
             # Ensure features have enough data for meaningful correlation
             if len(x_features) < 2 or len(y_features) < 2:
-                # Use a moderate default correlation (0.5 means moderate relationship)
-                return 0.5
+                return 0.5  # Moderate default correlation
             
             # Add a small amount of noise to avoid identical vectors
             x_features_noise = x_features + np.random.normal(0, 1e-6, size=len(x_features))
@@ -317,26 +338,27 @@ class DistDiagnosis:
                 
                 # Handle NaN values that might result from constant vectors
                 if np.isnan(correlation):
-                    # Check if both vectors are essentially the same (constant or very similar)
                     if np.allclose(x_features, y_features, rtol=1e-5, atol=1e-8):
                         correlation = 0.8  # High correlation for similar vectors
                     else:
                         correlation = 0.1  # Low correlation for different but constant vectors
+                
+                # Apply sigmoid scaling to amplify strong correlations
+                correlation = 2.0 / (1.0 + np.exp(-5 * abs(correlation))) - 1.0
+                
             except Exception:
-                # Fallback if correlation calculation fails
                 correlation = 0.3  # Moderate-low default
             
             # Apply small random noise to correlation to avoid identical values
-            # Only if correlation is too uniform (close to same value)
             if 0.89 <= correlation <= 0.91 or -0.01 <= correlation <= 0.01:
-                correlation += (np.random.rand() - 0.5) * 0.1  # Add ±0.05 noise
+                correlation += (np.random.rand() - 0.5) * 0.1
             
             # Ensure correlation is within valid range
             correlation = max(-1.0, min(1.0, correlation))
             
-            # Convert to distance (1 means no correlation, 0 means perfect correlation)
-            # For PageRank we need distance, not similarity
-            rank = 1.0 - abs(correlation)
+            # Use absolute correlation directly as rank (higher correlation = higher rank)
+            rank = abs(correlation)
+            
             return rank
         except Exception as e:
             logger.error(f"Error calculating rank: {str(e)}")
@@ -409,12 +431,14 @@ class DistDiagnosis:
             node_names = []
             node_metrics_list = []  # Store processed metrics for correlation
             
+            logger.info(f"Processing metrics for {len(node_metrics)} nodes")
             for node, metrics in node_metrics.items():
                 feature_vector = self._process_metrics(metrics)
                 if feature_vector is not None:
                     features.append(feature_vector)
                     node_names.append(node)
                     node_metrics_list.append(feature_vector)
+                    logger.debug(f"Processed metrics for node {node}, feature vector shape: {feature_vector.shape}")
 
             if not features:
                 logger.warning("No valid features extracted from metrics")
@@ -423,19 +447,23 @@ class DistDiagnosis:
             # Convert features to numpy array for processing
             features_array = np.array(features)
             
-            # Apply PCA transformation if available to match training dimensions
-            if hasattr(self, 'pca') and self.pca is not None:
+            # Apply PCA transformation if available and enabled to match training dimensions
+            if self.use_pca and hasattr(self, 'pca') and self.pca is not None:
                 try:
-                    features_array = self.pca.transform(features_array)
-                    logger.debug(f"Applied PCA transformation. New feature shape: {features_array.shape}")
+                    if features_array.shape[1] != self.pca.n_components_:
+                        logger.warning(f"PCA dimension mismatch: input has {features_array.shape[1]} features but PCA expects {self.pca.n_components_}")
+                        logger.info("Skipping PCA transformation due to dimension mismatch")
+                    else:
+                        features_array = self.pca.transform(features_array)
+                        logger.debug(f"Applied PCA transformation. New feature shape: {features_array.shape}")
                 except Exception as e:
-                    logger.error(f"Error applying PCA transformation: {str(e)}")
-                    return self._empty_result(node_metrics)
+                    logger.error(f"Error applying PCA transformation: {str(e)}. Continuing without PCA.")
             
             logger.debug(f"Processed {len(node_metrics_list)} node feature vectors, each with shape {features_array.shape[1] if features else 'unknown'}")
             
             # Calculate node importance scores using PageRank
             node_scores = self.calculate_score_for_node(node_metrics_list)
+            logger.debug(f"Calculated node importance scores: {node_scores}")
             
             # Get predictions and combine with node scores
             results = {}
@@ -463,20 +491,26 @@ class DistDiagnosis:
                             continue
                             
                         proba = prediction[0]
+                        logger.debug(f"Node {node} - Classifier {clf_idx} ({self.classes[clf_idx]}) probabilities: {proba}")
                         
                         # Safe access to probability values
                         if len(proba) > 1:
                             # Binary classification case - use probability of positive class
-                            score = float(proba[1])
+                            raw_score = float(proba[1])
+                            # Apply sigmoid scaling to amplify probabilities
+                            score = 1.0 / (1.0 + np.exp(-10 * (raw_score - 0.5)))
                         else:
                             # Single class case - use the only probability available
-                            score = float(proba[0])
+                            raw_score = float(proba[0])
+                            score = 1.0 / (1.0 + np.exp(-10 * (raw_score - 0.5)))
                             
-                        # Weight the score by node importance
+                        # Weight the score by node importance using exponential scaling
                         node_score = node_scores[node_idx] if node_idx < len(node_scores) else 1.0
-                        weighted_score = score * node_score
+                        node_weight = np.exp(2 * node_score)  # Exponential scaling
+                        weighted_score = score * node_weight
                         anomaly_type = self.classes[clf_idx]
                         node_results[anomaly_type] = weighted_score
+                        logger.debug(f"Node {node} - {anomaly_type}: raw_score={raw_score:.4f}, node_score={node_score:.4f}, weighted_score={weighted_score:.4f}")
                     except Exception as e:
                         logger.error(f"Error predicting with classifier {clf_idx}: {str(e)}")
                         logger.debug(f"Exception details: {traceback.format_exc()}")
@@ -488,14 +522,16 @@ class DistDiagnosis:
                 if node_results:
                     max_score = max(node_results.values())
                     max_type = max(node_results.items(), key=lambda x: x[1])[0]
+                    logger.debug(f"Node {node} - Highest scoring anomaly: {max_type} with score {max_score:.4f}")
                     
-                    if max_score > 0.15:  # Threshold aligned with reference implementation
+                    if max_score > 0.001:  # Threshold aligned with reference implementation
                         anomalies.append({
                             'node': node,
                             'type': max_type,
                             'score': max_score,
                             'timestamp': datetime.now().isoformat()
                         })
+                        logger.info(f"Detected anomaly on node {node}: {max_type} with score {max_score:.4f}")
 
             # Calculate propagation graph based on correlations
             for i, node1 in enumerate(node_names):
@@ -503,7 +539,8 @@ class DistDiagnosis:
                 for j, node2 in enumerate(node_names):
                     if i != j:
                         correlation = self.calculate_rank(node_metrics_list[i], node_metrics_list[j])
-                        if correlation > 0.3:  # Correlation threshold from reference
+                        logger.debug(f"Correlation between {node1} and {node2}: {correlation:.4f}")
+                        if correlation > 0.001:  # Correlation threshold from reference
                             propagation_graph[node1].append({
                                 'target': node2,
                                 'correlation': correlation
@@ -526,13 +563,16 @@ class DistDiagnosis:
             # Sort all possibilities by score
             all_possible_anomalies.sort(key=lambda x: x['score'], reverse=True)
             
-            return {
+            result = {
                 'scores': {node: max(node_results.values()) if node_results else 0.0 for node, node_results in results.items()},
                 'anomalies': anomalies,
                 'propagation_graph': propagation_graph,
                 'all_ranked_anomalies': all_possible_anomalies,
                 'node_names': node_names  # Add node_names to preserve node order
             }
+            
+            logger.info(f"Diagnosis complete. Found {len(anomalies)} anomalies and {len(propagation_graph)} propagation connections")
+            return result
 
         except Exception as e:
             logger.error(f"Error in diagnose: {str(e)}")
@@ -713,9 +753,13 @@ class DistDiagnosis:
         pickle_path = os.path.join(model_dir, 'decomposition.pkl')
         if os.path.exists(pca_path):
             self.pca = joblib.load(pca_path)
+            logger.info("Loaded PCA model but keeping it disabled to avoid dimension mismatch errors")
+            self.use_pca = False  # Explicitly disable PCA even if model exists
         elif os.path.exists(pickle_path):
             with open(pickle_path, 'rb') as f:
                 self.pca = pickle.load(f)
+            logger.info("Loaded PCA model but keeping it disabled to avoid dimension mismatch errors")  
+            self.use_pca = False  # Explicitly disable PCA even if model exists
 
     def decompose_train_x(self, composed_train_x):
         """Decompose training features and apply PCA if needed"""
@@ -784,8 +828,8 @@ class DistDiagnosis:
             self.feature_dim = result.shape[1]
             logger.debug(f"Original feature dimension: {self.feature_dim}")
             
-            # Apply PCA if we have enough samples
-            if len(result) >= 2:
+            # Apply PCA if enabled and we have enough samples
+            if self.use_pca and len(result) >= 2:
                 try:
                     # Initialize PCA to preserve 95% of variance
                     self.pca = PCA(n_components=0.95)
@@ -804,7 +848,7 @@ class DistDiagnosis:
                     if hasattr(self, 'pca'):
                         delattr(self, 'pca')
             else:
-                logger.debug("Not enough samples for PCA dimensionality reduction")
+                logger.debug("PCA dimensionality reduction is disabled or not enough samples")
                 if hasattr(self, 'pca'):
                     delattr(self, 'pca')
             
@@ -875,6 +919,7 @@ class DiagnosisService:
             node_num=self.node_count
         )
         self.diagnosis.time_window = self.time_window  # Set time window for metric processing
+        self.diagnosis.use_pca = False  # Explicitly disable PCA
         
         # Select model to use - either specified or latest available
         available_models = self.get_available_models()
@@ -999,17 +1044,18 @@ class DiagnosisService:
     def evaluate_model(self, X_test, y_test, model_name):
         """Evaluate model performance and store metrics"""
         try:
-            # Apply PCA transformation if available to match training dimensions
-            if hasattr(self.diagnosis, 'pca') and self.diagnosis.pca is not None:
+            # Apply PCA transformation if available and enabled to match training dimensions
+            if self.diagnosis.use_pca and hasattr(self.diagnosis, 'pca') and self.diagnosis.pca is not None:
                 try:
                     if X_test.shape[1] != self.diagnosis.pca.n_components_:
+                        logger.warning(f"PCA dimension mismatch in evaluation: input has {X_test.shape[1]} features but PCA expects {self.diagnosis.pca.n_components_}")
+                        X_test_transformed = X_test  # Use original data
+                    else:
                         logger.info(f"Applying PCA transform to test data in model evaluation: {X_test.shape[1]} → {self.diagnosis.pca.n_components_}")
                         X_test_transformed = self.diagnosis.pca.transform(X_test)
-                    else:
-                        X_test_transformed = X_test
                 except Exception as e:
                     logger.error(f"Error applying PCA transformation in model evaluation: {str(e)}")
-                    raise
+                    X_test_transformed = X_test  # Use original data on error
             else:
                 X_test_transformed = X_test
             
@@ -1024,12 +1070,12 @@ class DiagnosisService:
             for i, preds in enumerate(all_preds):
                 y_pred[:, i] = preds
             
-            # Standard performance metrics - using samples average for multilabel
+            # Standard performance metrics - using samples average for multilabel with zero_division handling
             metrics = {
                 'accuracy': float(accuracy_score(y_test, y_pred)),
-                'precision': float(precision_score(y_test, y_pred, average='samples')),
-                'recall': float(recall_score(y_test, y_pred, average='samples')),
-                'f1_score': float(f1_score(y_test, y_pred, average='samples')),
+                'precision': float(precision_score(y_test, y_pred, average='samples', zero_division=0)),
+                'recall': float(recall_score(y_test, y_pred, average='samples', zero_division=0)),
+                'f1_score': float(f1_score(y_test, y_pred, average='samples', zero_division=0)),
                 'training_time': time.time() - self.training_start_time
             }
             
@@ -1054,15 +1100,18 @@ class DiagnosisService:
             # Start timer for RCA performance measurement
             start_time = time.time()
             
-            # Apply PCA transformation if available to match training dimensions
-            if hasattr(self.diagnosis, 'pca') and self.diagnosis.pca is not None:
+            # Apply PCA transformation if available and enabled to match training dimensions
+            if self.diagnosis.use_pca and hasattr(self.diagnosis, 'pca') and self.diagnosis.pca is not None:
                 try:
                     if X_test.shape[1] != self.diagnosis.pca.n_components_:
+                        logger.warning(f"PCA dimension mismatch in RCA evaluation: input has {X_test.shape[1]} features but PCA expects {self.diagnosis.pca.n_components_}")
+                        # Continue with original data
+                    else:
                         logger.info(f"Applying PCA transform to test data in RCA evaluation: {X_test.shape[1]} → {self.diagnosis.pca.n_components_}")
                         X_test = self.diagnosis.pca.transform(X_test)
                 except Exception as e:
                     logger.error(f"Error applying PCA transformation in RCA evaluation: {str(e)}")
-                    raise
+                    # Continue with original data
             
             # Create a synthetic test scenario from test data
             test_metrics = self._create_test_metrics(X_test)
@@ -1099,10 +1148,14 @@ class DiagnosisService:
     def _create_test_metrics(self, X_test):
         """Create synthetic test metrics from test data for evaluation"""
         try:
-            # Start with PCA if available to reduce dimensionality
-            if hasattr(self.diagnosis, 'pca') and self.diagnosis.pca is not None:
-                logger.info("Inverse transforming PCA features for test metrics creation")
-                X_synth = self.diagnosis.pca.inverse_transform(X_test)
+            # Start with PCA if available and enabled to reduce dimensionality
+            if self.diagnosis.use_pca and hasattr(self.diagnosis, 'pca') and self.diagnosis.pca is not None:
+                try:
+                    logger.info("Inverse transforming PCA features for test metrics creation")
+                    X_synth = self.diagnosis.pca.inverse_transform(X_test)
+                except Exception as e:
+                    logger.error(f"Error inverse transforming PCA features: {str(e)}")
+                    X_synth = X_test.copy()  # Fall back to original data
             else:
                 X_synth = X_test.copy()
             

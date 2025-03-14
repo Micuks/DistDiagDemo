@@ -143,7 +143,7 @@ async def validate_model(request: ModelValidationRequest):
 @router.get("/ranks")
 async def get_model_ranks(
     model_names: Optional[List[str]] = Query(None, alias="model_names[]"),
-    threshold: float = Query(0.15, description="Score threshold for including anomalies")
+    threshold: float = Query(0.001, description="Score threshold for including anomalies")
 ):
     """Get RCA results for specified models using time series metrics"""
     try:
@@ -174,7 +174,12 @@ async def get_model_ranks(
             
             # Filter anomalies by threshold from all_ranked_anomalies instead of using pre-filtered anomalies
             all_anomalies = diagnosis_result.get('all_ranked_anomalies', [])
+            # Make sure to use the actual threshold from the request here
             filtered_anomalies = [a for a in all_anomalies if a.get('score', 0) > threshold]
+            
+            # Log the correct threshold being used
+            logger.info(f"Filtering anomalies using threshold: {threshold}")
+            logger.debug(f"Found {len(filtered_anomalies)} anomalies above threshold {threshold} from {len(all_anomalies)} total possibilities")
             
             # Include metric ranks for each anomaly's RCA
             for anomaly in filtered_anomalies:
@@ -234,6 +239,7 @@ async def get_model_ranks(
                     
                     # Filter anomalies by threshold from all ranked anomalies
                     all_anomalies = diagnosis_result.get('all_ranked_anomalies', [])
+                    # Make sure to use the correct threshold from the request
                     filtered_anomalies = [a for a in all_anomalies if a.get('score', 0) > threshold]
                     
                     # Include metric ranks for each anomaly's RCA

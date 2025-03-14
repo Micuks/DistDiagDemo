@@ -259,7 +259,7 @@ class AnomalyService {
         );
     }
 
-    async getModelDiagnosis(modelName, threshold = 0.15) {
+    async getModelDiagnosis(modelName, threshold = 0.001) {
         return this._retryableRequest(() =>
             this.client.get('/api/models/ranks', {
                 params: {
@@ -270,7 +270,7 @@ class AnomalyService {
         );
     }
 
-    async compareModels(modelNames, threshold = 0.15) {
+    async compareModels(modelNames, threshold = 0.001) {
         return this._retryableRequest(() => 
             this.client.get('/api/models/ranks', {
                 params: {

@@ -97,7 +97,7 @@ const RanksPanel = () => {
   const [chartType, setChartType] = useState("radar");
   const [showConfidenceIntervals, setShowConfidenceIntervals] = useState(true);
   const [sortMethod, setSortMethod] = useState("confidence");
-  const [thresholdValue, setThresholdValue] = useState(50);
+  const [thresholdValue, setThresholdValue] = useState(0.0);
   const [metricsFluctuations, setMetricsFluctuations] = useState({});
   const [hasFluctuations, setHasFluctuations] = useState(false);
   const [lastAnalysisTime, setLastAnalysisTime] = useState(0);
