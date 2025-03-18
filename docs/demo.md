@@ -1,7 +1,7 @@
-# DistDiagDemo: Distributed System Diagnostic Visualization Platform
+# DBPecker: Distributed System Diagnostic Visualization Platform
 
 ## Abstract
-Modern distributed systems face increasing complexity in fault diagnosis due to their scale and dynamic nature. We present DistDiagDemo, an open-source visualization platform that enables real-time diagnosis of distributed system anomalies through multi-perspective observation and interactive root cause analysis. Our demo implements novel visualization metaphors: Root cause ranking that reveal hidden anomalies on distributed database nodes, (2) Heatmap Correlation Matrices for cross-service anomaly detection, and (3) Dynamic Trace Waterfalls that visualize request lifecycle anomalies. The system integrates with popular distributed tracing frameworks (OpenTelemetry, Jaeger) and provides adaptive sampling mechanisms to handle high-volume telemetry data. Demonstration scenarios will showcase interactive diagnosis of cascading failures, resource contention patterns, and partial partition scenarios in cloud-native environments.
+Modern distributed systems face increasing complexity in fault diagnosis due to their scale and dynamic nature. We present DBPecker, an open-source visualization platform that enables real-time diagnosis of distributed system anomalies through multi-perspective observation and interactive root cause analysis. Our demo implements novel visualization metaphors: Root cause ranking that reveal hidden anomalies on distributed database nodes, (2) Heatmap Correlation Matrices for cross-service anomaly detection, and (3) Dynamic Trace Waterfalls that visualize request lifecycle anomalies. The system integrates with popular distributed tracing frameworks (OpenTelemetry, Jaeger) and provides adaptive sampling mechanisms to handle high-volume telemetry data. Demonstration scenarios will showcase interactive diagnosis of cascading failures, resource contention patterns, and partial partition scenarios in cloud-native environments.
 
 ## Introduction
 
@@ -11,7 +11,7 @@ The proliferation of microservices architectures has exponentially increased the
 2. **Pattern Obfuscation**: Hidden causal relationships in service call graphs during partial failure scenarios
 3. **Diagnostic Latency**: Manual investigation cycles between separate monitoring and tracing tools
 
-DistDIagDemo addresses these challenges through three core innovations:
+DBPecker addresses these challenges through three core innovations:
 
 1. **Unified Visual Context** combining service mesh topology, request tracing, and resource metrics in a temporally synchronized display
 2. **Adaptive Aggregation** techniques that preserve anomaly patterns while reducing visual clutter

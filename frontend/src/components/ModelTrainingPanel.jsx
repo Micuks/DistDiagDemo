@@ -23,6 +23,8 @@ const ModelTrainingPanel = () => {
   const [isCollectionToggling, setIsCollectionToggling] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState({ stage: 'idle', progress: 0 });
   const [activeTab, setActiveTab] = useState('1');
+  const [trainingCompletionAcknowledged, setTrainingCompletionAcknowledged] = useState(false);
+  const [performanceMetrics, setPerformanceMetrics] = useState(null);
   
   const fetchStatusIntervalRef = useRef(null);
   const fetchStatsIntervalRef = useRef(null);
@@ -93,13 +95,22 @@ const ModelTrainingPanel = () => {
         if (status.stage !== 'idle' && status.stage !== 'completed' && status.stage !== 'failed') {
           setActiveTab('2');
           setIsTraining(true);
+          setTrainingCompletionAcknowledged(false);
         } else if (status.stage === 'completed' || status.stage === 'failed') {
           setIsTraining(false);
           
           if (status.stage === 'completed') {
-            fetchModels();
-            fetchTrainingStats();
-            message.success("Model training completed successfully!");
+            if (!trainingCompletionAcknowledged) {
+              setTrainingCompletionAcknowledged(true);
+              message.success("Model training completed successfully!");
+              fetchModels();
+              fetchTrainingStats();
+            }
+            
+            if (status.stats && Object.keys(status.stats).length > 0) {
+              setPerformanceMetrics(status.stats);
+              setActiveTab('3');
+            }
           }
         }
       } catch (error) {
@@ -115,7 +126,7 @@ const ModelTrainingPanel = () => {
     return () => {
       if (fetchTrainingStatusIntervalRef.current) clearInterval(fetchTrainingStatusIntervalRef.current);
     };
-  }, []);
+  },[]);
 
   const fetchModels = async () => {
     try {
@@ -431,12 +442,29 @@ const ModelTrainingPanel = () => {
               </Select>
               {selectedModel && (
                 <div style={{ marginTop: 16 }}>
-                  <Alert 
-                    message="Model Performance Details" 
-                    description="Detailed model performance metrics will be displayed here."
-                    type="info" 
-                    showIcon 
-                  />
+                  {performanceMetrics ? (
+                    <div>
+                      <h3>Performance Metrics</h3>
+                      <Row gutter={[16, 16]}>
+                        {Object.entries(performanceMetrics).map(([key, value]) => (
+                          <Col span={8} key={key}>
+                            <Statistic 
+                              title={key.charAt(0).toUpperCase() + key.slice(1).replace('_', ' ')}
+                              value={typeof value === 'number' ? value.toFixed(4) : value}
+                              precision={4}
+                            />
+                          </Col>
+                        ))}
+                      </Row>
+                    </div>
+                  ) : (
+                    <Alert 
+                      message="No Performance Data Available" 
+                      description="Train a model or select a different model to view performance metrics."
+                      type="info" 
+                      showIcon 
+                    />
+                  )}
                 </div>
               )}
             </Space>

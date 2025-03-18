@@ -1,10 +1,10 @@
-# DistDiagDemo
+# DBPecker
 
 A distributed database anomaly detection and diagnosis system.
 
 ## Overview
 
-DistDiagDemo is a comprehensive diagnostic and workload management system for distributed databases. It provides real-time monitoring, anomaly detection, and root cause analysis capabilities.
+DBPecker is a comprehensive diagnostic and workload management system for distributed databases. It provides real-time monitoring, anomaly detection, and root cause analysis capabilities.
 
 ## Features
 
@@ -164,7 +164,7 @@ For best results:
 ## Project Structure
 
 ```
-DistDiagDemo/
+DBPecker/
 ├── backend/              # FastAPI backend service
 │   ├── app/             # Application code
 │   ├── tests/           # Test cases
@@ -260,7 +260,7 @@ MIT License - see the [LICENSE](LICENSE) file for details
 
 ## Supported Anomaly Types
 
-DistDiagDemo supports multiple types of anomalies that can be injected into the system for testing, training, and demonstration purposes. These anomalies are designed to simulate common issues encountered in distributed database environments.
+DBPecker supports multiple types of anomalies that can be injected into the system for testing, training, and demonstration purposes. These anomalies are designed to simulate common issues encountered in distributed database environments.
 
 ### Resource Contention Anomalies
 

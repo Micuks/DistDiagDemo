@@ -6,21 +6,25 @@ from app.services.training_service import training_service
 from app.services.metrics_service import metrics_service
 import threading
 import asyncio
+import time
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Add global variables for tracking training state
-_training_in_progress = False
-_training_lock = asyncio.Lock()
-_training_status = {
+def _init_training_status(stats: Dict = {}):
+    return {
     "stage": "idle",  # idle, preprocessing, training, evaluating, saving, completed, failed
     "progress": 0,    # 0-100 percentage
     "message": "",    # Detailed status message
     "error": None,    # Error message if any
-    "stats": {}       # Training stats like accuracy, etc.
-}
+    "stats": stats       # Training stats like accuracy, etc.
+} 
+
+# Add global variables for tracking training state
+_training_in_progress = False
+_training_lock = asyncio.Lock()
+_training_status = _init_training_status()
 
 # Add global variables for tracking collection state
 _normal_collection_in_progress = False
@@ -271,6 +275,21 @@ async def get_collection_status():
 async def get_training_status():
     """Get the current status of model training."""
     async with _training_lock:
+        # Reset completed/failed status after a period of time
+        global _training_status
+        if (_training_status['stage'] == 'completed' or _training_status['stage'] == 'failed') and not _training_in_progress:
+            # Check if status has been in this state for a while (using a timestamp)
+            current_time = time.time()
+            if not hasattr(_training_status, 'completion_time'):
+                _training_status['completion_time'] = current_time
+            elif current_time - _training_status['completion_time'] > 60:  # Reset after 60 seconds
+                # Keep the stats but reset the stage to idle
+                stats = _training_status.get('stats', {})
+                _training_status = _init_training_status(stats=stats)
+                # Remove the timestamp
+                if hasattr(_training_status, 'completion_time'):
+                    delattr(_training_status, 'completion_time')
+                
         return _training_status
 
 @router.post("/train")

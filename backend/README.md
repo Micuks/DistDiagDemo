@@ -1,6 +1,6 @@
-# DistDiagDemo Backend
+# DBPecker Backend
 
-This is the backend service for the DistDiagDemo project, providing APIs for anomaly detection, metrics collection, and workload management for OceanBase clusters.
+This is the backend service for the DBPecker project, providing APIs for anomaly detection, metrics collection, and workload management for OceanBase clusters.
 
 ## Features
 

@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
         metrics_service.stop_collection()
 
 app = FastAPI(    
-    title="DistDiagDemo API",
+    title="DBPecker API",
     description="API for distributed database anomaly detection and diagnosis",
     version="1.0.0",
     lifespan=lifespan

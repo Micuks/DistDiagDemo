@@ -1,6 +1,6 @@
-# DistDiagDemo Frontend
+# DBPecker Frontend
 
-A modern React-based frontend for the DistDiagDemo project, providing an intuitive interface for database workload management, anomaly detection, and system monitoring.
+A modern React-based frontend for the DBPecker project, providing an intuitive interface for database workload management, anomaly detection, and system monitoring.
 
 ## Features
 
