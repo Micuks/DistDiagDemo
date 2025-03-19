@@ -7,27 +7,124 @@ import mysql.connector
 import threading
 import re
 from typing import Dict, List, Optional
-from ..schemas.workload import WorkloadType, WorkloadMetrics
+from ..schemas.workload import WorkloadType, WorkloadMetrics, Task, WorkloadStatus
 import pymysql
+from enum import Enum
+from dotenv import load_dotenv
+from datetime import datetime
+import uuid
+
+# Load environment variables from .env file
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
 
 logger = logging.getLogger(__name__)
 
 class WorkloadService:
     def __init__(self):
         self.active_workloads: Dict[str, subprocess.Popen] = {}
-        self.workload_metrics: Dict[str, Dict] = {}
         self._last_io_stats = None
         self._last_io_time = None
+        self.tasks: Dict[str, Task] = {}  # Store tasks in memory
         # Database connection parameters
-        self.db_host = os.getenv('OB_HOST', '127.0.0.1')
-        self.db_port = int(os.getenv('OB_PORT', '22883'))
-        self.db_user = os.getenv('OB_USER', 'root@sys')
-        self.db_password = os.getenv('OB_PASSWORD', 'root_password')
-        self.db_name = 'sbtest'
-        self.tpcc_db = 'tpcc'
-        self.tpch_db = 'tpch'
+        self.db_host = os.getenv('OB_HOST', 'localhost')
+        self.db_port = int(os.getenv('OB_PORT', '3306'))
+        self.db_user = os.getenv('OB_USER', 'root')
+        self.db_password = os.getenv('OB_PASSWORD', '')
+        self.db_name = os.getenv('OB_NAME', 'sbtest')
+        self.tpcc_db = os.getenv('TPCC_DB', 'tpcc')
+        self.tpch_db = os.getenv('TPCH_DB', 'tpch')
+        self.workload_outputs = {}
+        # Initialize with default zones, will be updated with actual zones
+        self.ob_zones = []
+        # Fetch zones from database during initialization
+        self._fetch_zones()
         logger.info("WorkloadService initialized")
         logger.info(f"Database connection: host={self.db_host}, port={self.db_port}, user={self.db_user}")
+
+    def _fetch_zones(self) -> List[str]:
+        """Fetch OceanBase zones from database"""
+        try:
+            logger.info("Fetching OceanBase zones from database")
+            conn = mysql.connector.connect(
+                host=self.db_host,
+                port=self.db_port,
+                user=self.db_user,
+                password=self.db_password
+            )
+            cursor = conn.cursor()
+            
+            # Query zones from DBA_OB_ZONES view
+            cursor.execute("SELECT zone FROM DBA_OB_ZONES")
+            zones = [row[0] for row in cursor.fetchall()]
+            
+            if zones:
+                logger.info(f"Found OceanBase zones: {zones}")
+                self.ob_zones = zones
+            else:
+                logger.warning("No zones found, falling back to default zones")
+                self.ob_zones = ['zone1', 'zone2', 'zone3']
+                
+            return self.ob_zones
+        except Exception as e:
+            logger.exception(f"Error fetching zones: {str(e)}")
+            # Fall back to default zones
+            self.ob_zones = ['zone1', 'zone2', 'zone3']
+            return self.ob_zones
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+            if 'conn' in locals():
+                conn.close()
+
+    def create_task(self, name: str, workload_type: WorkloadType, workload_config: Dict, anomalies: List[Dict] = None) -> Task:
+        """Create a new task"""
+        logger.info(f"Creating task with name: {name}, type: {workload_type}")
+        task_id = str(uuid.uuid4())
+        task = Task(
+            id=task_id,
+            name=name,
+            workload_id=f"{workload_type.value}_{workload_config.get('threads', 1)}",
+            workload_type=workload_type,
+            workload_config=workload_config,
+            anomalies=anomalies or [],
+            start_time=datetime.utcnow(),
+            status=WorkloadStatus.RUNNING
+        )
+        self.tasks[task_id] = task
+        logger.info(f"Created task {task_id}, total tasks: {len(self.tasks)}")
+        return task
+
+    def get_task(self, task_id: str) -> Optional[Task]:
+        """Get a task by ID"""
+        return self.tasks.get(task_id)
+
+    def get_all_tasks(self) -> List[Task]:
+        """Get all tasks"""
+        return list(self.tasks.values())
+
+    def update_task_status(self, task_id: str, status: WorkloadStatus, error_message: Optional[str] = None) -> Optional[Task]:
+        """Update task status"""
+        if task_id not in self.tasks:
+            return None
+        
+        task = self.tasks[task_id]
+        task.status = status
+        if error_message:
+            task.error_message = error_message
+        if status in [WorkloadStatus.STOPPED, WorkloadStatus.ERROR]:
+            task.end_time = datetime.utcnow()
+        
+        return task
+
+    def get_active_tasks(self) -> List[Task]:
+        """Get all active tasks"""
+        logger.info(f"Getting active tasks, total tasks: {len(self.tasks)}")
+        for task_id, task in self.tasks.items():
+            logger.info(f"Task {task_id}: {task.name}, status: {task.status}, type: {type(task.status)}")
+        
+        active_tasks = [task for task in self.tasks.values() if task.status == WorkloadStatus.RUNNING]
+        logger.info(f"Found {len(active_tasks)} active tasks")
+        return active_tasks
 
     def _create_database(self):
         """Create the sysbench database if it doesn't exist"""
@@ -41,8 +138,12 @@ class WorkloadService:
             )
             cursor = conn.cursor()
             
+            # Make sure we have the latest zones
+            if not self.ob_zones:
+                self._fetch_zones()
+                
             # Set open_cursors parameter for all zones
-            for zone in ['zone1', 'zone2', 'zone3']:
+            for zone in self.ob_zones:
                 alter_cmd = f"ALTER SYSTEM SET open_cursors=65535 ZONE='{zone}'"
                 logger.info(f"Executing: {alter_cmd}")
                 cursor.execute(alter_cmd)
@@ -337,78 +438,22 @@ class WorkloadService:
             return False
 
     def _read_workload_output(self, workload_id: str, process: subprocess.Popen):
-        """Read workload output in a separate thread and update metrics"""
+        """Read and store workload output"""
         try:
-            start_time = time.time()
-            last_output_time = start_time
-            metrics_received = False
-            
-            while process.poll() is None:
-                # Check if we haven't received output for too long
-                if time.time() - last_output_time > 30:  # 30 seconds timeout
-                    logger.warning(f"Workload {workload_id} has not produced output for 30 seconds")
-                    if not metrics_received:
-                        logger.error(f"Workload {workload_id} never produced any metrics - may have failed to start properly")
-                        process.terminate()
-                        break
-                
+            while True:
                 line = process.stdout.readline()
-                if not line:
-                    continue
-                    
-                line = line.strip()
-                if not line:
-                    continue
-                
-                last_output_time = time.time()
-                logger.debug(f"Workload {workload_id} output: {line}")
-                
-                metrics = None
-                if 'sysbench' in workload_id and '[ ' in line and ' ]' in line and 'tps:' in line:
-                    metrics = self._parse_sysbench_metrics(line)
-                elif 'tpcc' in workload_id:
-                    # More lenient TPCC parsing - look for any performance metrics
-                    if any(x in line for x in ['TpmC', 'NEW_ORDER', 'PAYMENT', 'DELIVERY']):
-                        metrics = self._parse_tpcc_metrics(line)
-                elif 'tpch' in workload_id and 'Query' in line and 'completed' in line:
-                    metrics = self._parse_tpch_metrics(line)
-
-                if metrics:
-                    metrics_received = True
-                    if workload_id not in self.workload_metrics:
-                        self.workload_metrics[workload_id] = {}
-                    self.workload_metrics[workload_id].update(metrics)
-                    logger.debug(f"Updated metrics for workload {workload_id}: {metrics}")
-            
-            # Process has ended - get the return code and stderr
-            return_code = process.poll()
-            _, stderr = process.communicate()
-            runtime = time.time() - start_time
-            
-            if return_code != 0:
-                logger.error(f"Workload {workload_id} failed with return code {return_code}")
-                if stderr:
-                    logger.error(f"Stderr output: {stderr}")
-            else:
-                logger.info(f"Workload {workload_id} completed successfully after running for {runtime:.1f} seconds")
-            
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    if workload_id not in self.workload_outputs:
+                        self.workload_outputs[workload_id] = []
+                    self.workload_outputs[workload_id].append(line.strip())
+                    logger.debug(f"Workload {workload_id} output: {line.strip()}")
         except Exception as e:
-            logger.exception(f"Error reading workload {workload_id} output")
-        finally:
-            # Clean up the process if it's still running
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=5)
-            
-            if workload_id in self.workload_metrics:
-                del self.workload_metrics[workload_id]
-            if workload_id in self.active_workloads:
-                del self.active_workloads[workload_id]
-            
-            logger.info(f"Workload {workload_id} output reader thread finished")
+            logger.error(f"Error reading workload output: {str(e)}")
 
-    def start_workload(self, workload_type: WorkloadType, num_threads: int = 4) -> bool:
-        """Start a new workload"""
+    def start_workload(self, workload_type: WorkloadType, num_threads: int = 4, options: Dict = None, task_name: str = None) -> bool:
+        """Start a new workload with custom options"""
         try:
             workload_id = f"{workload_type.value}_{num_threads}"
             
@@ -416,10 +461,31 @@ class WorkloadService:
                 logger.warning(f"Workload {workload_id} is already running")
                 return False
             
-            logger.info(f"Starting workload: type={workload_type.value}, threads={num_threads}")
+            logger.info(f"Starting workload: type={workload_type.value}, threads={num_threads}, options={options}, task_name={task_name}")
+            
+            # Create task if name is provided
+            task = None
+            if task_name:
+                logger.info(f"Creating task with name: {task_name}")
+                # Create a proper WorkloadConfig object instead of just a dictionary
+                workload_config = {
+                    "workload_type": workload_type,
+                    "num_threads": num_threads,
+                    "options": options
+                }
+                task = self.create_task(
+                    name=task_name,
+                    workload_type=workload_type,
+                    workload_config=workload_config,
+                    anomalies=[]  # Anomalies will be added later if needed
+                )
+                logger.info(f"Task created with ID: {task.id}")
+            else:
+                logger.warning("No task_name provided, skipping task creation")
             
             cmd = None
             if workload_type == WorkloadType.SYSBENCH:
+                # Build sysbench command with custom options
                 cmd = (
                     f"sysbench oltp_read_write "
                     f"--db-driver=mysql "
@@ -428,11 +494,12 @@ class WorkloadService:
                     f"--mysql-user={self.db_user} "
                     f"--mysql-password={self.db_password} "
                     f"--mysql-db={self.db_name} "
-                    f"--tables=10 "
-                    f"--table-size=100000 "
+                    f"--tables={options.get('tables', 10)} "
+                    f"--table-size={options.get('tableSize', 100000)} "
                     f"--threads={num_threads} "
                     f"--time=0 "
-                    f"--report-interval=10 "
+                    f"--report-interval={options.get('reportInterval', 10)} "
+                    f"--rand-type={options.get('randType', 'uniform')} "
                     "run"
                 )
             elif workload_type == WorkloadType.TPCC:
@@ -470,6 +537,7 @@ class WorkloadService:
                     logger.error(f"Failed to check TPCC database: {str(e)}")
                     return False
                 
+                # Build TPCC command with custom options
                 cmd = (
                     f"{tpcc_script} "
                     f"-h {self.db_host} "
@@ -477,10 +545,11 @@ class WorkloadService:
                     f"-d {self.tpcc_db} "
                     f"-u {self.db_user} "
                     f"-p {self.db_password} "
-                    f"-w 10 "  # 10 warehouses
+                    f"-w {options.get('warehouses', 10)} "  # Number of warehouses
                     f"-c {num_threads} "  # Number of connections
-                    f"-r 10 "  # Warmup time in seconds
-                    f"-l {12*60*60}"  # Run time in seconds, 0 means infinite
+                    f"-r {options.get('warmupTime', 10)} "  # Warmup time in seconds
+                    f"-l {options.get('runningTime', 60) * 60} "  # Run time in seconds
+                    f"-i {options.get('reportInterval', 10)} "  # Report interval
                     "run"
                 )
             elif workload_type == WorkloadType.TPCH:
@@ -494,7 +563,7 @@ class WorkloadService:
                     f"--scale-factor=1 "
                     f"--threads={num_threads} "
                     f"--time=0 "
-                    f"--report-interval=10 "
+                    f"--report-interval={options.get('reportInterval', 10)} "
                     "run"
                 )
             
@@ -532,82 +601,92 @@ class WorkloadService:
             output_thread.daemon = True
             output_thread.start()
             
+            # Update task status if task was created
+            if task:
+                self.update_task_status(task.id, WorkloadStatus.RUNNING)
+            
             return True
             
         except Exception as e:
             logger.exception(f"Error starting workload: {str(e)}")
+            if task:
+                self.update_task_status(task.id, WorkloadStatus.ERROR, str(e))
             return False
 
     def stop_workload(self, workload_id: str) -> bool:
-        """Stop a specific workload"""
+        """Stop a running workload"""
         try:
             if workload_id not in self.active_workloads:
-                logger.warning(f"Workload {workload_id} not found in active workloads")
-                # It might have already been stopped by the reader thread, so return True
-                return True
+                logger.warning(f"Workload {workload_id} is not running")
+                return False
             
-            logger.info(f"Stopping workload: {workload_id}")
             process = self.active_workloads[workload_id]
+            process.terminate()
+            process.wait(timeout=5)
             
-            if process.poll() is None:  # Process is still running
-                process.terminate()
-                try:
-                    process.wait(timeout=5)  # Wait up to 5 seconds for graceful termination
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"Workload {workload_id} did not terminate gracefully, forcing kill")
-                    process.kill()
+            del self.active_workloads[workload_id]
+            if workload_id in self.workload_outputs:
+                del self.workload_outputs[workload_id]
             
-            # Read any remaining output
-            stdout, stderr = process.communicate()
-            if stdout:
-                logger.info(f"Final output from workload {workload_id}: {stdout}")
-            if stderr:
-                logger.warning(f"Final error output from workload {workload_id}: {stderr}")
+            # Update associated task status
+            for task in self.tasks.values():
+                if task.workload_id == workload_id:
+                    self.update_task_status(task.id, WorkloadStatus.STOPPED)
+                    break
             
-            # Check if the workload is still in active_workloads before removing it
-            # It might have been removed by the reader thread
-            if workload_id in self.active_workloads:
-                del self.active_workloads[workload_id]
-            
-            logger.info(f"Workload {workload_id} stopped successfully")
             return True
             
         except Exception as e:
-            logger.exception(f"Error stopping workload {workload_id}")
+            logger.exception(f"Error stopping workload: {str(e)}")
             return False
 
-    def stop_all_workloads(self) -> bool:
-        """Stop all active workloads"""
+    def get_workload_status(self, workload_id: str) -> Dict:
+        """Get the status of a workload"""
         try:
-            logger.info("Stopping all workloads")
-            # Make a copy of the workload IDs to avoid dictionary changed during iteration
-            workload_ids = list(self.active_workloads.keys())
+            if workload_id not in self.active_workloads:
+                return {
+                    "status": "not_found",
+                    "output": []
+                }
             
-            if not workload_ids:
-                logger.info("No active workloads to stop")
-                return True
-                
-            # Try to stop each workload
-            stop_errors = 0
-            for workload_id in workload_ids:
-                try:
-                    self.stop_workload(workload_id)
-                except Exception as e:
-                    logger.error(f"Error stopping workload {workload_id}: {str(e)}")
-                    stop_errors += 1
+            process = self.active_workloads[workload_id]
+            is_running = process.poll() is None
             
-            # After attempting to stop all workloads, check if any are still active
-            remaining_workloads = list(self.active_workloads.keys())
-            if not remaining_workloads:
-                logger.info("All workloads stopped successfully")
-                return True
-            else:
-                logger.warning(f"Failed to stop {len(remaining_workloads)} workloads: {remaining_workloads}")
-                return False
-                    
+            return {
+                "status": "running" if is_running else "stopped",
+                "output": self.workload_outputs.get(workload_id, [])
+            }
+            
         except Exception as e:
-            logger.exception("Error stopping all workloads")
-            return False
+            logger.exception(f"Error getting workload status: {str(e)}")
+            return {
+                "status": "error",
+                "output": []
+            }
+
+    def get_available_nodes(self) -> List[str]:
+        """Get list of available nodes for running workloads"""
+        try:
+            # Use the k8s_service implementation for consistency
+            from app.services.k8s_service import k8s_service
+            # We need to run the async method in a synchronous context
+            import asyncio
+            loop = asyncio.get_event_loop()
+            try:
+                return loop.run_until_complete(k8s_service.get_available_nodes())
+            except RuntimeError:
+                # If there's no running event loop
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    return new_loop.run_until_complete(k8s_service.get_available_nodes())
+                finally:
+                    new_loop.close()
+        except Exception as e:
+            logger.error(f"Error getting available nodes from k8s: {str(e)}")
+            # Fall back to environment variable as before
+            nodes_str = os.getenv('AVAILABLE_NODES', 'node1,node2,node3')
+            return [node.strip() for node in nodes_str.split(',')]
 
     def get_active_workloads(self) -> List[Dict]:
         """Get list of active workloads with system metrics"""
@@ -620,26 +699,27 @@ class WorkloadService:
             for wid in finished_workloads:
                 logger.info(f"Removing finished workload: {wid}")
                 del self.active_workloads[wid]
-                if wid in self.workload_metrics:
-                    del self.workload_metrics[wid]
+                
+                # Update associated task status
+                for task in self.tasks.values():
+                    if task.workload_id == wid:
+                        self.update_task_status(task.id, WorkloadStatus.STOPPED)
+                        break
 
-            system_metrics = self.get_system_metrics()
-            
             active_workloads = []
             for workload_id, process in self.active_workloads.items():
                 workload_type, threads = workload_id.split('_')
                 
-                # Combine system metrics with workload-specific metrics
-                metrics = {**system_metrics}
-                if workload_id in self.workload_metrics:
-                    metrics.update(self.workload_metrics[workload_id])
+                # Find associated task
+                task = next((t for t in self.tasks.values() if t.workload_id == workload_id), None)
                 
                 active_workloads.append({
                     'id': workload_id,
                     'type': workload_type,
                     'threads': int(threads),
                     'pid': process.pid,
-                    'metrics': metrics
+                    'start_time': task.start_time if task else datetime.utcnow(),
+                    'status': task.status if task else WorkloadStatus.RUNNING
                 })
             
             logger.debug(f"Active workloads: {active_workloads}")
@@ -695,4 +775,7 @@ class WorkloadService:
                 'cpu_usage': 0.0,
                 'memory_usage': 0.0,
                 'disk_usage': 0.0
-            } 
+            }
+            
+# Singleton instance of WorkloadService
+workload_service = WorkloadService()

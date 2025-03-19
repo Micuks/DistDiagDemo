@@ -1,11 +1,12 @@
 import logging
-from fastapi import APIRouter, HTTPException
-from ..services.workload_service import WorkloadService
-from ..schemas.workload import WorkloadRequest, WorkloadInfo, WorkloadType
+from fastapi import APIRouter, HTTPException, Depends, Query
+from typing import Dict, List, Optional
+from ..services.workload_service import workload_service, WorkloadType
+from ..services.k8s_service import k8s_service
+from ..schemas.workload import WorkloadResponse, WorkloadStatus, WorkloadConfig, WorkloadRequest, WorkloadInfo, Task, CreateTaskRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-workload_service = WorkloadService()
 
 @router.post("/prepare")
 async def prepare_database(request: WorkloadRequest):
@@ -33,36 +34,89 @@ async def prepare_database(request: WorkloadRequest):
         logger.exception("Error during database preparation")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/start")
-async def start_workload(request: WorkloadRequest):
-    """Start a new workload"""
-    logger.info(f"Received request to start workload: type={request.type}, threads={request.threads}")
+@router.get("/nodes", response_model=List[str])
+async def get_available_nodes():
+    """Get list of available nodes for running workloads"""
     try:
-        success = workload_service.start_workload(request.type, request.threads)
-        if success:
-            logger.info("Workload started successfully")
-            return {"status": "success", "message": "Workload started successfully"}
-        else:
-            logger.error("Failed to start workload")
-            raise HTTPException(status_code=500, detail="Failed to start workload")
+        nodes = await k8s_service.get_available_nodes()
+        return nodes
     except Exception as e:
-        logger.exception("Error starting workload")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/stop/{workload_id}")
-async def stop_workload(workload_id: str):
-    """Stop a specific workload"""
-    logger.info(f"Received request to stop workload: {workload_id}")
+@router.post("/start", response_model=WorkloadResponse)
+async def start_workload(config: WorkloadRequest):
+    """Start a new workload with custom configuration"""
     try:
-        success = workload_service.stop_workload(workload_id)
-        if success:
-            logger.info(f"Workload {workload_id} stopped successfully")
-            return {"status": "success", "message": f"Workload {workload_id} stopped successfully"}
+        logger.info(f"Received start workload request: type={config.type}, threads={config.threads}, task_name={config.task_name}")
+        if config.type == 'tpcc':
+            type = WorkloadType.TPCC
+        elif config.type == 'sysbench':
+            type = WorkloadType.SYSBENCH
         else:
-            logger.error(f"Failed to stop workload {workload_id}")
-            raise HTTPException(status_code=404, detail=f"Workload {workload_id} not found or already stopped")
+            type = WorkloadType.UNKNOWN
+            
+        success = workload_service.start_workload(
+            workload_type=type,
+            num_threads=config.threads,
+            options=config.options.dict() if config.options else {},
+            task_name=config.task_name
+        )
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to start workload")
+            
+        return WorkloadResponse(
+            workload_id=f"{config.type.value}_{config.threads}",
+            status=WorkloadStatus.RUNNING,
+            message="Workload started successfully"
+        )
     except Exception as e:
-        logger.exception(f"Error stopping workload {workload_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/create-task", response_model=Task)
+async def create_task(request: CreateTaskRequest):
+    """Create a task with anomalies for an existing workload"""
+    try:
+        logger.info(f"Creating task for existing workload: workload_id={request.workload_id}, task_name={request.task_name}")
+        
+        # Determine workload type from string to enum
+        workload_type = WorkloadType.UNKNOWN
+        if request.type == 'tpcc':
+            workload_type = WorkloadType.TPCC
+        elif request.type == 'sysbench':
+            workload_type = WorkloadType.SYSBENCH
+        elif request.type == 'tpch':
+            workload_type = WorkloadType.TPCH
+            
+        # Get workload details to create appropriate workload_config
+        active_workloads = workload_service.get_active_workloads()
+        target_workload = next((w for w in active_workloads if w['id'] == request.workload_id), None)
+        
+        if not target_workload:
+            raise HTTPException(status_code=404, detail=f"Workload with ID {request.workload_id} not found")
+            
+        # Create a workload config based on the existing workload
+        workload_config = {
+            "workload_type": workload_type,
+            "num_threads": target_workload.get('threads', 1)
+        }
+        
+        # Create the task
+        task = workload_service.create_task(
+            name=request.task_name,
+            workload_type=workload_type,
+            workload_config=workload_config,
+            anomalies=request.anomalies
+        )
+        
+        if not task:
+            raise HTTPException(status_code=500, detail="Failed to create task")
+            
+        return task
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error creating task: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/stop-all")
@@ -92,14 +146,75 @@ async def stop_all_workloads():
         logger.exception("Error stopping all workloads")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/active")
-async def get_active_workloads() -> list[WorkloadInfo]:
-    """Get list of active workloads"""
-    logger.info("Received request to get active workloads")
+@router.get("/active", response_model=List[WorkloadInfo])
+async def get_active_workloads():
+    """Get all active workloads"""
     try:
         workloads = workload_service.get_active_workloads()
-        logger.info(f"Found {len(workloads)} active workloads")
         return workloads
     except Exception as e:
-        logger.exception("Error getting active workloads")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/{workload_id}/stop", response_model=WorkloadResponse)
+async def stop_workload(workload_id: str):
+    """Stop a running workload"""
+    try:
+        success = workload_service.stop_workload(workload_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Workload not found or already stopped")
+            
+        return WorkloadResponse(
+            workload_id=workload_id,
+            status=WorkloadStatus.STOPPED,
+            message="Workload stopped successfully"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{workload_id}/status", response_model=WorkloadResponse)
+async def get_workload_status(workload_id: str):
+    """Get the status of a workload"""
+    try:
+        status = workload_service.get_workload_status(workload_id)
+        
+        if status["status"] == "not_found":
+            raise HTTPException(status_code=404, detail="Workload not found")
+            
+        return WorkloadResponse(
+            workload_id=workload_id,
+            status=WorkloadStatus(status["status"]),
+            message="Workload status retrieved successfully",
+            output=status["output"]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/tasks", response_model=List[Task])
+async def get_all_tasks():
+    """Get all tasks"""
+    try:
+        tasks = workload_service.get_all_tasks()
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/tasks/active", response_model=List[Task])
+async def get_active_tasks():
+    """Get all active tasks"""
+    try:
+        tasks = workload_service.get_active_tasks()
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/tasks/{task_id}", response_model=Task)
+async def get_task(task_id: str):
+    """Get a specific task by ID"""
+    try:
+        task = workload_service.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) 

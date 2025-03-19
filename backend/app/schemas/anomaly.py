@@ -1,34 +1,58 @@
 from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional, List
+from typing import Dict, List, Optional, Union
+from enum import Enum
+
+class AnomalyType(str, Enum):
+    CPU_STRESS = "cpu_stress"
+    IO_BOTTLENECK = "io_bottleneck"
+    NETWORK_BOTTLENECK = "network_bottleneck"
+    MEMORY_LEAK = "memory_leak"
+    TOO_MANY_INDEXES = "too_many_indexes"
+
+class AnomalyStatus(str, Enum):
+    RUNNING = "running"
+    STOPPED = "stopped"
+    ERROR = "error"
+    NOT_FOUND = "not_found"
+
+class AnomalyConfig(BaseModel):
+    anomaly_type: AnomalyType
+    target_node: Optional[Union[List[str], str]] = None
+    severity: int = 5
+    duration: Optional[int] = None
 
 class AnomalyRequest(BaseModel):
-    """Request to start an anomaly experiment"""
     type: str
-    duration: Optional[int] = None  # Duration in seconds
+    target_node: Optional[Union[List[str], str]] = None
+    node: Optional[Union[List[str], str]] = None  # For backwards compatibility
+    severity: int = 5
+    duration: Optional[int] = None
+    collect_training_data: Optional[bool] = False
+    save_post_data: Optional[bool] = True
+    experiment_name: Optional[str] = None
+
+class AnomalyInfo(BaseModel):
+    id: str
+    type: str
+    target_node: str
+    severity: int
+    start_time: float
+    elapsed_time: float
+
+class AnomalyResponse(BaseModel):
+    anomaly_id: str
+    status: AnomalyStatus
+    message: str
+    output: Optional[List[str]] = None
+    details: Optional[Dict] = None
 
 class MetricsResponse(BaseModel):
-    """Response containing system metrics"""
-    timestamp: datetime
-    cpu: float
-    memory: float
-    network: float
-    disk_io_bytes: Optional[float] = None
-    disk_iops: Optional[float] = None
-    active_sessions: Optional[float] = None
-    sql_response_time: Optional[float] = None
-    cache_hit_ratio: Optional[float] = None
+    timestamp: float
+    metrics: Dict[str, float]
 
 class AnomalyRankResponse(BaseModel):
-    """Response containing anomaly ranks"""
-    timestamp: datetime
-    node: str  # Node where anomaly was detected
-    type: str  # Type of anomaly (cpu, io, buffer, net, load)
-    score: float  # Anomaly score between 0 and 1
+    ranks: List[Dict[str, float]]
+    timestamp: float
 
 class ActiveAnomalyResponse(BaseModel):
-    """Response containing information about an active anomaly"""
-    start_time: str
-    status: str
-    type: str
-    target: str 
+    anomalies: List[Dict] 

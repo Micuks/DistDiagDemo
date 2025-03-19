@@ -298,3 +298,88 @@ DBPecker supports multiple types of anomalies that can be injected into the syst
 Each anomaly can be injected through the Anomaly Control Panel in the web interface or via the API. For advanced scenarios, multiple anomalies can be combined to simulate complex failure patterns.
 
 The anomaly system is designed to be extensible, allowing new anomaly types to be added with minimal code changes. All anomalies include proper tracking and cleanup mechanisms to ensure the system returns to a normal state after testing.
+
+# DistDiagDemo
+
+A distributed database diagnosis demonstration platform.
+
+## Control Panel Refactoring - Completed Features
+
+### Overview
+The control panel has been refactored to provide a modern UI/UX with improved workflow for configuring and executing workloads and anomalies on distributed database nodes.
+
+### Backend Enhancements
+1. **Workload Service**
+   - Added support for multiple configurable options for different workload types:
+     - Sysbench: table size, number of tables, report interval, random type
+     - TPC-C: warehouses, warmup time, running time, report interval
+     - TPC-H: report interval and scale factor
+   - Implemented node selection capabilities for targeting specific database nodes
+   - Added detailed status reporting for running workloads
+
+2. **Anomaly Service**
+   - Created a comprehensive service for anomaly injection and monitoring
+   - Implemented severity controls (1-10 scale) for fine-tuning anomaly intensity
+   - Added support for targeting specific nodes for anomaly injection
+   - Implemented automatic cleanup functionality for timed anomalies
+
+3. **API Endpoints**
+   - Added new endpoints for node discovery
+   - Updated workload and anomaly endpoints to support enhanced configuration options
+   - Improved error handling and response formatting
+
+### Frontend Improvements
+1. **Step-by-Step Workflow**
+   - Implemented a three-step process: workload configuration, anomaly configuration, review & execution
+   - Added clear navigation between steps with validation
+   - Provided comprehensive summary view before execution
+
+2. **Enhanced Configuration Options**
+   - Created dynamic form controls that adapt based on workload type
+   - Implemented node selection dropdown populated with available nodes
+   - Added severity controls for anomalies with visual indicators
+
+3. **React Hooks**
+   - Created custom hooks (useWorkload, useAnomaly) for managing state and API interactions
+   - Implemented data fetching with error handling and loading states
+   - Added real-time status updates for active workloads and anomalies
+
+### UI Components
+1. **WorkloadConfig**
+   - Basic configuration: workload type, threads, target node, database preparation
+   - Advanced options: dynamic form based on selected workload type
+   - Form validation with clear error messages
+
+2. **AnomalyConfig**
+   - Form for configuring new anomalies with type, target node, and severity
+   - List view of configured anomalies with tags for type and severity
+   - Delete functionality for removing configured anomalies
+
+3. **ExecutionSummary**
+   - Detailed view of configured workload and anomalies
+   - Visual indicators for configuration options
+   - Execute button with loading state and validation
+
+### Technical Improvements
+1. **Error Handling**
+   - Comprehensive error handling throughout the stack
+   - User-friendly error messages with suggestions
+   - Automatic retry mechanisms for transient failures
+
+2. **Performance Optimizations**
+   - Efficient data fetching with cache control
+   - Minimized re-renders using useCallback and useMemo
+   - Optimized API response formats
+
+## Usage
+1. Navigate to the control panel
+2. Configure your workload in step 1
+3. Configure anomalies to inject in step 2
+4. Review your configuration and execute in step 3
+5. Monitor metrics and diagnoses in the dashboard
+
+## Future Enhancements
+- Support for custom workload scripts
+- Saved configuration templates
+- Batch execution of multiple scenarios
+- Enhanced visualization of execution results

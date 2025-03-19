@@ -83,12 +83,26 @@ class AnomalyService {
         }
     }
 
-    async startAnomaly(type, params = {}) {
+    async startAnomaly(type, node_or_params = {}) {
+        // Handle both direct node parameter or a params object
+        let node, collect_training_data;
+        
+        if (typeof node_or_params === 'string' || Array.isArray(node_or_params)) {
+            // If second parameter is a string or array, it's the node
+            node = node_or_params;
+            collect_training_data = false;
+        } else {
+            // Otherwise it's a params object
+            node = node_or_params.node || null;
+            collect_training_data = node_or_params.collect_training_data || false;
+        }
+        
         return this._retryableRequest(() =>
             this.client.post('/api/anomaly/inject', {
                 type: type,
-                node: params.node || null,
-                collect_training_data: params.collect_training_data || false
+                node: node,
+                target_node: node, // Also send as target_node for schema compatibility
+                collect_training_data: collect_training_data
             })
         );
     }

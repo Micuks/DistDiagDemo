@@ -81,28 +81,34 @@ const Dashboard = () => {
                 </Space>
             </Divider>
 
-            <Steps
-                direction="vertical"
-                current={-1}
-                items={workflowSteps.map((step, index) => ({
-                    title: step.title,
-                    description: (
-                        <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                            <Text>{step.description}</Text>
-                            <Text type="secondary">{step.details}</Text>
-                            <Button 
-                                type="primary" 
-                                icon={step.icon}
-                                onClick={() => navigate(step.path)}
-                                style={{ marginTop: '8px' }}
-                            >
-                                Go to {step.title}
-                            </Button>
-                        </Space>
-                    ),
-                    icon: step.icon
-                }))}
-            />
+            <Card variant={false} style={{ marginBottom: '24px' }}>
+                <Row justify="center">
+                    <Col xs={24} md={20} lg={18}>
+                        <Steps
+                            direction="vertical"
+                            current={-1}
+                            items={workflowSteps.map((step, index) => ({
+                                title: step.title,
+                                description: (
+                                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                                        <Text>{step.description}</Text>
+                                        <Text type="secondary">{step.details}</Text>
+                                        <Button 
+                                            type="primary" 
+                                            icon={step.icon}
+                                            onClick={() => navigate(step.path)}
+                                            style={{ marginTop: '8px' }}
+                                        >
+                                            Go to {step.title}
+                                        </Button>
+                                    </Space>
+                                ),
+                                icon: step.icon
+                            }))}
+                        />
+                    </Col>
+                </Row>
+            </Card>
 
             <Divider orientation="left">
                 <Space>

@@ -2,7 +2,7 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 import logging
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
 import asyncio
 import time
@@ -42,6 +42,7 @@ class K8sService:
             config.load_kube_config()
         
         self.custom_api = client.CustomObjectsApi()
+        self.core_api = client.CoreV1Api()
         self.namespace = os.getenv('OCEANBASE_NAMESPACE', 'oceanbase')
         self.active_anomalies = {}  # Track active anomalies with timestamps
         self._experiment_cache = {}  # Cache for experiment status
@@ -67,7 +68,6 @@ class K8sService:
             logger.error(f"Error setting up anomaly state initialization: {e}")
         
         # OceanBase connection configuration
-        self.ob_zones = ['zone1','zone2','zone3']
         self.ob_config = {
             'host': os.getenv('OB_HOST', '127.0.0.1'),
             'port': int(os.getenv('OB_PORT', '2881')),
@@ -75,6 +75,9 @@ class K8sService:
             'password': os.getenv('OB_PASSWORD', 'password'),
             'database': os.getenv('OB_DATABASE', 'oceanbase'),
         }
+        
+        # Initialize zones
+        self.ob_zones = self._fetch_ob_zones()
 
         # Add severity variations for experiments
         self.severity_variations = {
@@ -187,99 +190,42 @@ class K8sService:
             
             # Special handling for too_many_indexes
             elif anomaly_type == "too_many_indexes":
-                # Create drop index commands for both tpcc and sbtest databases
-                tpcc_drop_commands = [
-                    "USE tpcc",
-                    # Drop customer table indexes
-                    "DROP INDEX idx_customer_1 ON customer",
-                    "DROP INDEX idx_customer_2 ON customer",
-                    "DROP INDEX idx_customer_3 ON customer",
-                    "DROP INDEX idx_customer_4 ON customer",
-                    "DROP INDEX idx_customer_5 ON customer",
-                    # Drop district table indexes
-                    "DROP INDEX idx_district_1 ON district",
-                    "DROP INDEX idx_district_2 ON district",
-                    "DROP INDEX idx_district_3 ON district",
-                    # Drop history table indexes
-                    "DROP INDEX idx_history_1 ON history",
-                    "DROP INDEX idx_history_2 ON history",
-                    "DROP INDEX idx_history_3 ON history",
-                    # Drop item table indexes
-                    "DROP INDEX idx_item_1 ON item",
-                    "DROP INDEX idx_item_2 ON item",
-                    "DROP INDEX idx_item_3 ON item",
-                    # Drop new_orders table indexes
-                    "DROP INDEX idx_new_orders_1 ON new_orders",
-                    "DROP INDEX idx_new_orders_2 ON new_orders",
-                    # Drop order_line table indexes
-                    "DROP INDEX idx_order_line_1 ON order_line",
-                    "DROP INDEX idx_order_line_2 ON order_line",
-                    "DROP INDEX idx_order_line_3 ON order_line",
-                    "DROP INDEX idx_order_line_4 ON order_line",
-                    # Drop orders table indexes
-                    "DROP INDEX idx_orders_1 ON orders",
-                    "DROP INDEX idx_orders_2 ON orders",
-                    "DROP INDEX idx_orders_3 ON orders",
-                    "DROP INDEX idx_orders_4 ON orders",
-                    # Drop stock table indexes
-                    "DROP INDEX idx_stock_1 ON stock",
-                    "DROP INDEX idx_stock_2 ON stock",
-                    "DROP INDEX idx_stock_3 ON stock",
-                    # Drop warehouse table indexes
-                    "DROP INDEX idx_warehouse_1 ON warehouse",
-                    "DROP INDEX idx_warehouse_2 ON warehouse"
-                ]
+                # Generate a unique experiment name for tracking
+                experiment_name = f"ob-too-many-indexes-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 
-                sbtest_drop_commands = [
-                    "USE sbtest",
-                    # Drop all sbtest table indexes
-                ]
+                # Read SQL commands from template
+                template = self._get_experiment_template(anomaly_type)
+                sql_commands = template["spec"].get("sqlCommands", [])
                 
-                # Generate drop commands for all sbtest tables (1-10)
-                for i in range(1, 11):
-                    sbtest_drop_commands.extend([
-                        f"DROP INDEX idx_sbtest{i}_1 ON sbtest{i}",
-                        f"DROP INDEX idx_sbtest{i}_2 ON sbtest{i}",
-                        f"DROP INDEX idx_sbtest{i}_3 ON sbtest{i}"
-                    ])
+                # Execute SQL commands directly
+                await self._execute_sql_commands(sql_commands)
                 
-                # Combine all drop commands
-                drop_commands = tpcc_drop_commands + sbtest_drop_commands
+                # If no specific target nodes were provided, use a default
+                if not target_nodes:
+                    target_nodes = ["obcluster"]
                 
-                try:
-                    # Execute all drop commands
-                    await self._execute_sql_commands(drop_commands)
-                    logger.info("Successfully dropped all indexes created for too_many_indexes anomaly")
-                except Exception as e:
-                    logger.error(f"Error dropping indexes: {str(e)}")
-                
-                # Clean up tracking
-                self.active_anomalies.pop("sql_commands", None)
-                
-                # Find and remove all too_many_indexes experiments from active_anomalies
-                type_prefix = f"ob-too-many-indexes"
-                experiment_names = []
-                
-                # If a specific experiment is provided, just delete that one
-                if experiment_name:
-                    if experiment_name in self.active_anomalies:
-                        del self.active_anomalies[experiment_name]
-                        experiment_names = [experiment_name]
-                else:
-                    # Find all too_many_indexes experiments
-                    for name in list(self.active_anomalies.keys()):
-                        if name.startswith(type_prefix) or (
-                            isinstance(self.active_anomalies[name], dict) and 
-                            self.active_anomalies[name].get("type") == "too_many_indexes"
-                        ):
-                            del self.active_anomalies[name]
-                            experiment_names.append(name)
+                # Create tracking records for each target node
+                for node in target_nodes:
+                    node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
+                    
+                    # Track the experiment with SQL commands included
+                    self.active_anomalies[node_experiment_name] = {
+                        "start_time": datetime.now().isoformat(),
+                        "status": "active",
+                        "type": anomaly_type,
+                        "name": node_experiment_name,
+                        "target": "obcluster",
+                        "node": node,
+                        "sql_commands": sql_commands
+                    }
+                    
+                    logger.info(f"Created {anomaly_type} experiment {node_experiment_name} for node {node}")
                 
                 # Invalidate cache
                 self.invalidate_cache()
                 self._last_cache_update = 0
                 
-                return experiment_names
+                return
 
             # For other types, proceed with chaos mesh experiment deletion
             plural = self._get_experiment_plural(anomaly_type)
@@ -562,7 +508,7 @@ class K8sService:
                 "spec": {
                     "action": "latency",
                     "delay": severity.get("delay", "1000ms"),
-                    "path": "/home/admin/oceanbase/store",
+                    "path": "/home/admin/",
                     "percent": severity.get("percent", 100),
                     "methods": ["write", "read"],
                     "duration": f"{self.collection_duration}s"
@@ -800,9 +746,17 @@ class K8sService:
             logger.error(f"Failed to execute SQL commands: {str(e)}")
             raise
 
-    async def apply_chaos_experiment(self, anomaly_type: str):
+    async def apply_chaos_experiment(self, anomaly_type: str, target_node: Optional[Union[List[str], str]] = None):
         """Apply a chaos mesh experiment based on the anomaly type with optimized retries"""
         try:
+            # Normalize target_node to a list if it's a string
+            if isinstance(target_node, str):
+                target_nodes = [target_node]
+            elif isinstance(target_node, list):
+                target_nodes = target_node
+            else:
+                target_nodes = []
+                
             # Special handling for cache bottleneck
             if anomaly_type == "cache_bottleneck":
                 # Update memstore_limit_percentage
@@ -838,37 +792,26 @@ class K8sService:
                 # Execute SQL commands directly
                 await self._execute_sql_commands(sql_commands)
                 
-                # Create a tracking record but don't create an actual Chaos Mesh resource
-                experiment = {
-                    "apiVersion": "chaos-mesh.org/v1alpha1",
-                    "kind": "SQLChaos",  # This is just for our internal tracking
-                    "metadata": {
-                        "name": experiment_name,
-                        "namespace": self.namespace
-                    },
-                    "spec": {
-                        "mode": "all",
-                        "selector": {
-                            "namespaces": [self.namespace],
-                            "labelSelectors": {"ref-obcluster": "obcluster"}
-                        },
-                        "sqlCommands": sql_commands
+                # If no specific target nodes were provided, use a default
+                if not target_nodes:
+                    target_nodes = ["obcluster"]
+                
+                # Create tracking records for each target node
+                for node in target_nodes:
+                    node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
+                    
+                    # Track the experiment with SQL commands included
+                    self.active_anomalies[node_experiment_name] = {
+                        "start_time": datetime.now().isoformat(),
+                        "status": "active",
+                        "type": anomaly_type,
+                        "name": node_experiment_name,
+                        "target": "obcluster",
+                        "node": node,
+                        "sql_commands": sql_commands
                     }
-                }
-                
-                # Track the experiment with SQL commands included
-                target = experiment["spec"]["selector"]["labelSelectors"].get("ref-obcluster", "obcluster")
-                self.active_anomalies[experiment_name] = {
-                    "start_time": datetime.now().isoformat(),
-                    "status": "active",
-                    "type": anomaly_type,
-                    "name": experiment_name,
-                    "target": target,
-                    "node": target,
-                    "sql_commands": sql_commands
-                }
-                
-                logger.info(f"Created {anomaly_type} experiment {experiment_name}")
+                    
+                    logger.info(f"Created {anomaly_type} experiment {node_experiment_name} for node {node}")
                 
                 # Invalidate cache
                 self.invalidate_cache()
@@ -880,43 +823,62 @@ class K8sService:
 
             experiment_name = experiment["metadata"]["name"]
             
-            # Only create chaos mesh experiment for non-special cases
-            if anomaly_type not in ["cache_bottleneck", "too_many_indexes"]:
-                # Create experiment with retry logic
-                max_retries = 5
-                retry_delay = 2
-                
-                for attempt in range(max_retries):
-                    try:
-                        await asyncio.to_thread(
-                            self.custom_api.create_namespaced_custom_object,
-                            group="chaos-mesh.org",
-                            version="v1alpha1",
-                            namespace=self.namespace,
-                            plural=self._get_experiment_plural(anomaly_type),
-                            body=experiment
-                        )
-                        break
-                    except ApiException as e:
-                        if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
-                            logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= 2
-                            continue
-                        raise e
-            
             # Track the active anomaly
             target = experiment["spec"]["selector"]["labelSelectors"].get("ref-obcluster", "obcluster")
-            self.active_anomalies[experiment_name] = {
-                "start_time": datetime.now().isoformat(),
-                "status": "active",
-                "type": anomaly_type,
-                "name": experiment_name,
-                "target": target,
-                "node": target
-            }
             
-            logger.info(f"Created {anomaly_type} experiment {experiment_name}")
+            # If no specific target nodes were provided, use the default target
+            if not target_nodes:
+                target_nodes = [target]
+            
+            # Create an experiment for each target node
+            for node in target_nodes:
+                # Make a copy of the experiment definition for this node
+                node_experiment = experiment.copy()
+                node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
+                node_experiment["metadata"]["name"] = node_experiment_name
+                
+                # Update selector to target specific pod if needed
+                if anomaly_type not in ["cache_bottleneck", "too_many_indexes"]:
+                    # Adjust selector to target the specific pod
+                    if "pod-selector" not in node_experiment["spec"]["selector"]:
+                        node_experiment["spec"]["selector"]["podNames"] = [node]
+                
+                # Only create chaos mesh experiment for non-special cases
+                if anomaly_type not in ["cache_bottleneck", "too_many_indexes"]:
+                    # Create experiment with retry logic
+                    max_retries = 5
+                    retry_delay = 2
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            await asyncio.to_thread(
+                                self.custom_api.create_namespaced_custom_object,
+                                group="chaos-mesh.org",
+                                version="v1alpha1",
+                                namespace=self.namespace,
+                                plural=self._get_experiment_plural(anomaly_type),
+                                body=node_experiment
+                            )
+                            break
+                        except ApiException as e:
+                            if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
+                                logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
+                                await asyncio.sleep(retry_delay)
+                                retry_delay *= 2
+                                continue
+                            raise e
+                
+                # Track this specific anomaly
+                self.active_anomalies[node_experiment_name] = {
+                    "start_time": datetime.now().isoformat(),
+                    "status": "active",
+                    "type": anomaly_type,
+                    "name": node_experiment_name,
+                    "target": target,
+                    "node": node
+                }
+                
+                logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
             
             # Invalidate cache
             self.invalidate_cache()
@@ -995,14 +957,41 @@ class K8sService:
             logger.error(f"Error initializing active anomalies: {str(e)}")
 
     async def get_available_nodes(self) -> List[str]:
-        """Get list of available nodes for running experiments"""
+        """Get list of available pods for running experiments"""
         try:
-            v1 = client.CoreV1Api()
-            nodes = await asyncio.to_thread(
-                v1.list_node,
+            pods = await asyncio.to_thread(
+                self.core_api.list_namespaced_pod,
+                namespace=self.namespace,
                 label_selector="ref-obcluster"
             )
-            return [node.metadata.name for node in nodes.items]
-        except Exception as e:
-            logger.error(f"Error getting available nodes: {str(e)}")
+            pod_names = []
+            for pod in pods.items:
+                if pod.metadata.name.startswith("obcluster-"):
+                    pod_names.append(pod.metadata.name)
+            return pod_names
+        except ApiException as e:
+            logger.error(f"Error getting available pods: {str(e)}")
             return []
+        
+    def _fetch_ob_zones(self):
+        """Fetch OceanBase zones from the database"""
+        try:
+            conn = pymysql.connect(**self.ob_config)
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT zone FROM oceanbase.DBA_OB_ZONES")
+                zones = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            
+            if not zones:
+                logger.warning("No zones found in database, using default zones")
+                return ['zone1', 'zone2', 'zone3']
+                
+            logger.info(f"Found OceanBase zones: {zones}")
+            return zones
+        except Exception as e:
+            logger.error(f"Error fetching OceanBase zones: {str(e)}")
+            logger.info("Using default zones due to error")
+            return ['zone1', 'zone2', 'zone3']
+
+# Create singleton k8s service object
+k8s_service = K8sService()

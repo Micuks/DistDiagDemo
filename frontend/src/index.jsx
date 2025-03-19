@@ -32,7 +32,7 @@ function Main() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <div style={{ padding: '24px 0' }}>
+      <div style={{ padding: '0 0' }}>
         <App />
       </div>
     </ThemeProvider>

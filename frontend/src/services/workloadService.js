@@ -14,17 +14,34 @@ export const workloadService = {
     }
   },
 
-  startWorkload: async (workloadType, threads, options = {}) => {
+  startWorkload: async (config) => {
     try {
       const response = await axios.post(`${API_BASE_URL}/api/workload/start`, {
-        type: workloadType,
-        threads: threads,
-        options: options
+        type: config.type,
+        threads: config.threads,
+        options: config.options,
+        task_name: config.task_name
       });
       return response.data;
     } catch (error) {
       console.error('Error starting workload:', error);
       throw new Error('Failed to start workload: ' + (error.response?.data?.detail || error.message));
+    }
+  },
+
+  // Create a task with only anomalies for an existing workload
+  createTask: async (config) => {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/api/workload/create-task`, {
+        type: config.type,
+        workload_id: config.workload_id,
+        task_name: config.task_name,
+        anomalies: config.anomalies
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error creating task:', error);
+      throw new Error('Failed to create task: ' + (error.response?.data?.detail || error.message));
     }
   },
 
@@ -129,6 +146,45 @@ export const workloadService = {
     } catch (error) {
       console.error('Error getting workload status:', error);
       throw new Error('Failed to get workload status: ' + (error.response?.data?.detail || error.message));
+    }
+  },
+
+  async getTasks() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/workload/tasks`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch tasks');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('Error fetching tasks:', error);
+      throw error;
+    }
+  },
+
+  async getActiveTasks() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/workload/tasks/active`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch active tasks');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('Error fetching active tasks:', error);
+      throw error;
+    }
+  },
+
+  async getTask(taskId) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/workload/tasks/${taskId}`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch task');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('Error fetching task:', error);
+      throw error;
     }
   }
 }; 

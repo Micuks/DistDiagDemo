@@ -87,14 +87,6 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
 
   return (
     <>
-      <Alert
-        message="Anomalies are optional"
-        description="You can run a normal scenario without injecting any anomalies. Skip this step if you want to run a baseline test."
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-      />
-      
       <Card>
         <Title level={4}>Add Anomaly</Title>
         <Form
@@ -106,7 +98,7 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
             name="type"
             rules={[{ required: true, message: "Select anomaly type" }]}
           >
-            <Select style={{ width: 200 }} placeholder="Select type">
+            <Select style={{ width: 300 }} placeholder="Select type">
               <Option value="cpu_stress">CPU Stress</Option>
               <Option value="io_bottleneck">I/O Bottleneck</Option>
               <Option value="network_bottleneck">Network Bottleneck</Option>
@@ -120,10 +112,16 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
             rules={[{ required: true, message: "Select target node" }]}
           >
             <Select
-              style={{ width: 200 }}
+              style={{ width: 300 }}
               placeholder="Select node"
               mode="multiple"
               loading={loading}
+              placement="bottomLeft"
+              maxTagCount={1}
+              maxTagTextLength={15}
+              dropdownMatchSelectWidth={false}
+              listHeight={250}
+              popupMatchSelectWidth={false}
             >
               {availableNodes &&
                 availableNodes.map((node) => (
@@ -139,7 +137,7 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
             rules={[{ required: true, message: "Select severity" }]}
           >
             <Select
-              style={{ width: 200 }}
+              style={{ width: 300 }}
               placeholder="Select severity"
               options={getSeverityOptions(form.getFieldValue("type"))}
             />

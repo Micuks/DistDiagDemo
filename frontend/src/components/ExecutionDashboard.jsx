@@ -8,13 +8,28 @@ import { useAnomalyData } from '../hooks/useAnomalyData';
 const { Title, Text } = Typography;
 const { TabPane } = Tabs;
 
-const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecution, tasksHistory, setTasksHistory }) => {
+const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecution }) => {
   const [activeWorkloads, setActiveWorkloads] = useState([]);
-  const [workloadLoading, setWorkloadLoading] = useState(false);
+  const [workloadLoading, setWorkloadLoading] = useState(true);
   const [workloadStopLoading, setWorkloadStopLoading] = useState(false);
   const { data: activeAnomalies = [], isLoading: anomalyLoading, refetch: refetchAnomalies } = useAnomalyData();
   const [anomalyStopLoading, setAnomalyStopLoading] = useState(false);
   const [refreshInterval, setRefreshInterval] = useState(null);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Set flag for execution dashboard in localStorage
+  useEffect(() => {
+    // Set the flag when component mounts
+    localStorage.setItem('onExecutionDashboard', 'true');
+    
+    // Clear the flag when component unmounts
+    return () => {
+      localStorage.removeItem('onExecutionDashboard');
+    };
+  }, []);
 
   // Define columns for tasks table
   const taskColumns = [
@@ -25,144 +40,27 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     },
     {
       title: 'Workload Type',
-      dataIndex: ['workload', 'type'],
-      key: 'workloadType',
-      render: (type) => {
-        const types = {
-          sysbench: 'Sysbench OLTP',
-          tpcc: 'TPC-C',
-          tpch: 'TPC-H'
-        };
-        return <Tag color="blue">{types[type] || type}</Tag>;
-      }
+      dataIndex: 'workload_type',
+      key: 'workload_type',
+      render: (type) => (
+        <Tag color={type === 'tpcc' ? 'blue' : 'green'}>
+          {type.toUpperCase()}
+        </Tag>
+      )
     },
     {
       title: 'Anomalies',
       dataIndex: 'anomalies',
       key: 'anomalies',
-      render: (anomalies) => {
-        if (!anomalies || anomalies.length === 0) {
-          return <Tag color="green">Normal Scenario</Tag>;
-        }
-        return (
-          <Space size={[0, 4]} wrap>
-            {anomalies.map((anomaly) => (
-              <Tag color="red" key={anomaly.id}>
-                {anomaly.type}
-              </Tag>
-            ))}
-          </Space>
-        );
-      }
-    },
-    {
-      title: 'Start Time',
-      dataIndex: 'startTime',
-      key: 'startTime',
-      render: (time) => new Date(time).toLocaleString()
-    },
-    {
-      title: 'Status',
-      dataIndex: 'status',
-      key: 'status',
-      render: (status) => (
-        <Tag color={status === 'running' ? 'green' : status === 'error' ? 'red' : 'orange'}>
-          {status.toUpperCase()}
-        </Tag>
+      render: (anomalies) => (
+        <Space>
+          {anomalies?.map((anomaly, index) => (
+            <Tag key={index} color="red">
+              {typeof anomaly === 'object' ? anomaly.type.replace(/_/g, ' ') : anomaly}
+            </Tag>
+          ))}
+        </Space>
       )
-    },
-    {
-      title: 'Action',
-      key: 'action',
-      render: (_, record) => (
-        <Button
-          type="primary"
-          danger
-          icon={<StopOutlined />}
-          onClick={() => handleStopTask(record)}
-          loading={workloadStopLoading}
-        >
-          Stop Task
-        </Button>
-      ),
-    },
-  ];
-
-  // Define columns for workload table
-  const workloadColumns = [
-    {
-      title: 'ID',
-      dataIndex: 'id',
-      key: 'id',
-    },
-    {
-      title: 'Type',
-      dataIndex: 'type',
-      key: 'type',
-      render: (type) => {
-        const types = {
-          sysbench: 'Sysbench OLTP',
-          tpcc: 'TPC-C',
-          tpch: 'TPC-H'
-        };
-        return <Tag color="blue">{types[type] || type}</Tag>;
-      }
-    },
-    {
-      title: 'Start Time',
-      dataIndex: 'startTime',
-      key: 'startTime',
-      render: (time) => new Date(time).toLocaleString()
-    },
-    {
-      title: 'Status',
-      dataIndex: 'status',
-      key: 'status',
-      render: (status) => (
-        <Tag color={status === 'running' ? 'green' : status === 'error' ? 'red' : 'orange'}>
-          {status.toUpperCase()}
-        </Tag>
-      )
-    },
-    {
-      title: 'Action',
-      key: 'action',
-      render: (_, record) => (
-        <Button
-          type="primary"
-          danger
-          icon={<StopOutlined />}
-          onClick={() => handleStopWorkload(record.id)}
-          loading={workloadStopLoading}
-        >
-          Stop
-        </Button>
-      ),
-    },
-  ];
-
-  // Define columns for anomaly table
-  const anomalyColumns = [
-    {
-      title: 'Type',
-      dataIndex: 'type',
-      key: 'type',
-      render: (type) => {
-        const types = {
-          cpu_stress: 'CPU Stress',
-          io_bottleneck: 'I/O Bottleneck',
-          network_bottleneck: 'Network Bottleneck',
-          cache_bottleneck: 'Cache Bottleneck',
-          too_many_indexes: 'Too Many Indexes',
-        };
-        return <Tag color="red">{types[type] || type}</Tag>;
-      }
-    },
-    {
-      title: 'Target Node',
-      dataIndex: 'node',
-      key: 'node',
-      render: (node) => <Tag color="orange">{node || 'Default'}</Tag>
     },
     {
       title: 'Start Time',
@@ -175,21 +73,20 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       dataIndex: 'status',
       key: 'status',
       render: (status) => (
-        <Tag color={status === 'active' ? 'green' : 'red'}>
-          {String(status).toUpperCase()}
+        <Tag color={status === 'running' ? 'green' : 'red'}>
+          {status.toUpperCase()}
         </Tag>
       )
     },
     {
-      title: 'Action',
-      key: 'action',
+      title: 'Actions',
+      key: 'actions',
       render: (_, record) => (
-        <Button 
-          type="primary" 
-          danger 
-          icon={<StopOutlined />}
-          onClick={() => handleStopAnomaly(record.type)}
-          loading={anomalyStopLoading}
+        <Button
+          type="primary"
+          danger
+          onClick={() => handleStopWorkload(record.workload_id)}
+          disabled={record.status !== 'running'}
         >
           Stop
         </Button>
@@ -197,89 +94,188 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     },
   ];
 
-  // Functions to fetch active workloads and anomalies
-  const fetchActiveWorkloads = async () => {
-    try {
-      setWorkloadLoading(true);
-      const data = await workloadService.getActiveWorkloads();
-      
-      // Update the activeWorkloads state
-      setActiveWorkloads(data.workloads || []);
-      
-      // Also update task status in tasksHistory
-      if (data.workloads && data.workloads.length > 0) {
-        const updatedTasks = tasksHistory.map(task => {
-          const matchingWorkload = data.workloads.find(w => w.id === task.workloadId);
-          if (matchingWorkload) {
-            return { ...task, status: matchingWorkload.status };
-          }
-          return task;
-        });
-        setTasksHistory(updatedTasks);
+  // Define columns for workloads table
+  const workloadColumns = [
+    {
+      title: 'Workload ID',
+      dataIndex: 'id',
+      key: 'id',
+    },
+    {
+      title: 'Type',
+      dataIndex: 'type',
+      key: 'type',
+      render: (type) => (
+        <Tag color={type === 'tpcc' ? 'blue' : type === 'sysbench' ? 'green' : 'purple'}>
+          {type.toUpperCase()}
+        </Tag>
+      )
+    },
+    {
+      title: 'Threads',
+      dataIndex: 'threads',
+      key: 'threads',
+    },
+    {
+      title: "Start Time",
+      dataIndex: "start_time",
+      key: "start_time",
+      render: (time) => new Date(time).toLocaleString()
+    },
+    {
+      title: 'Status',
+      dataIndex: 'status',
+      key: 'status',
+      render: (status) => (
+        <Tag color={status === 'running' ? 'green' : 'red'}>
+          {status.toUpperCase()}
+        </Tag>
+      )
+    },
+    {
+      title: 'Actions',
+      key: 'actions',
+      render: (_, record) => (
+        <Button
+          type="primary"
+          danger
+          onClick={() => handleStopWorkload(record.id)}
+          disabled={record.status !== 'running'}
+        >
+          Stop
+        </Button>
+      ),
+    },
+  ];
+
+  // Define columns for anomalies table
+  const anomalyColumns = [
+    {
+      title: 'Type',
+      dataIndex: 'type',
+      key: 'type',
+      render: (type) => (
+        <Tag color="red">
+          {type.toUpperCase().replace(/_/g, ' ')}
+        </Tag>
+      )
+    },
+    {
+      title: 'Node',
+      dataIndex: 'node',
+      key: 'node',
+      render: (node) => Array.isArray(node) ? node.join(', ') : node
+    },
+    {
+      title: 'Start Time',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      render: (time) => time ? new Date(time).toLocaleString() : 'N/A'
+    },
+    {
+      title: 'Duration',
+      key: 'duration',
+      render: (_, record) => {
+        if (!record.created_at) return 'N/A';
+        const start = new Date(record.created_at);
+        const now = new Date();
+        const diffMs = now - start;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffSecs = Math.floor((diffMs % 60000) / 1000);
+        return `${diffMins}m ${diffSecs}s`;
       }
+    },
+    {
+      title: 'Actions',
+      key: 'actions',
+      render: (_, record) => (
+        <Button
+          type="primary"
+          danger
+          onClick={() => handleStopAnomaly(record.type)}
+          loading={anomalyStopLoading === record.type}
+        >
+          Stop
+        </Button>
+      ),
+    },
+  ];
+
+  const fetchTasks = async () => {
+    try {
+      if (!isRefreshing) setLoading(true);
+      const activeTasks = await workloadService.getActiveTasks();
+      console.log("Active tasks data:", activeTasks);
+      setTasks(activeTasks);
+    } catch (error) {
+      console.error('Error fetching tasks:', error);
+      if (isInitialLoad) {
+        message.error(`Failed to fetch tasks: ${error.message}`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch active workloads
+  const fetchActiveWorkloads = async () => {
+    if (workloadLoading && isRefreshing) return; // Prevent multiple concurrent fetches
+    
+    try {
+      if (!isRefreshing) setWorkloadLoading(true);
+      const data = await workloadService.getActiveWorkloads();
+      console.log("Active workloads data:", data);
+      setActiveWorkloads(data);
     } catch (error) {
       console.error('Failed to fetch workloads:', error);
-      message.error('Failed to load active workloads');
+      if (isInitialLoad) {
+        message.error(`Failed to load active workloads: ${error.message}`);
+      }
     } finally {
       setWorkloadLoading(false);
     }
   };
 
-  // Functions to handle stopping workloads and anomalies
-  const handleStopTask = async (task) => {
-    try {
-      setWorkloadStopLoading(true);
-      
-      // Stop the workload
-      if (task.workloadId) {
-        await workloadService.stopWorkload(task.workloadId);
-      }
-      
-      // Stop any associated anomalies
-      if (task.anomalies && task.anomalies.length > 0) {
-        for (const anomaly of task.anomalies) {
-          await anomalyService.stopAnomaly(anomaly.type);
-        }
-      }
-      
-      // Update task status
-      const updatedTasks = tasksHistory.map(t => {
-        if (t.id === task.id) {
-          return { ...t, status: 'stopped' };
-        }
-        return t;
+  // Set up periodic refresh
+  useEffect(() => {
+    // Initial fetch
+    fetchTasks();
+    fetchActiveWorkloads();
+    refetchAnomalies();
+
+    // Set up interval for periodic refresh
+    const interval = setInterval(() => {
+      setIsRefreshing(true);
+      Promise.all([
+        fetchTasks(),
+        fetchActiveWorkloads(),
+        refetchAnomalies()
+      ]).finally(() => {
+        setIsRefreshing(false);
+        setIsInitialLoad(false);
       });
-      
-      setTasksHistory(updatedTasks);
-      message.success('Task stopped successfully');
-      
-      // Refresh data
-      fetchActiveWorkloads();
-      refetchAnomalies();
-    } catch (error) {
-      console.error('Failed to stop task:', error);
-      message.error(`Failed to stop task: ${error.message}`);
-    } finally {
-      setWorkloadStopLoading(false);
-    }
-  };
+    }, 5000);
+    setRefreshInterval(interval);
+
+    // Clean up on unmount
+    return () => {
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+      }
+    };
+  }, []);
 
   const handleStopWorkload = async (workloadId) => {
     try {
-      setWorkloadStopLoading(true);
+      setWorkloadStopLoading(workloadId);
       await workloadService.stopWorkload(workloadId);
       
-      // Update task status if this workload is associated with a task
-      const updatedTasks = tasksHistory.map(task => {
-        if (task.workloadId === workloadId) {
-          return { ...task, status: 'stopped' };
-        }
-        return task;
-      });
-      
-      setTasksHistory(updatedTasks);
       message.success('Workload stopped successfully');
-      fetchActiveWorkloads();
+      
+      // Refresh data
+      setIsRefreshing(true);
+      await Promise.all([fetchTasks(), fetchActiveWorkloads()]);
+      setIsRefreshing(false);
     } catch (error) {
       console.error('Failed to stop workload:', error);
       message.error(`Failed to stop workload: ${error.message}`);
@@ -290,7 +286,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
 
   const handleStopAnomaly = async (anomalyType) => {
     try {
-      setAnomalyStopLoading(true);
+      setAnomalyStopLoading(anomalyType);
       await anomalyService.stopAnomaly(anomalyType);
       message.success(`Anomaly ${anomalyType} stopped`);
       refetchAnomalies();
@@ -304,20 +300,13 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
 
   const handleStopAllWorkloads = async () => {
     try {
-      setWorkloadStopLoading(true);
+      setWorkloadStopLoading('all');
       await workloadService.stopAllWorkloads();
       
-      // Update all tasks with running status to stopped
-      const updatedTasks = tasksHistory.map(task => {
-        if (task.status === 'running') {
-          return { ...task, status: 'stopped' };
-        }
-        return task;
-      });
-      
-      setTasksHistory(updatedTasks);
       message.success('All workloads stopped');
-      fetchActiveWorkloads();
+      setIsRefreshing(true);
+      await Promise.all([fetchTasks(), fetchActiveWorkloads()]);
+      setIsRefreshing(false);
     } catch (error) {
       console.error('Failed to stop all workloads:', error);
       message.error(`Failed to stop all workloads: ${error.message}`);
@@ -328,7 +317,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
 
   const handleStopAllAnomalies = async () => {
     try {
-      setAnomalyStopLoading(true);
+      setAnomalyStopLoading('all');
       await anomalyService.stopAllAnomalies();
       message.success('All anomalies stopped');
       refetchAnomalies();
@@ -340,31 +329,16 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     }
   };
 
-  // Set up periodic refresh
-  useEffect(() => {
-    // Initial fetch
-    fetchActiveWorkloads();
-    refetchAnomalies();
-
-    // Set up interval for periodic refresh
-    const interval = setInterval(() => {
-      fetchActiveWorkloads();
-      refetchAnomalies();
-    }, 5000);
-    setRefreshInterval(interval);
-
-    // Clean up on unmount
-    return () => {
-      if (refreshInterval) {
-        clearInterval(refreshInterval);
-      }
-    };
-  }, []);
-
   const handleRefreshData = () => {
-    fetchActiveWorkloads();
-    refetchAnomalies();
-    message.info('Refreshing data...');
+    setIsRefreshing(true);
+    Promise.all([
+      fetchTasks(),
+      fetchActiveWorkloads(),
+      refetchAnomalies()
+    ]).finally(() => {
+      setIsRefreshing(false);
+      message.info('Data refreshed');
+    });
   };
 
   const calculateSystemStatus = () => {
@@ -383,7 +357,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
   const systemStatus = calculateSystemStatus();
   
   // Get active tasks by filtering tasks with running status
-  const activeTasks = tasksHistory.filter(task => task.status === 'running');
+  const activeTasks = tasks.filter(task => task.status === 'running');
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="large">
@@ -396,6 +370,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
                 <Button 
                   icon={<ReloadOutlined />} 
                   onClick={handleRefreshData}
+                  loading={isRefreshing}
                 >
                   Refresh
                 </Button>
@@ -457,7 +432,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
               title={
                 <Space>
                   <Title level={5}>Task Status</Title>
-                  {workloadLoading && <Spin size="small" />}
+                  {(loading && !isRefreshing) && <Spin size="small" />}
                 </Space>
               }
               extra={
@@ -467,7 +442,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
                   icon={<StopOutlined />}
                   onClick={handleStopAllWorkloads}
                   disabled={activeTasks.length === 0}
-                  loading={workloadStopLoading}
+                  loading={workloadStopLoading === 'all'}
                 >
                   Stop All Tasks
                 </Button>
@@ -475,11 +450,11 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
             >
               <Table 
                 columns={taskColumns} 
-                dataSource={tasksHistory} 
+                dataSource={tasks} 
                 rowKey="id" 
                 pagination={false}
                 locale={{ emptyText: 'No tasks created yet' }}
-                loading={workloadLoading}
+                loading={loading && isInitialLoad}
               />
             </Card>
           </TabPane>
@@ -489,7 +464,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
               title={
                 <Space>
                   <Title level={5}>Workload Status</Title>
-                  {workloadLoading && <Spin size="small" />}
+                  {(workloadLoading && !isRefreshing) && <Spin size="small" />}
                 </Space>
               }
               extra={
@@ -499,7 +474,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
                   icon={<StopOutlined />}
                   onClick={handleStopAllWorkloads}
                   disabled={activeWorkloads.length === 0}
-                  loading={workloadStopLoading}
+                  loading={workloadStopLoading === 'all'}
                 >
                   Stop All Workloads
                 </Button>
@@ -511,7 +486,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
                 rowKey="id" 
                 pagination={false}
                 locale={{ emptyText: 'No active workloads' }}
-                loading={workloadLoading}
+                loading={workloadLoading && isInitialLoad}
               />
             </Card>
           </TabPane>
@@ -521,7 +496,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
               title={
                 <Space>
                   <Title level={5}>Anomaly Status</Title>
-                  {anomalyLoading && <Spin size="small" />}
+                  {(anomalyLoading && !isRefreshing) && <Spin size="small" />}
                 </Space>
               }
               extra={
@@ -531,7 +506,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
                   icon={<StopOutlined />}
                   onClick={handleStopAllAnomalies}
                   disabled={activeAnomalies.length === 0}
-                  loading={anomalyStopLoading}
+                  loading={anomalyStopLoading === 'all'}
                 >
                   Stop All Anomalies
                 </Button>
@@ -540,10 +515,10 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
               <Table 
                 columns={anomalyColumns} 
                 dataSource={activeAnomalies} 
-                rowKey={(record) => record.type + record.node} 
+                rowKey="name" 
                 pagination={false}
                 locale={{ emptyText: 'No active anomalies' }}
-                loading={anomalyLoading}
+                loading={anomalyLoading && isInitialLoad}
               />
             </Card>
           </TabPane>

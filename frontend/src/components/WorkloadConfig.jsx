@@ -163,7 +163,7 @@ const WorkloadConfig = ({ onConfigChange, initialConfig }) => {
 
                     <Form.Item
                         label="Prepare Database"
-        help="Only needed for first-run to deploy the database"
+                        help="* Database only need to be prepared once"
                         name="prepareDatabase"
                         valuePropName="checked"
                     >

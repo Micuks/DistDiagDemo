@@ -78,9 +78,8 @@ class DistDiagnosis:
         # Check for CUDA availability
         import xgboost as xgb
         try:
-            gpu_available = len(xgb.get_gpu_info()) > 0
-            device = 'cuda' if gpu_available else 'cpu'
-            logger.info(f"XGBoost using device: {device} (GPU {'available' if gpu_available else 'not available'})")
+            device = 'cuda'
+            logger.info(f"XGBoost using device: {device} ")
         except Exception as e:
             logger.warning(f"Error checking GPU availability: {str(e)}. Defaulting to CPU.")
             device = 'cpu'
@@ -141,53 +140,81 @@ class DistDiagnosis:
             return [0.0] * self.time_window
 
     def _calculate_time_features(self, values: List[float]) -> List[float]:
-        """Calculate statistical features over time window values"""
+        """Calculate statistical features over time window values with emphasis on extremes"""
         try:
             # Convert to numpy array for vectorized operations
             values_array = np.array(values, dtype=np.float64)
             
-            # Calculate features in a vectorized way
-            features = [
-                np.mean(values_array),                         # mean
-                np.std(values_array) if len(values_array) > 1 else 0.0,  # std dev
-                np.max(values_array) if values_array.size > 0 else 0.0,  # max
-                np.min(values_array) if values_array.size > 0 else 0.0,  # min
-                np.median(values_array) if values_array.size > 0 else 0.0, # median
-                # Enhanced features
-                np.ptp(values_array) if values_array.size > 0 else 0.0,  # peak-to-peak (max-min)
-                np.percentile(values_array, 95) if values_array.size > 0 else 0.0,  # 95th percentile
-            ]
+            # Calculate basic statistics
+            mean = np.mean(values_array)
+            std_dev = np.std(values_array) if len(values_array) > 1 else 0.0
+            max_val = np.max(values_array) if values_array.size > 0 else 0.0
+            min_val = np.min(values_array) if values_array.size > 0 else 0.0
             
-            # Add trend direction (mean of gradient)
+            # Enhanced features for anomaly detection
+            features = []
+            
+            # Basic statistics
+            features.extend([
+                mean,                   # Basic mean
+                std_dev,                # Standard deviation
+                max_val,                # Maximum value
+                min_val,                # Minimum value
+                np.median(values_array) if values_array.size > 0 else 0.0,  # Median
+                np.ptp(values_array) if values_array.size > 0 else 0.0,     # Peak-to-peak range
+            ])
+            
+            # Percentile-based features
+            if values_array.size > 0:
+                features.extend([
+                    np.percentile(values_array, 75),  # 75th percentile
+                    np.percentile(values_array, 90),  # 90th percentile
+                    np.percentile(values_array, 95),  # 95th percentile
+                    np.percentile(values_array, 99),  # 99th percentile for extreme spikes
+                ])
+            else:
+                features.extend([0.0] * 4)
+            
+            # Deviation features
+            if std_dev > 0 and values_array.size > 0:
+                max_z_score = (max_val - mean) / std_dev  # Z-score of maximum
+                min_z_score = (min_val - mean) / std_dev  # Z-score of minimum
+                features.extend([max_z_score, min_z_score])
+                
+                # Count of severe outliers (> 3 std dev)
+                severe_outliers = np.sum(np.abs(values_array - mean) > 3 * std_dev)
+                features.append(float(severe_outliers) / len(values_array))
+            else:
+                features.extend([0.0, 0.0, 0.0])
+            
+            # Ratio features
+            if mean > 0:
+                features.append(max_val / mean)  # Max/mean ratio
+            else:
+                features.append(1.0)
+                
+            # Trend features
             if len(values_array) > 1:
                 try:
                     gradient = np.gradient(values_array)
-                    features.append(np.mean(gradient))  # trend direction
+                    features.append(np.mean(gradient))  # Average trend
+                    features.append(np.max(np.abs(gradient)))  # Maximum change rate
                 except Exception as e:
-                    logger.warning(f"Error calculating gradient: {e}")
-                    features.append(0.0)
-                
-            # Add percentage change from first to last value
-            if values_array.size > 1 and abs(values_array[0]) > 1e-10:
-                try:
-                    pct_change = (values_array[-1] - values_array[0]) / values_array[0]
-                    features.append(pct_change)
-                except Exception as e:
-                    logger.warning(f"Error calculating percentage change: {e}")
-                    features.append(0.0)
+                    features.extend([0.0, 0.0])
             else:
-                features.append(0.0)
-                
+                features.extend([0.0, 0.0])
+            
             return features
+            
         except Exception as e:
             logger.error(f"Error calculating time features: {str(e)}")
-            return [0.0] * 9  # Return zeros for all features (now 9 features)
+            return [0.0] * 16  # Return zeros for all 16 features
 
     def _process_metrics(self, metrics: Dict[str, Any]) -> np.ndarray:
         """Process metrics into feature vector using time window statistics"""
         try:
             # Pre-allocate the feature vector with the correct size
-            # Each metric produces 9 features (updated from 5), and we're processing multiple metrics
+            # Each metric produces 16 features, and we're processing multiple metrics
             num_metrics = (
                 3 +  # CPU metrics
                 6 +  # Memory metrics
@@ -195,7 +222,7 @@ class DistDiagnosis:
                 12 +  # Network metrics
                 27    # Transaction metrics
             )
-            feature_vector = np.zeros(num_metrics * 9)  # 9 features per metric (matches _calculate_time_features output)
+            feature_vector = np.zeros(num_metrics * 16)  # 16 features per metric (matches _calculate_time_features output)
             feature_idx = 0
             
             # logger.info(f"Processing {num_metrics} metrics into feature vector")
@@ -404,7 +431,7 @@ class DistDiagnosis:
 
     def diagnose(self, node_metrics: dict) -> dict:
         """
-        Diagnose anomalies from node metrics
+        Diagnose anomalies from node metrics with improved score normalization
         
         Args:
             node_metrics: Dict of node metrics in format:
@@ -463,61 +490,82 @@ class DistDiagnosis:
             
             # Calculate node importance scores using PageRank
             node_scores = self.calculate_score_for_node(node_metrics_list)
-            logger.debug(f"Calculated node importance scores: {node_scores}")
+            
+            # Apply softmax to normalize PageRank scores to probabilities
+            # This ensures PageRank scores sum to 1.0 and have better scaling properties
+            def softmax(x):
+                exp_x = np.exp(x - np.max(x))  # Subtract max for numerical stability
+                return exp_x / exp_x.sum()
+            
+            # Apply softmax normalization to node_scores
+            normalized_node_scores = softmax(node_scores)
+            logger.debug(f"Normalized node scores: {normalized_node_scores}")
             
             # Get predictions and combine with node scores
             results = {}
             anomalies = []
             propagation_graph = {}
-
-            # check node_names
+            
+            # Process each node
             for node_idx, node in enumerate(node_names):
                 node_results = {}
-                # Use original feature vector for prediction - no PCA transformation needed
                 feature = features_array[node_idx].reshape(1, -1)
                 
-                # Get classifier predictions
+                # Get classifier predictions for each anomaly type
                 for clf_idx, clf in enumerate(self.clf_list):
                     try:
-                        # Ensure we don't go out of bounds with the classifier index
+                        # Ensure classifier index is valid
                         if clf_idx >= len(self.classes):
                             logger.warning(f"Classifier index {clf_idx} exceeds available classes ({len(self.classes)})")
                             continue
-                            
-                        # Make prediction and get probabilities
+                        
+                        # Get prediction probability using XGBoost's native predict_proba
+                        # This directly gives calibrated probabilities
                         prediction = clf.predict_proba(feature)
                         if prediction is None or len(prediction) == 0:
                             logger.warning(f"Empty prediction from classifier {clf_idx} for node {node}")
                             continue
-                            
+                        
                         proba = prediction[0]
                         logger.debug(f"Node {node} - Classifier {clf_idx} ({self.classes[clf_idx]}) probabilities: {proba}")
                         
-                        # Safe access to probability values
+                        # Get positive class probability (probability of anomaly)
                         if len(proba) > 1:
-                            # Binary classification case - use probability of positive class
-                            raw_score = float(proba[1])
-                            # Apply sigmoid scaling to amplify probabilities
-                            score = 1.0 / (1.0 + np.exp(-10 * (raw_score - 0.5)))
+                            # Binary case - use probability of positive class (class 1)
+                            anomaly_probability = float(proba[1])
                         else:
-                            # Single class case - use the only probability available
-                            raw_score = float(proba[0])
-                            score = 1.0 / (1.0 + np.exp(-10 * (raw_score - 0.5)))
-                            
-                        # Weight the score by node importance using exponential scaling
-                        node_score = node_scores[node_idx] if node_idx < len(node_scores) else 1.0
-                        node_weight = np.exp(2 * node_score)  # Exponential scaling
-                        weighted_score = score * node_weight
+                            # Single class case
+                            anomaly_probability = float(proba[0])
+                        
+                        # Apply threshold to reduce false positives
+                        # Only consider scores above a minimum threshold
+                        if anomaly_probability < 0.01:  # 1% minimum threshold
+                            anomaly_probability = 0
+                        
+                        # Combine with normalized node importance (PageRank)
+                        # Use a balanced geometric mean to prevent one factor from dominating
+                        node_importance = normalized_node_scores[node_idx]
+                        
+                        # Combined score calculation:
+                        # 1. Take square root of node importance to reduce its impact
+                        # 2. Multiply by anomaly probability
+                        # 3. Scale by a larger factor for clarity in reporting
+                        combined_score = 10.0 * anomaly_probability * np.sqrt(node_importance)
+                        
                         anomaly_type = self.classes[clf_idx]
-                        node_results[anomaly_type] = weighted_score
-                        logger.debug(f"Node {node} - {anomaly_type}: raw_score={raw_score:.4f}, node_score={node_score:.4f}, weighted_score={weighted_score:.4f}")
+                        node_results[anomaly_type] = combined_score
+                        
+                        logger.debug(f"Node {node} - {anomaly_type}: "
+                                    f"probability={anomaly_probability:.4f}, "
+                                    f"node_importance={node_importance:.4f}, "
+                                    f"combined_score={combined_score:.4f}")
+                        
                     except Exception as e:
                         logger.error(f"Error predicting with classifier {clf_idx}: {str(e)}")
-                        logger.debug(f"Exception details: {traceback.format_exc()}")
                         continue
                 
                 results[node] = node_results
-
+                
                 # Find highest scoring anomaly
                 if node_results:
                     max_score = max(node_results.values())
@@ -1156,8 +1204,8 @@ class DiagnosisService:
                 except Exception as e:
                     logger.error(f"Error inverse transforming PCA features: {str(e)}")
                     X_synth = X_test.copy()  # Fall back to original data
-            else:
-                X_synth = X_test.copy()
+                else:
+                    X_synth = X_test.copy()
             
             # Create a dictionary to simulate the metrics structure
             test_metrics = {}

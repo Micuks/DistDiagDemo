@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Response
-from typing import List, Dict, Optional
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Response, Depends, Query
+from typing import List, Dict, Optional, Union
 from datetime import datetime
 import asyncio
 from pydantic import BaseModel
@@ -7,7 +7,7 @@ from app.services.k8s_service import K8sService
 from app.services.metrics_service import MetricsService
 from app.services.diagnosis_service import DiagnosisService
 from app.services.training_service import training_service
-from app.schemas.anomaly import AnomalyRequest, MetricsResponse, AnomalyRankResponse, ActiveAnomalyResponse
+from app.schemas.anomaly import AnomalyRequest, MetricsResponse, AnomalyRankResponse, ActiveAnomalyResponse, AnomalyResponse, AnomalyStatus, AnomalyConfig, AnomalyInfo
 import logging
 import threading
 from fastapi_cache import FastAPICache
@@ -77,19 +77,24 @@ async def clear_caches():
     except Exception as e:
         logger.warning(f"Failed to clear K8s service cache: {str(e)}")
 
-class AnomalyRequest(BaseModel):
-    type: str
-    node: Optional[str] = None
-    collect_training_data: Optional[bool] = False
-    save_post_data: Optional[bool] = True
-    experiment_name: Optional[str] = None
+@router.get("/nodes", response_model=List[str])
+async def get_available_nodes():
+    """Get list of available nodes for running workloads"""
+    try:
+        nodes = await k8s_service.get_available_nodes()
+        return nodes
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/inject")
 async def inject_anomaly(request: AnomalyRequest):
     """Inject an anomaly into the OceanBase cluster"""
     try:
+        # Use target_node if available, otherwise fall back to node for backward compatibility
+        target_node = request.target_node if request.target_node is not None else request.node
+        
         # Log the request details
-        logger.info(f"Injecting anomaly: {request.type} on node {request.node}")
+        logger.info(f"Injecting anomaly: {request.type} on node {target_node}")
         
         # Clear all caches to ensure fresh data
         await clear_caches()
@@ -100,9 +105,9 @@ async def inject_anomaly(request: AnomalyRequest):
             try:
                 await training_service.start_collection(
                     request.type, 
-                    request.node
+                    target_node
                 )
-                logger.info(f"Started collecting training data for {request.type} anomaly on {request.node}")
+                logger.info(f"Started collecting training data for {request.type} anomaly on {target_node}")
             except Exception as e:
                 logger.error(f"Failed to start data collection: {str(e)}")
                 raise HTTPException(
@@ -114,9 +119,12 @@ async def inject_anomaly(request: AnomalyRequest):
         try:
             # Use retry_with_backoff to handle potential race conditions
             await retry_with_backoff(
-                lambda: k8s_service.apply_chaos_experiment(request.type)
+                lambda: k8s_service.apply_chaos_experiment(
+                    request.type,
+                    target_node=target_node
+                )
             )
-            logger.info(f"Successfully injected {request.type} anomaly")
+            logger.info(f"Successfully injected {request.type} anomaly on node {target_node}")
             
             # Double check that the anomaly is tracked in active_anomalies
             logger.info(f"Active anomalies after injection: {list(k8s_service.active_anomalies.keys())}")
@@ -140,7 +148,7 @@ async def inject_anomaly(request: AnomalyRequest):
             
         return {
             "status": "success", 
-            "message": f"Injected {request.type} anomaly into node {request.node}"
+            "message": f"Injected {request.type} anomaly into node {target_node}"
         }
     except HTTPException:
         raise
@@ -152,6 +160,9 @@ async def inject_anomaly(request: AnomalyRequest):
 async def clear_anomaly(request: AnomalyRequest):
     """Clear an anomaly from the OceanBase cluster"""
     try:
+        # Use target_node if available, otherwise fall back to node for backward compatibility
+        target_node = request.target_node if request.target_node is not None else request.node
+        
         # Log the request details
         logger.info(f"Clearing anomaly: {request.type}, experiment: {request.experiment_name}")
         
@@ -169,7 +180,7 @@ async def clear_anomaly(request: AnomalyRequest):
         # Stop collecting training data if it was being collected
         if request.collect_training_data:
             training_service.stop_anomaly_collection(save_post_data=request.save_post_data)
-            logger.info(f"Stopped collecting training data for {request.type} anomaly on {request.node}")
+            logger.info(f"Stopped collecting training data for {request.type} anomaly on {target_node}")
         
         # Clear caches again to ensure latest state
         await clear_caches()
@@ -198,7 +209,7 @@ async def clear_anomaly(request: AnomalyRequest):
             
         return {
             "status": "success", 
-            "message": f"Cleared {request.type} anomaly from node {request.node}",
+            "message": f"Cleared {request.type} anomaly from node {target_node}",
             "deleted": deleted_experiments
         }
     except Exception as e:

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Steps, Card, Space, Typography, Button, message, Alert, Divider, Row, Col } from 'antd';
+import React, { useState, useEffect } from 'react';
+import { Steps, Card, Space, Typography, Button, message, Alert, Divider, Row, Col, Form, Input, Select } from 'antd';
 import { ControlOutlined, ApiOutlined, LineChartOutlined, ExperimentOutlined, ArrowRightOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { useAnomalyData } from '../hooks/useAnomalyData';
@@ -11,6 +11,7 @@ import ExecutionSummary from './ExecutionSummary';
 import ExecutionDashboard from './ExecutionDashboard';
 
 const { Title, Text, Paragraph } = Typography;
+const { Option } = Select;
 
 const ControlPanel = () => {
     const [currentStep, setCurrentStep] = useState(0);
@@ -19,59 +20,123 @@ const ControlPanel = () => {
     const [isExecuting, setIsExecuting] = useState(false);
     const [isExecuted, setIsExecuted] = useState(false);
     const [taskName, setTaskName] = useState('');
-    const [tasksHistory, setTasksHistory] = useState([]);
     const { data: activeAnomalies = [], refetch: refetchAnomalies } = useAnomalyData();
     const [showDashboard, setShowDashboard] = useState(false);
+    const [activeWorkloads, setActiveWorkloads] = useState([]);
+    const [skipWorkload, setSkipWorkload] = useState(false);
     const navigate = useNavigate();
+    const [loading, setLoading] = useState(false);
+
+    // Check for active workloads when component mounts
+    useEffect(() => {
+        const checkActiveTasks = async () => {
+            try {
+                // Use the new task API to check for active tasks
+                const activeTasks = await workloadService.getActiveTasks();
+                console.log("Active tasks: ", activeTasks);
+                const activeWorkloads = await workloadService.getActiveWorkloads();
+                console.log("Active workloads: ", activeWorkloads);
+                
+                // Set active workloads
+                setActiveWorkloads(activeWorkloads);
+                
+                // If there are active tasks, show the dashboard
+                if (activeTasks.length > 0) {
+                    setShowDashboard(true);
+                }
+            } catch (error) {
+                console.error('Failed to check active tasks:', error);
+            }
+        };
+        
+        checkActiveTasks();
+    }, []);
 
     const handleTaskNameChange = (name) => {
         setTaskName(name);
     };
 
     const handleExecute = async () => {
-        if (!workloadConfig) {
+        // Check if we have anomalies configured
+        const hasAnomalies = anomalyConfig && 
+                            anomalyConfig.anomalies && 
+                            anomalyConfig.anomalies.length > 0;
+        
+        // Check if we're running in anomaly-only mode (with existing workloads)
+        const isAnomalyOnlyMode = skipWorkload && activeWorkloads.length > 0;
+
+        // In anomaly-only mode, we don't need workload config
+        if (!isAnomalyOnlyMode && !workloadConfig) {
             message.error('Please complete workload configuration');
             return;
         }
 
+        // Always require a task name
         if (!taskName.trim()) {
             message.error('Please provide a task name');
             return;
         }
 
-        setIsExecuting(true);
-        try {
-            // First prepare the database if needed
-            if (workloadConfig.prepareDatabase) {
-                await workloadService.prepareDatabase(workloadConfig.type);
-                message.success('Database prepared successfully');
-            }
-
-            // Create task object
-            const task = {
-                id: Date.now().toString(),
-                name: taskName.trim(),
-                workload: { ...workloadConfig },
-                anomalies: anomalyConfig.anomalies || [],
-                startTime: new Date().toISOString(),
-                status: 'running'
-            };
-
-            // Start the workload
-            const workloadResponse = await workloadService.startWorkload(
-                workloadConfig.type,
-                workloadConfig.threads,
-                workloadConfig.options
+        // In normal mode (not anomaly-only), check if same type workload is running
+        if (!isAnomalyOnlyMode && activeWorkloads.length > 0) {
+            const sameTypeWorkloads = activeWorkloads.filter(
+                workload => workload.type === workloadConfig.type && workload.status === 'running'
             );
             
-            if (workloadResponse && workloadResponse.id) {
-                task.workloadId = workloadResponse.id;
+            if (sameTypeWorkloads.length > 0) {
+                // If a workload of same type is running, ask if user wants to just add anomalies
+                const activeWorkloadId = sameTypeWorkloads[0].id;
+                message.info(`A ${workloadConfig.type} workload is already running. Will add anomalies to the existing workload.`);
+                setSkipWorkload(true);
             }
+        }
+
+        // If no anomalies are configured in anomaly-only mode, there's nothing to do
+        if (isAnomalyOnlyMode && !hasAnomalies) {
+            message.error('Please add at least one anomaly when adding to an existing workload');
+            return;
+        }
+
+        setIsExecuting(true);
+        try {
+            let workloadResponse = null;
             
-            message.success('Workload started successfully');
+            // Start the workload if we're not in anomaly-only mode
+            if (!isAnomalyOnlyMode) {
+                // First prepare the database if needed
+                if (workloadConfig.prepareDatabase) {
+                    await workloadService.prepareDatabase(workloadConfig.type);
+                    message.success('Database prepared successfully');
+                }
+
+                // Start the workload
+                workloadResponse = await workloadService.startWorkload({
+                    type: workloadConfig.type,
+                    threads: workloadConfig.threads,
+                    options: workloadConfig.options,
+                    task_name: taskName.trim()
+                });
+                
+                message.success('Workload started successfully');
+            } else {
+                // In anomaly-only mode, create a task with only anomalies
+                // Use the selected workload's ID
+                const activeWorkloadId = activeWorkloads[0].id;
+                const activeWorkloadType = activeWorkloads[0].type;
+                
+                // Create a task without starting a new workload
+                workloadResponse = await workloadService.createTask({
+                    type: activeWorkloadType,
+                    task_name: taskName.trim(),
+                    workload_id: activeWorkloadId,
+                    anomalies: anomalyConfig.anomalies
+                });
+                
+                message.success('Task created successfully with existing workload');
+            }
 
             // Start anomalies if configured
-            if (anomalyConfig && anomalyConfig.anomalies && anomalyConfig.anomalies.length > 0) {
+            if (hasAnomalies) {
                 for (const anomaly of anomalyConfig.anomalies) {
                     await anomalyService.startAnomaly(anomaly.type, anomaly.node);
                 }
@@ -83,8 +148,9 @@ const ControlPanel = () => {
             // Refresh anomaly data
             await refetchAnomalies();
             
-            // Update tasks history
-            setTasksHistory(prev => [...prev, task]);
+            // Update active workloads
+            const updatedWorkloads = await workloadService.getActiveWorkloads();
+            setActiveWorkloads(updatedWorkloads);
             
             // Mark as executed to show dashboard
             setIsExecuted(true);
@@ -102,6 +168,7 @@ const ControlPanel = () => {
         setAnomalyConfig({ anomalies: [] });
         setTaskName('');
         setShowDashboard(false);
+        setSkipWorkload(false);
     };
 
     const handleReset = () => {
@@ -111,6 +178,11 @@ const ControlPanel = () => {
         setAnomalyConfig({ anomalies: [] });
         setTaskName('');
         setShowDashboard(false);
+        setSkipWorkload(false);
+    };
+
+    const toggleWorkloadSkip = () => {
+        setSkipWorkload(!skipWorkload);
     };
 
     const renderNextStep = () => {
@@ -171,15 +243,46 @@ const ControlPanel = () => {
                 <>
                     <Alert
                         message="Step 1: Configure your workload"
-                        description="Select the type of database workload you want to run, number of threads, and the target node(s)."
+                        description={
+                            activeWorkloads.length > 0 ? (
+                                <Space direction="vertical">
+                                    <Text>There are active workloads running. You can either configure a new workload or add anomalies to an existing workload.</Text>
+                                    <Button 
+                                        type={skipWorkload ? "primary" : "default"}
+                                        onClick={toggleWorkloadSkip}
+                                    >
+                                        {skipWorkload ? "Configure New Workload" : "Use Existing Workload"}
+                                    </Button>
+                                </Space>
+                            ) : (
+                                "Select the type of database workload you want to run, number of threads, and the target node(s)."
+                            )
+                        }
                         type="info"
                         showIcon
                         style={{ marginBottom: 16 }}
                     />
-                    <WorkloadConfig
-                        onConfigChange={setWorkloadConfig}
-                        initialConfig={workloadConfig}
-                    />
+                    {!skipWorkload && (
+                        <WorkloadConfig
+                            onConfigChange={setWorkloadConfig}
+                            initialConfig={workloadConfig}
+                        />
+                    )}
+                    {skipWorkload && (
+                        <Card>
+                            <Title level={4}>Using Existing Workload</Title>
+                            <div>
+                                <Text>You'll be adding anomalies to one of these active workloads:</Text>
+                                <ul>
+                                    {activeWorkloads.map(workload => (
+                                        <li key={workload.id}>
+                                            <Text strong>{workload.type.toUpperCase()}</Text> - Threads: {workload.threads}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        </Card>
+                    )}
                 </>
             ),
             icon: <ControlOutlined />
@@ -191,7 +294,11 @@ const ControlPanel = () => {
                 <>
                     <Alert
                         message="Step 2: Configure anomalies (Optional)"
-                        description="Select the types of anomalies you want to inject into the system. This is optional - you can run a normal workload without anomalies."
+                        description={
+                            skipWorkload ? 
+                            "Select the types of anomalies you want to inject into the existing workload." :
+                            "Select the types of anomalies you want to inject into the system. This is optional - you can run a normal workload without anomalies."
+                        }
                         type="info"
                         showIcon
                         style={{ marginBottom: 16 }}
@@ -217,12 +324,14 @@ const ControlPanel = () => {
                         style={{ marginBottom: 16 }}
                     />
                     <ExecutionSummary
-                        workloadConfig={workloadConfig}
+                        workloadConfig={skipWorkload ? null : workloadConfig}
                         anomalyConfig={anomalyConfig}
                         onExecute={handleExecute}
                         isExecuting={isExecuting}
                         taskName={taskName}
                         onTaskNameChange={handleTaskNameChange}
+                        skipWorkload={skipWorkload}
+                        activeWorkloads={activeWorkloads}
                     />
                 </>
             ),
@@ -238,8 +347,6 @@ const ControlPanel = () => {
                     anomalyConfig={anomalyConfig}
                     onReset={handleReset}
                     onNewExecution={handleNewExecution}
-                    tasksHistory={tasksHistory}
-                    setTasksHistory={setTasksHistory}
                 />
                 {renderNextStep()}
             </>
@@ -294,16 +401,16 @@ const ControlPanel = () => {
                 <Space style={{ marginTop: 24, justifyContent: 'flex-end' }}>
                     {currentStep > 0 && (
                         <Button onClick={() => setCurrentStep(currentStep - 1)}>
-                            Previous
+                            Previous Step
                         </Button>
                     )}
                     {currentStep < steps.length - 1 && (
                         <Button
                             type="primary"
                             onClick={() => setCurrentStep(currentStep + 1)}
-                            disabled={!workloadConfig && currentStep === 0}
+                            disabled={!workloadConfig && currentStep === 0 && !skipWorkload}
                         >
-                            Next
+                            {currentStep === 0 ? "Configure Anomalies →" : "Review Configuration →"}
                         </Button>
                     )}
                 </Space>
