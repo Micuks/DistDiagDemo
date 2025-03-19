@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://10.101.168.97:8001';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export const workloadService = {
   prepareDatabase: async (workloadType) => {
@@ -14,28 +14,27 @@ export const workloadService = {
     }
   },
 
-  startWorkload: async (workloadType, threads = 4) => {
+  startWorkload: async (workloadType, threads, options = {}) => {
     try {
       const response = await axios.post(`${API_BASE_URL}/api/workload/start`, {
         type: workloadType,
-        threads: threads
+        threads: threads,
+        options: options
       });
       return response.data;
     } catch (error) {
       console.error('Error starting workload:', error);
-      const errorMsg = error.response?.data?.detail || error.message;
-      throw new Error(`Failed to start workload: ${errorMsg}`);
+      throw new Error('Failed to start workload: ' + (error.response?.data?.detail || error.message));
     }
   },
 
   stopWorkload: async (workloadId) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/api/workload/stop/${workloadId}`);
+      const response = await axios.post(`${API_BASE_URL}/api/workload/${workloadId}/stop`);
       return response.data;
     } catch (error) {
       console.error('Error stopping workload:', error);
-      const errorMsg = error.response?.data?.detail || error.message;
-      throw new Error(`Failed to stop workload: ${errorMsg}`);
+      throw new Error('Failed to stop workload: ' + (error.response?.data?.detail || error.message));
     }
   },
 
@@ -53,31 +52,20 @@ export const workloadService = {
   getActiveWorkloads: async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/api/workload/active`);
-      const workloads = response.data || [];
-      
-      // Extract system metrics from the first workload if available
-      const systemMetrics = workloads[0]?.metrics || {
-        cpu_usage: 0,
-        memory_usage: 0,
-        disk_usage: 0
-      };
-
-      return {
-        workloads: workloads.map(workload => ({
-          id: workload.id,
-          type: workload.type,
-          threads: workload.threads,
-          pid: workload.pid,
-          status: 'running',
-          metrics: workload.metrics
-        })),
-        systemMetrics,
-        totalCount: workloads.length
-      };
+      return response.data;
     } catch (error) {
-      console.error('Error fetching active workloads:', error);
-      const errorMsg = error.response?.data?.detail || error.message;
-      throw new Error(`Failed to fetch workloads: ${errorMsg}`);
+      console.error('Error getting active workloads:', error);
+      throw new Error('Failed to get active workloads: ' + (error.response?.data?.detail || error.message));
+    }
+  },
+
+  getAvailableNodes: async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/workload/nodes`);
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching available nodes:', error);
+      return [];
     }
   },
 
@@ -131,6 +119,16 @@ export const workloadService = {
         return 'error';
       default:
         return 'default';
+    }
+  },
+
+  getWorkloadStatus: async (workloadId) => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/workload/${workloadId}/status`);
+      return response.data;
+    } catch (error) {
+      console.error('Error getting workload status:', error);
+      throw new Error('Failed to get workload status: ' + (error.response?.data?.detail || error.message));
     }
   }
 }; 

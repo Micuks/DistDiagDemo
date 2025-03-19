@@ -1,7 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL =
-    import.meta.env.REACT_APP_API_BASE_URL || 'http://10.101.168.97:8001';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const MAX_RETRIES = 3;
 
 class AnomalyService {
@@ -329,6 +328,91 @@ class AnomalyService {
                 }
             };
         }
+    }
+
+    async getAvailableNodes() {
+        try {
+            const response = await this.client.get('/api/anomaly/nodes');
+            return response;
+        } catch (error) {
+            console.error('Error fetching available nodes:', error);
+            return [];
+        }
+    }
+
+    async injectAnomaly(anomalyType, targetNode, severity = 5, duration = null) {
+        try {
+            const response = await this.client.post('/api/anomaly/inject', {
+                type: anomalyType,
+                target_node: targetNode,
+                severity: severity,
+                duration: duration
+            });
+            return response.data;
+        } catch (error) {
+            console.error('Error injecting anomaly:', error);
+            throw new Error('Failed to inject anomaly: ' + (error.response?.data?.detail || error.message));
+        }
+    }
+
+    async stopAnomaly(anomalyId) {
+        try {
+            const response = await this.client.post(`/api/anomaly/${anomalyId}/stop`);
+            return response.data;
+        } catch (error) {
+            console.error('Error stopping anomaly:', error);
+            throw new Error('Failed to stop anomaly: ' + (error.response?.data?.detail || error.message));
+        }
+    }
+
+    async stopAllAnomalies() {
+        try {
+            const response = await this.client.post('/api/anomaly/stop-all');
+            return response.data;
+        } catch (error) {
+            console.error('Error stopping all anomalies:', error);
+            throw new Error('Failed to stop all anomalies: ' + (error.response?.data?.detail || error.message));
+        }
+    }
+
+    async getAnomalyStatus(anomalyId) {
+        try {
+            const response = await this.client.get(`/api/anomaly/${anomalyId}/status`);
+            return response.data;
+        } catch (error) {
+            console.error('Error getting anomaly status:', error);
+            throw new Error('Failed to get anomaly status: ' + (error.response?.data?.detail || error.message));
+        }
+    }
+
+    getAnomalyTypes() {
+        return [
+            {
+                key: 'cpu_stress',
+                name: 'CPU Stress',
+                description: 'Simulate high CPU usage'
+            },
+            {
+                key: 'io_bottleneck',
+                name: 'I/O Bottleneck',
+                description: 'Simulate slow disk I/O operations'
+            },
+            {
+                key: 'network_bottleneck',
+                name: 'Network Bottleneck',
+                description: 'Simulate network congestion and high latency'
+            },
+            {
+                key: 'memory_leak',
+                name: 'Memory Leak',
+                description: 'Simulate gradual memory consumption'
+            },
+            {
+                key: 'too_many_indexes',
+                name: 'Too Many Indexes',
+                description: 'Create unnecessary database indexes'
+            }
+        ];
     }
 }
 
