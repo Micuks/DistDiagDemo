@@ -29,6 +29,7 @@ const ControlPanel = () => {
 
     // Check for active workloads when component mounts
     useEffect(() => {
+        localStorage.removeItem('onExecutionDashboard');
         const checkActiveTasks = async () => {
             try {
                 // Use the new task API to check for active tasks

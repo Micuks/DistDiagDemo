@@ -59,8 +59,39 @@ const Navigation = () => {
     }
     
     // Check if we're on execution dashboard by checking URL and localStorage flag
-    const onExecutionDashboard = location.pathname === "/control" && localStorage.getItem("onExecutionDashboard") === "true";
-    setIsExecutionDashboard(onExecutionDashboard);
+    const checkExecutionDashboard = () => {
+      const onExecutionDashboard = location.pathname.includes("/control") && localStorage.getItem("onExecutionDashboard") === "true";
+      setIsExecutionDashboard(onExecutionDashboard);
+    };
+    
+    // Initial check
+    checkExecutionDashboard();
+    
+    // Set up a short timeout to recheck (in case localStorage update happens shortly after navigation)
+    const timeoutId = setTimeout(checkExecutionDashboard, 100);
+    
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [location.pathname]);
+
+  // Add a separate useEffect to listen for localStorage changes
+  useEffect(() => {
+    const handleStorageChange = () => {
+      if (location.pathname.includes("/control")) {
+        const isOnExecutionDashboard = localStorage.getItem("onExecutionDashboard") === "true";
+        setIsExecutionDashboard(isOnExecutionDashboard);
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    
+    // Check immediately in case localStorage was already set
+    handleStorageChange();
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+    };
   }, [location.pathname]);
 
   const workflowSteps = [

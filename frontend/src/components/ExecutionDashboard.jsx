@@ -25,9 +25,14 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     // Set the flag when component mounts
     localStorage.setItem('onExecutionDashboard', 'true');
     
+    // Dispatch a custom event to ensure other components are notified
+    window.dispatchEvent(new Event('storage'));
+    
     // Clear the flag when component unmounts
     return () => {
       localStorage.removeItem('onExecutionDashboard');
+      // Dispatch event again when removed
+      window.dispatchEvent(new Event('storage'));
     };
   }, []);
 
