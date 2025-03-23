@@ -3,6 +3,11 @@ import axios from 'axios';
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const MAX_RETRIES = 3;
 
+// Request tracking for deduplication
+const inFlightRequests = new Map();
+const requestCache = new Map();
+const CACHE_TTL = 10000; // 10 seconds TTL for cached responses
+
 class AnomalyService {
     constructor() {
         this.client = axios.create({
@@ -47,12 +52,51 @@ class AnomalyService {
         }
     }
 
+    // Helper to deduplicate requests
+    async _deduplicatedRequest(cacheKey, request) {
+        // If there's an in-flight request for this key, return its promise
+        if (inFlightRequests.has(cacheKey)) {
+            return inFlightRequests.get(cacheKey);
+        }
+        
+        // Check for a valid cached response
+        const cachedItem = requestCache.get(cacheKey);
+        if (cachedItem && Date.now() - cachedItem.timestamp < CACHE_TTL) {
+            return cachedItem.data;
+        }
+        
+        // Create a new request and store it
+        const requestPromise = (async () => {
+            try {
+                const response = await this._retryableRequest(request);
+                
+                // Store in cache
+                requestCache.set(cacheKey, {
+                    data: response,
+                    timestamp: Date.now()
+                });
+                
+                return response;
+            } finally {
+                // Remove from in-flight requests when done
+                inFlightRequests.delete(cacheKey);
+            }
+        })();
+        
+        // Store the in-flight request
+        inFlightRequests.set(cacheKey, requestPromise);
+        
+        return requestPromise;
+    }
+
     async getActiveAnomalies() {
         console.log('Fetching active anomalies...');
         try {
             // Add timestamp to prevent caching
             const timestamp = new Date().getTime();
-            const response = await this._retryableRequest(() => 
+            const cacheKey = 'getActiveAnomalies';
+            
+            const response = await this._deduplicatedRequest(cacheKey, () => 
                 this.client.get(`/api/anomaly/active?_=${timestamp}`, {
                     headers: {
                         'Cache-Control': 'no-cache, no-store, must-revalidate',

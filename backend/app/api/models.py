@@ -20,6 +20,93 @@ class CompareModelsRequest(BaseModel):
 class ModelValidationRequest(BaseModel):
     model_name: str
 
+@router.get("/{model_name}/performance")
+async def get_model_performance(model_name: str):
+    """Get performance metrics for a specific model"""
+    try:
+        # Ensure model exists
+        available_models = diagnosis_service.get_available_models()
+        if model_name not in available_models:
+            logger.warning(f"Model '{model_name}' not found")
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"Model '{model_name}' not found"},
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true"
+                }
+            )
+        
+        # Check for metrics file with the correct naming pattern
+        model_path = os.path.join(diagnosis_service.models_path, model_name)
+        metrics_path = os.path.join(model_path, 'metrics', f"{model_name}_metrics.json")
+        
+        if not os.path.exists(metrics_path):
+            logger.warning(f"Metrics file not found at primary path: {metrics_path}")
+            # Try directory listing to find any metrics file
+            metrics_dir = os.path.join(model_path, 'metrics')
+            if os.path.exists(metrics_dir):
+                metrics_files = [f for f in os.listdir(metrics_dir) if f.endswith('_metrics.json')]
+                if metrics_files:
+                    metrics_path = os.path.join(metrics_dir, metrics_files[0])
+                    logger.info(f"Found alternative metrics file: {metrics_path}")
+                else:
+                    logger.warning(f"No metrics files found in directory: {metrics_dir}")
+                    return JSONResponse(
+                        status_code=404,
+                        content={"error": f"No performance metrics found for model '{model_name}'"},
+                        headers={
+                            "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                            "Access-Control-Allow-Credentials": "true"
+                        }
+                    )
+            else:
+                logger.warning(f"Metrics directory not found: {metrics_dir}")
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"No performance metrics found for model '{model_name}'"},
+                    headers={
+                        "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                        "Access-Control-Allow-Credentials": "true"
+                    }
+                )
+        
+        # Load metrics from file
+        try:
+            logger.info(f"Loading metrics from: {metrics_path}")
+            with open(metrics_path, 'r') as f:
+                metrics = json.load(f)
+                logger.info(f"Successfully loaded metrics for model {model_name}")
+                
+                return JSONResponse(
+                    content=metrics,
+                    headers={
+                        "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                        "Access-Control-Allow-Credentials": "true"
+                    }
+                )
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing metrics for model '{model_name}': {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"Invalid metrics data for model '{model_name}': {str(e)}"},
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true"
+                }
+            )
+            
+    except Exception as e:
+        logger.error(f"Failed to get model performance: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+
 @router.get("/list")
 async def list_models():
     """Get list of available models"""

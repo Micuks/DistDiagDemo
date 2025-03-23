@@ -19,6 +19,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [error, setError] = useState(null);
 
   // Set flag for execution dashboard in localStorage
   useEffect(() => {
@@ -54,6 +55,18 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       )
     },
     {
+      title: 'Target Node',
+      dataIndex: 'workload_config',
+      key: 'target_node',
+      render: (config) => config?.options?.target_node || 'All Nodes'
+    },
+    {
+      title: 'Threads',
+      dataIndex: 'workload_config',
+      key: 'threads',
+      render: (config) => config?.num_threads || '—'
+    },
+    {
       title: 'Anomalies',
       dataIndex: 'anomalies',
       key: 'anomalies',
@@ -64,6 +77,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
               {typeof anomaly === 'object' ? anomaly.type.replace(/_/g, ' ') : anomaly}
             </Tag>
           ))}
+          {(!anomalies || anomalies.length === 0) && '—'}
         </Space>
       )
     },
@@ -122,6 +136,11 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       key: 'threads',
     },
     {
+      title: 'PID',
+      dataIndex: 'pid',
+      key: 'pid',
+    },
+    {
       title: "Start Time",
       dataIndex: "start_time",
       key: "start_time",
@@ -153,6 +172,35 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     },
   ];
 
+  // Better empty or null handling for anomaly target and nodes
+  const renderNode = (node) => {
+    if (!node) return '—';
+    if (Array.isArray(node)) {
+      return node.length > 0 ? node.join(', ') : '—';
+    }
+    return node;
+  };
+
+  // Helper to format durations
+  const formatDuration = (startTime) => {
+    if (!startTime) return 'N/A';
+    
+    try {
+      const start = new Date(startTime);
+      const now = new Date();
+      const diffMs = now - start;
+      
+      if (isNaN(diffMs) || diffMs < 0) return 'N/A';
+      
+      const diffMins = Math.floor(diffMs / 60000);
+      const diffSecs = Math.floor((diffMs % 60000) / 1000);
+      return `${diffMins}m ${diffSecs}s`;
+    } catch (error) {
+      console.error('Error formatting duration:', error);
+      return 'N/A';
+    }
+  };
+
   // Define columns for anomalies table
   const anomalyColumns = [
     {
@@ -166,29 +214,43 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       )
     },
     {
+      title: 'Experiment Name',
+      dataIndex: 'name',
+      key: 'name',
+      ellipsis: true,
+    },
+    {
+      title: 'Target',
+      dataIndex: 'target',
+      key: 'target',
+      render: renderNode
+    },
+    {
       title: 'Node',
       dataIndex: 'node',
       key: 'node',
-      render: (node) => Array.isArray(node) ? node.join(', ') : node
+      render: renderNode
     },
     {
       title: 'Start Time',
-      dataIndex: 'created_at',
-      key: 'created_at',
+      dataIndex: 'start_time',
+      key: 'start_time',
       render: (time) => time ? new Date(time).toLocaleString() : 'N/A'
     },
     {
       title: 'Duration',
       key: 'duration',
-      render: (_, record) => {
-        if (!record.created_at) return 'N/A';
-        const start = new Date(record.created_at);
-        const now = new Date();
-        const diffMs = now - start;
-        const diffMins = Math.floor(diffMs / 60000);
-        const diffSecs = Math.floor((diffMs % 60000) / 1000);
-        return `${diffMins}m ${diffSecs}s`;
-      }
+      render: (_, record) => formatDuration(record.start_time)
+    },
+    {
+      title: 'Status',
+      dataIndex: 'status',
+      key: 'status',
+      render: (status) => (
+        <Tag color={status === 'active' ? 'red' : 'green'}>
+          {status ? status.toUpperCase() : 'ACTIVE'}
+        </Tag>
+      )
     },
     {
       title: 'Actions',
@@ -217,6 +279,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       if (isInitialLoad) {
         message.error(`Failed to fetch tasks: ${error.message}`);
       }
+      setError(error.message);
     } finally {
       setLoading(false);
     }
@@ -236,6 +299,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       if (isInitialLoad) {
         message.error(`Failed to load active workloads: ${error.message}`);
       }
+      setError(error.message);
     } finally {
       setWorkloadLoading(false);
     }
@@ -246,7 +310,9 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     // Initial fetch
     fetchTasks();
     fetchActiveWorkloads();
-    refetchAnomalies();
+    
+    // Initial anomaly fetch - happens inside useAnomalyData hook
+    // No need to force refresh here since the hook already does this
 
     // Set up interval for periodic refresh
     const interval = setInterval(() => {
@@ -254,12 +320,13 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       Promise.all([
         fetchTasks(),
         fetchActiveWorkloads(),
-        refetchAnomalies()
+        // Don't force refetch if SSE is working, just read from cache
+        // The hook will handle refreshing anomaly data via SSE or its own polling
       ]).finally(() => {
         setIsRefreshing(false);
         setIsInitialLoad(false);
       });
-    }, 5000);
+    }, 10000); // Increased from 5000 to 10000 ms
     setRefreshInterval(interval);
 
     // Clean up on unmount
@@ -294,7 +361,11 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       setAnomalyStopLoading(anomalyType);
       await anomalyService.stopAnomaly(anomalyType);
       message.success(`Anomaly ${anomalyType} stopped`);
-      refetchAnomalies();
+      
+      // Wait a short timeout before refreshing to allow backend to process
+      setTimeout(() => {
+        refetchAnomalies();
+      }, 1000);
     } catch (error) {
       console.error('Failed to stop anomaly:', error);
       message.error(`Failed to stop anomaly: ${error.message}`);
@@ -325,7 +396,11 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       setAnomalyStopLoading('all');
       await anomalyService.stopAllAnomalies();
       message.success('All anomalies stopped');
-      refetchAnomalies();
+      
+      // Wait a short timeout before refreshing to allow backend to process
+      setTimeout(() => {
+        refetchAnomalies();
+      }, 1000);
     } catch (error) {
       console.error('Failed to stop all anomalies:', error);
       message.error(`Failed to stop all anomalies: ${error.message}`);
@@ -456,9 +531,11 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
               <Table 
                 columns={taskColumns} 
                 dataSource={tasks} 
-                rowKey="id" 
+                rowKey={(record) => record.id || Math.random().toString(36).substring(2, 9)}
                 pagination={false}
-                locale={{ emptyText: 'No tasks created yet' }}
+                locale={{ 
+                  emptyText: error ? 'Error loading tasks: ' + error : 'No tasks created yet' 
+                }}
                 loading={loading && isInitialLoad}
               />
             </Card>
@@ -488,9 +565,11 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
               <Table 
                 columns={workloadColumns} 
                 dataSource={activeWorkloads} 
-                rowKey="id" 
+                rowKey={(record) => record.id || Math.random().toString(36).substring(2, 9)}
                 pagination={false}
-                locale={{ emptyText: 'No active workloads' }}
+                locale={{ 
+                  emptyText: error ? 'Error loading workloads: ' + error : 'No active workloads' 
+                }}
                 loading={workloadLoading && isInitialLoad}
               />
             </Card>
@@ -520,9 +599,11 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
               <Table 
                 columns={anomalyColumns} 
                 dataSource={activeAnomalies} 
-                rowKey="name" 
+                rowKey={(record) => record.name || record.type || Math.random().toString(36).substring(2, 9)}
                 pagination={false}
-                locale={{ emptyText: 'No active anomalies' }}
+                locale={{ 
+                  emptyText: error ? 'Error loading anomalies: ' + error : 'No active anomalies' 
+                }}
                 loading={anomalyLoading && isInitialLoad}
               />
             </Card>

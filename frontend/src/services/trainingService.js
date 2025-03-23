@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.REACT_APP_API_BASE_URL || 'http://10.101.168.97:8001';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://10.101.168.97:8001';
 const MAX_RETRIES = 3;
 
 class TrainingService {

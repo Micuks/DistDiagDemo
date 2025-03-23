@@ -24,25 +24,12 @@ const ModelTrainingPanel = () => {
   const [trainingStatus, setTrainingStatus] = useState({ stage: 'idle', progress: 0 });
   const [activeTab, setActiveTab] = useState('1');
   const [trainingCompletionAcknowledged, setTrainingCompletionAcknowledged] = useState(false);
-  const [performanceMetrics, setPerformanceMetrics] = useState(null);
   
   const fetchStatusIntervalRef = useRef(null);
   const fetchStatsIntervalRef = useRef(null);
   const fetchTrainingStatusIntervalRef = useRef(null);
 
   useEffect(() => {
-    const fetchModels = async () => {
-      try {
-        const models = await trainingService.getAvailableModels();
-        setAvailableModels(models);
-        if (models.length > 0) {
-          setSelectedModel(models[0]);
-        }
-      } catch (error) {
-        console.error("Failed to fetch models:", error);
-        message.error("Failed to load available models");
-      }
-    };
     fetchModels();
     
     return () => {
@@ -108,7 +95,6 @@ const ModelTrainingPanel = () => {
             }
             
             if (status.stats && Object.keys(status.stats).length > 0) {
-              setPerformanceMetrics(status.stats);
               setActiveTab('3');
             }
           }
@@ -132,7 +118,7 @@ const ModelTrainingPanel = () => {
     try {
       const models = await trainingService.getAvailableModels();
       setAvailableModels(models);
-      if (models.length > 0 && !selectedModel) {
+      if (models.length > 0) {
         setSelectedModel(models[0]);
       }
     } catch (error) {
@@ -426,48 +412,52 @@ const ModelTrainingPanel = () => {
     return (
       <Row gutter={[16, 16]}>
         <Col span={24}>
-          <Card title="Model Performance">
-            <Space direction="vertical" style={{ width: "100%" }}>
-              <Select
-                style={{ width: "100%" }}
-                placeholder="Select model to view performance"
-                value={selectedModel}
-                onChange={setSelectedModel}
-              >
-                {availableModels.map(model => (
-                  <Select.Option key={model} value={model}>
-                    {model.replace(/\.[^/.]+$/, "")}
-                  </Select.Option>
-                ))}
-              </Select>
-              {selectedModel && (
-                <div style={{ marginTop: 16 }}>
-                  {performanceMetrics ? (
-                    <div>
-                      <h3>Performance Metrics</h3>
-                      <Row gutter={[16, 16]}>
-                        {Object.entries(performanceMetrics).map(([key, value]) => (
-                          <Col span={8} key={key}>
-                            <Statistic 
-                              title={key.charAt(0).toUpperCase() + key.slice(1).replace('_', ' ')}
-                              value={typeof value === 'number' ? value.toFixed(4) : value}
-                              precision={4}
-                            />
-                          </Col>
-                        ))}
-                      </Row>
-                    </div>
-                  ) : (
-                    <Alert 
-                      message="No Performance Data Available" 
-                      description="Train a model or select a different model to view performance metrics."
-                      type="info" 
-                      showIcon 
-                    />
-                  )}
-                </div>
-              )}
-            </Space>
+          <Card 
+            title={
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <LineChartOutlined style={{ fontSize: 20, marginRight: 8 }} />
+                <span>Model Performance Analysis</span>
+              </div>
+            }
+            bordered={false}
+            className="model-selection-card"
+          >
+            <Row gutter={[16, 16]}>
+              <Col span={24} style={{ marginBottom: 16 }}>
+                <Select
+                  style={{ width: "100%" }}
+                  placeholder="Select model to view performance"
+                  value={selectedModel}
+                  onChange={setSelectedModel}
+                  optionLabelProp="label"
+                  size="large"
+                  bordered
+                  dropdownStyle={{ maxHeight: 400 }}
+                >
+                  {availableModels.map(model => (
+                    <Select.Option key={model} value={model} label={model.replace(/\.[^/.]+$/, "")}>
+                      <div style={{ display: 'flex', alignItems: 'center' }}>
+                        <LineChartOutlined style={{ marginRight: 8 }} />
+                        {model.replace(/\.[^/.]+$/, "")}
+                      </div>
+                    </Select.Option>
+                  ))}
+                </Select>
+              </Col>
+              
+              <Col span={24}>
+                {selectedModel ? (
+                  <ModelPerformanceView modelName={selectedModel} />
+                ) : (
+                  <Alert 
+                    message="No Model Selected" 
+                    description="Please select a model to view its performance metrics."
+                    type="info" 
+                    showIcon 
+                  />
+                )}
+              </Col>
+            </Row>
           </Card>
         </Col>
       </Row>

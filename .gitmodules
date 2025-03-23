@@ -4,3 +4,6 @@
 [submodule "tpcc-mysql"]
 	path = tpcc-mysql
 	url = https://github.com/Percona-Lab/tpcc-mysql.git
+[submodule "docs/paper"]
+	path = docs/paper
+	url = https://github.com/Micuks/DBPecker-Paper.git

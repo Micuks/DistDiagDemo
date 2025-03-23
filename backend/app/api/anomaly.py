@@ -217,6 +217,7 @@ async def clear_anomaly(request: AnomalyRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/active", response_model=List[ActiveAnomalyResponse])
+@cache(expire=3)  # Add short 3-second cache to prevent too many requests hammering the endpoint
 async def get_active_anomalies():
     """Get list of active anomalies in the OceanBase cluster"""
     try:
@@ -388,16 +389,20 @@ async def anomaly_stream():
         last_data = None
         error_count = 0
         max_errors = 10
+        update_interval = 2  # Seconds between updates
         
         logger.info("Starting anomaly stream event generator")
         
         while True:
             try:
-                # Clear cache before fetching to ensure fresh data
-                k8s_service.invalidate_cache()
-                k8s_service._last_cache_update = 0
+                # Don't clear cache on every iteration to reduce load
+                # Only clear it occasionally or when we've hit errors
+                if error_count > 0:
+                    k8s_service.invalidate_cache()
+                    k8s_service._last_cache_update = 0
+                    logger.debug("Cleared cache due to previous errors")
                 
-                # Get current anomalies by calling the API method to ensure fresh data
+                # Get current anomalies by calling the API method
                 try:
                     logger.debug("Fetching active anomalies for stream")
                     current_data = await k8s_service.get_active_anomalies()
@@ -416,27 +421,27 @@ async def anomaly_stream():
                     logger.debug(f"Stream error fallback: {len(current_data)} active anomalies from direct cache")
                     error_count += 1
                     
-                    # If too many errors, reset cache completely
+                    # If too many errors, reset cache completely but less frequently
                     if error_count > max_errors:
                         logger.warning("Too many errors in stream, attempting to clear caches")
                         try:
                             await clear_caches()
-                            error_count = 0
+                            error_count = max_errors // 2  # Reduce error count but not to zero
                         except Exception as clear_error:
                             logger.error(f"Failed to clear caches in stream: {str(clear_error)}")
                 
-                # Only send if data changed
+                # Only send if data changed to reduce unnecessary updates
                 if current_data != last_data:
                     logger.info(f"Stream data changed, sending update with {len(current_data)} anomalies")
                     last_data = current_data
                     yield {
                         "event": "anomaly_update",
                         "data": json.dumps(current_data),
-                        "retry": 3000  # Retry connection after 3s if dropped
+                        "retry": 5000  # Increased retry time to 5s if connection drops
                     }
                 
-                # Check every second
-                await asyncio.sleep(1)
+                # Use a longer wait interval to reduce processing load
+                await asyncio.sleep(update_interval)
             except Exception as e:
                 logger.error(f"Critical error in anomaly stream generator: {str(e)}")
                 error_count += 1
