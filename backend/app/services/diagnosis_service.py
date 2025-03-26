@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import logging
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 from scipy.stats import pearsonr
 from xgboost import XGBClassifier
@@ -90,45 +90,107 @@ class DistDiagnosis:
             device=device,  # Use detected device
             n_jobs=-1  # Use all available CPU cores for parallel processing
         ) for _ in range(num_classifier)]
-        self.time_window = 5  # Default 5-minute window
+
+        # Window configuration
+        self.default_time_window = 5  # Default 5-minute window
+        self.time_window = self.default_time_window
+        self.min_window_size = 1  # Minimum 1-second window
+        self.max_window_size = 300  # Maximum 5-minute window (in seconds)
+        self.adaptive_window = False  # Disable adaptive window by default
+        
+        # Feature drift tracking
+        self.use_drift_aware = False  # Disable drift-aware feature preservation by default
+        self.smoothing_factor = 0.2  # Alpha value for exponential smoothing
+        self.baseline_metrics = {}  # Historical statistical baselines
+        self.drift_threshold = 0.3  # Threshold for significant drift detection
+        
+        # PCA config
         self.use_pca = False  # Disable PCA by default
         logger.info(f"Initialized {len(self.clf_list)} classifiers for {len(self.classes)} classes")
 
     def _get_time_window_values(self, metrics: Dict[str, Any], metric_name: str) -> List[float]:
         """Extract time window values for a metric"""
         try:
-            values = []
-            if not metrics:
-                return [0.0] * self.time_window
-
-            # Check if metric exists directly in metrics
-            if metric_name in metrics:
-                metric_data = metrics[metric_name]
-                
-                # Handle case where metric_data is a direct float value
-                if isinstance(metric_data, (int, float)):
-                    return [float(metric_data)] * self.time_window
-                    
-                # Handle case where metric_data is a dict with 'latest' key
-                elif isinstance(metric_data, dict) and 'latest' in metric_data:
-                    return [float(metric_data['latest'])] * self.time_window
-                    
-                # Handle case where metric_data is a list of dictionaries with 'timestamp' and 'value' keys
-                elif isinstance(metric_data, list) and metric_data and isinstance(metric_data[0], dict) and 'timestamp' in metric_data[0] and 'value' in metric_data[0]:
-                    # Sort by timestamp (newest first) and take up to time_window values
-                    sorted_data = sorted(metric_data, key=lambda x: x['timestamp'], reverse=True)[:self.time_window]
-                    values = [float(item['value']) for item in sorted_data]
-                    # Pad with zeros if we don't have enough values
-                    while len(values) < self.time_window:
-                        values.append(0.0)
-                    return values
+            if not metrics or metric_name not in metrics:
+                # Try case-insensitive search as a fallback
+                if metrics:
+                    metric_keys = [k for k in metrics.keys() if k.lower() == metric_name.lower()]
+                    if metric_keys:
+                        # Use the first matching key
+                        metric_name = metric_keys[0]
+                    else:
+                        # If still not found, return zeros
+                        return [0.0] * self.time_window
                 else:
-                    logger.warning(f"Unexpected metric data type for {metric_name}: {type(metric_data)}")
                     return [0.0] * self.time_window
-            else:
-                # Metric not found in the metrics dictionary
-                logger.warning(f"Metric {metric_name} not found in metrics")
+                    
+            metric_data = metrics[metric_name]
+            values = []
+            
+            # Handle different data formats
+            if isinstance(metric_data, (int, float)):
+                # Single scalar value - replicate it to create a stable series
+                values = [float(metric_data)] * self.time_window
+                # logger.debug(f"Metric {metric_name} is a scalar value: {metric_data}")
+            
+            # Handle dictionary with 'data' key containing time series
+            elif isinstance(metric_data, dict) and 'data' in metric_data:
+                data_entries = metric_data['data']
+                if isinstance(data_entries, list) and data_entries:
+                    if 'value' in data_entries[0]:
+                        # Extract values from timestamped data
+                        values = [float(entry['value']) for entry in data_entries]
+                        logger.debug(f"Extracted {len(values)} values from {metric_name} data series")
+            
+            # Handle list of timestamped values directly
+            elif isinstance(metric_data, list) and metric_data and isinstance(metric_data[0], dict):
+                if 'value' in metric_data[0]:
+                    values = [float(entry['value']) for entry in metric_data]
+                    logger.debug(f"Extracted {len(values)} values from {metric_name} direct list")
+            
+            # Handle custom formats or nested structures
+            elif isinstance(metric_data, dict):
+                # Try to extract nested values if present
+                if any(isinstance(v, (list, dict)) for v in metric_data.values()):
+                    # Find the first nested structure that could contain time series
+                    for key, nested_data in metric_data.items():
+                        if isinstance(nested_data, list) and nested_data:
+                            if isinstance(nested_data[0], dict) and 'value' in nested_data[0]:
+                                values = [float(entry['value']) for entry in nested_data]
+                                logger.debug(f"Extracted {len(values)} values from {metric_name}.{key} nested list")
+                                break
+                else:
+                    # If only scalar values in dict, just use those
+                    scalar_values = [v for v in metric_data.values() if isinstance(v, (int, float))]
+                    if scalar_values:
+                        values = [float(v) for v in scalar_values]
+                        logger.debug(f"Extracted {len(values)} scalar values from {metric_name} dictionary")
+
+            # Sort values if we have timestamps
+            if not values and metric_data:
+                # Log the format if we couldn't extract values
+                logger.debug(f"Could not extract values from metric {metric_name} with type {type(metric_data)}")
+                if isinstance(metric_data, dict):
+                    logger.debug(f"Dictionary keys: {list(metric_data.keys())}")
                 return [0.0] * self.time_window
+            
+            # Pad with last value if we don't have enough
+            if values and len(values) < self.time_window:
+                last_value = values[-1] if values else 0.0
+                values.extend([last_value] * (self.time_window - len(values)))
+                logger.debug(f"Padded {metric_name} values to length {self.time_window}")
+            
+            # Truncate if we have too many
+            if len(values) > self.time_window:
+                values = values[-self.time_window:]  # Take the most recent values
+                
+            # Add tiny noise if all values are identical to avoid zero stability
+            if values and all(v == values[0] for v in values):
+                base_value = values[0]
+                # Add 0.1% noise to create slight variation
+                noise_scale = max(abs(base_value) * 0.001, 0.00001)
+                values = [v + (np.random.random() - 0.5) * noise_scale for v in values]
+                # logger.debug(f"Added tiny noise to identical {metric_name} values")
 
             # Pad with zeros if we don't have enough values (this is now unreachable but kept for safety)
             while len(values) < self.time_window:
@@ -138,6 +200,210 @@ class DistDiagnosis:
         except Exception as e:
             logger.error(f"Error getting time window values for {metric_name}: {str(e)}")
             return [0.0] * self.time_window
+
+    def _adjust_window_size(self, metrics: Dict[str, Any]) -> int:
+        """
+        Dynamically adjust the observation window size based on metric stability
+        
+        This adaptive method scales the window size inversely with metric stability:
+        - Highly stable metrics: use larger window to capture subtle patterns
+        - Unstable/fluctuating metrics: use smaller window to focus on recent changes
+        
+        Returns window size in seconds
+        """
+        if not self.adaptive_window:
+            return self.default_time_window
+            
+        try:
+            # Define window boundaries
+            min_window = 60  # 1 minute (minimum window)
+            max_window = 600  # 10 minutes (maximum window)
+            
+            # Log available categories and a sample of metrics from each
+            available_categories = list(metrics.keys())
+            logger.debug(f"Available metric categories: {available_categories}")
+            
+            # Sample metrics from each category
+            for category in available_categories:
+                if category in metrics and metrics[category]:
+                    sample_metrics = list(metrics[category].keys())[:5]  # Show up to 5 sample metrics
+                    logger.debug(f"Sample metrics in {category}: {sample_metrics}")
+            
+            # Define a larger list of key metrics to try for stability calculation
+            # We'll try to use whatever metrics are available from this list
+            metric_list = [
+                # CPU metrics
+                ('cpu', 'cpu usage'),
+                ('cpu', 'worker time'),
+                ('cpu', 'cpu time'),
+                ('cpu', 'active cpu time'),
+                ('cpu', 'cpu_total_time'),
+                # Memory metrics
+                ('memory', 'memory usage'),
+                ('memory', 'total memstore used'),
+                ('memory', 'active memstore used'),
+                ('memory', 'memstore limit'),
+                ('memory', 'observer memory hold size'),
+                # IO metrics
+                ('io', 'io read count'),
+                ('io', 'io write count'),
+                ('io', 'io read delay'),
+                ('io', 'io write delay'),
+                ('io', 'data micro block cache hit'),
+                ('io', 'row cache hit'),
+                # Network metrics
+                ('network', 'rpc packet in'),
+                ('network', 'rpc packet out'),
+                ('network', 'rpc net delay'),
+                ('network', 'rpc net frame delay'),
+                ('network', 'mysql packet in'),
+                ('network', 'mysql packet out'),
+                # Transaction metrics
+                ('transactions', 'sql select count'),
+                ('transactions', 'trans commit count'),
+                ('transactions', 'sql fail count'),
+                ('transactions', 'active sessions'),
+                ('transactions', 'trans rollback count'),
+                ('transactions', 'sql update count')
+            ]
+            
+            # Calculate stability scores for each metric (using standard deviation)
+            stability_scores = []
+            metrics_checked = 0
+            metrics_found = 0
+            
+            for category, metric_name in metric_list:
+                metrics_checked += 1
+                if category not in metrics:
+                    continue
+                    
+                category_metrics = metrics.get(category, {})
+                if metric_name not in category_metrics:
+                    # Try case-insensitive matching as a fallback
+                    metric_keys = [k for k in category_metrics.keys() if k.lower() == metric_name.lower()]
+                    if not metric_keys:
+                        continue
+                    metric_name = metric_keys[0]  # Use the first match
+                
+                metrics_found += 1
+                values = self._get_time_window_values(category_metrics, metric_name)
+                
+                if values and len(values) > 1:  # Need at least 2 values for std
+                    # Check if all values are the same (no variance)
+                    if all(v == values[0] for v in values):
+                        # Add small synthetic variation if all values are identical
+                        logger.debug(f"Metric {category}.{metric_name} has identical values: {values[0]}")
+                        # Add tiny stability score to avoid zero
+                        stability_scores.append(0.01)
+                        continue
+                    
+                    # Normalize std by mean to get coefficient of variation
+                    mean_val = np.mean(values)
+                    std_val = np.std(values)
+                    
+                    # Handle edge cases carefully
+                    if abs(mean_val) < 1e-9:  # Near zero mean
+                        if std_val > 0:
+                            # If mean is near zero but std is positive, use a high CV
+                            stability_scores.append(0.8)  # High but not maximum
+                        else:
+                            # Both mean and std near zero, add small synthetic value
+                            stability_scores.append(0.01)
+                    else:
+                        # Normal case - calculate coefficient of variation
+                        cv = std_val / abs(mean_val)
+                        stability_scores.append(min(cv, 1.0))  # Cap at 1.0
+                    
+                    logger.debug(f"Metric {category}.{metric_name} - mean: {mean_val:.4f}, std: {std_val:.4f}, cv: {stability_scores[-1]:.4f}")
+            
+            logger.debug(f"Stability metrics checked: {metrics_checked}, found: {metrics_found}")
+            
+            # If we have stability scores, calculate the average
+            if stability_scores:
+                # Add a minimum base stability to prevent exact zero
+                if min(stability_scores) < 0.005:
+                    stability_scores.append(0.05)  # Add a small baseline stability
+                
+                avg_stability = np.mean(stability_scores)
+                logger.debug(f"Metric stability score: {avg_stability:.4f} (from {len(stability_scores)} metrics)")
+                
+                # Scale window size inversely with stability:
+                # - Higher stability (lower score) -> larger window
+                # - Lower stability (higher score) -> smaller window
+                normalized_stability = min(max(avg_stability, 0.01), 1.0)  # Ensure in [0.01,1.0]
+                
+                # Calculate window size - inverse relationship with stability
+                # (1 - normalized_stability) gives larger window for stable metrics
+                window_size = min_window + int((max_window - min_window) * (1 - normalized_stability))
+                
+                logger.debug(f"Adaptive window size: {window_size}s (stability: {normalized_stability:.2f})")
+                return max(min(window_size, max_window), min_window)
+            else:
+                # If no metrics were found, use a moderate stability value
+                default_stability = 0.3  # Moderate stability
+                window_size = min_window + int((max_window - min_window) * (1 - default_stability))
+                logger.debug(f"Using default adaptive window size: {window_size}s (no stability metrics available)")
+                return window_size
+                
+        except Exception as e:
+            logger.error(f"Error in adaptive window sizing: {str(e)}")
+            # Fall back to default time window
+            return self.default_time_window
+
+    def _extract_latest_value(self, metrics_dict: Dict, metric_name: str) -> Optional[float]:
+        """Extract the latest value for a metric"""
+        try:
+            if metric_name not in metrics_dict:
+                return None
+                
+            metric_data = metrics_dict[metric_name]
+            
+            # Handle direct value
+            if isinstance(metric_data, (int, float)):
+                return float(metric_data)
+                
+            # Handle dict with 'latest' key
+            elif isinstance(metric_data, dict) and 'latest' in metric_data:
+                return float(metric_data['latest'])
+                
+            # Handle list of timestamped values
+            elif isinstance(metric_data, list) and metric_data and isinstance(metric_data[0], dict) and 'timestamp' in metric_data[0] and 'value' in metric_data[0]:
+                # Sort by timestamp and get the latest
+                sorted_data = sorted(metric_data, key=lambda x: x['timestamp'], reverse=True)
+                if sorted_data:
+                    return float(sorted_data[0]['value'])
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting latest value for {metric_name}: {str(e)}")
+            return None
+
+    def _extract_time_series(self, metrics_dict: Dict, metric_name: str) -> List[float]:
+        """Extract time series data for a metric"""
+        try:
+            if metric_name not in metrics_dict:
+                return []
+                
+            metric_data = metrics_dict[metric_name]
+            
+            # Handle direct value
+            if isinstance(metric_data, (int, float)):
+                return [float(metric_data)]
+                
+            # Handle dict with 'latest' key
+            elif isinstance(metric_data, dict) and 'latest' in metric_data:
+                return [float(metric_data['latest'])]
+                
+            # Handle list of timestamped values
+            elif isinstance(metric_data, list) and metric_data and isinstance(metric_data[0], dict) and 'timestamp' in metric_data[0] and 'value' in metric_data[0]:
+                # Sort by timestamp
+                sorted_data = sorted(metric_data, key=lambda x: x['timestamp'])
+                return [float(item['value']) for item in sorted_data]
+            
+            return []
+        except Exception as e:
+            logger.error(f"Error extracting time series for {metric_name}: {str(e)}")
+            return []
 
     def _calculate_time_features(self, values: List[float]) -> List[float]:
         """Calculate statistical features over time window values with emphasis on extremes"""
@@ -210,9 +476,98 @@ class DistDiagnosis:
             logger.error(f"Error calculating time features: {str(e)}")
             return [0.0] * 16  # Return zeros for all 16 features
 
+    def _update_baseline_with_drift_awareness(self, metrics: Dict[str, Any]) -> None:
+        """
+        Update baseline metrics with drift awareness using exponential smoothing
+        """
+        if not self.use_drift_aware:
+            return
+            
+        try:
+            # Iterate through metrics categories
+            for category in ['cpu', 'memory', 'io', 'network', 'transactions']:
+                if category not in metrics:
+                    continue
+                    
+                category_metrics = metrics[category]
+                
+                # Ensure category exists in baseline
+                if category not in self.baseline_metrics:
+                    self.baseline_metrics[category] = {}
+                
+                # Process each metric in this category
+                for metric_name, metric_data in category_metrics.items():
+                    # Extract current values
+                    current_values = self._extract_time_series(category_metrics, metric_name)
+                    
+                    if not current_values:
+                        continue
+                    
+                    # Calculate current statistics
+                    current_stats = {
+                        'mean': float(np.mean(current_values)),
+                        'std': float(np.std(current_values)) if len(current_values) > 1 else 0.0,
+                        'max': float(np.max(current_values)),
+                        'min': float(np.min(current_values)),
+                        'median': float(np.median(current_values)),
+                        'last_updated': datetime.now().isoformat()
+                    }
+                    
+                    # Check if we have existing baseline for this metric
+                    if metric_name in self.baseline_metrics[category]:
+                        # Get existing baseline
+                        baseline = self.baseline_metrics[category][metric_name]
+                        
+                        # Check for significant drift
+                        mean_drift = abs(current_stats['mean'] - baseline['mean'])
+                        if baseline['mean'] > 0:
+                            relative_drift = mean_drift / baseline['mean']
+                        else:
+                            relative_drift = mean_drift if mean_drift > 0 else 0.0
+                        
+                        # Apply exponential smoothing
+                        for key in ['mean', 'std', 'max', 'min', 'median']:
+                            if key in baseline and key in current_stats:
+                                # Apply more aggressive smoothing if drift exceeds threshold
+                                if relative_drift > self.drift_threshold:
+                                    logger.debug(f"Significant drift detected for {category}.{metric_name}: {relative_drift:.4f}")
+                                    # Use higher alpha for faster adaptation to changes
+                                    adaptive_alpha = min(0.5, self.smoothing_factor * 2.0)
+                                else:
+                                    # Use standard alpha for normal conditions
+                                    adaptive_alpha = self.smoothing_factor
+                                
+                                # Exponential smoothing formula: new = α * current + (1-α) * old
+                                baseline[key] = adaptive_alpha * current_stats[key] + (1 - adaptive_alpha) * baseline[key]
+                        
+                        # Update timestamp
+                        baseline['last_updated'] = current_stats['last_updated']
+                        
+                    else:
+                        # No existing baseline, use current as initial baseline
+                        self.baseline_metrics[category][metric_name] = current_stats
+                        
+            logger.debug(f"Updated baseline metrics with drift awareness")
+            
+        except Exception as e:
+            logger.error(f"Error updating baseline metrics: {str(e)}")
+
     def _process_metrics(self, metrics: Dict[str, Any]) -> np.ndarray:
         """Process metrics into feature vector using time window statistics"""
         try:
+            # Log top-level metrics structure
+            metric_categories = list(metrics.keys())
+            logger.debug(f"Processing metrics with {len(metric_categories)} categories: {metric_categories}")
+            
+            # If using adaptive window, adjust the window size based on metrics
+            if self.adaptive_window:
+                self.time_window = self._adjust_window_size(metrics)
+                logger.debug(f"Using adaptive window size: {self.time_window}")
+            
+            # Update baseline metrics with drift awareness if enabled
+            if self.use_drift_aware:
+                self._update_baseline_with_drift_awareness(metrics)
+            
             # Pre-allocate the feature vector with the correct size
             # Each metric produces 16 features, and we're processing multiple metrics
             num_metrics = (
@@ -304,8 +659,66 @@ class DistDiagnosis:
             std_dev = np.std(feature_vector)
             if std_dev < 0.001:
                 logger.warning("Feature vector has very low variability which may cause correlation issues")
-                
-            return feature_vector
+            
+            # Create cross-feature interactions for compound anomaly detection
+            base_features = feature_vector.copy()
+            
+            # Select representative features for interactions to avoid explosion
+            # We'll use mean values from each category (CPU, memory, IO, network, transactions)
+            # These are positioned at fixed intervals in the feature vector
+            key_feature_indices = []
+            
+            # Add CPU feature index (first mean value)
+            key_feature_indices.append(0)  # First CPU metric mean
+            
+            # Add memory feature index
+            key_feature_indices.append(3 * 16)  # First memory metric mean
+            
+            # Add IO feature index 
+            key_feature_indices.append((3 + 6) * 16)  # First IO metric mean
+            
+            # Add network feature index
+            key_feature_indices.append((3 + 6 + 13) * 16)  # First network metric mean
+            
+            # Add transaction feature index
+            key_feature_indices.append((3 + 6 + 13 + 12) * 16)  # First transaction metric mean
+            
+            # Create interaction features only between key features to avoid combinatorial explosion
+            interaction_features = []
+            for i in range(len(key_feature_indices)):
+                for j in range(i+1, len(key_feature_indices)):
+                    idx1 = key_feature_indices[i]
+                    idx2 = key_feature_indices[j]
+                    # Use product as interaction
+                    interaction = base_features[idx1] * base_features[idx2]
+                    interaction_features.append(interaction)
+            
+            # Add max-value cross-category interactions
+            # Find max feature value for each category
+            cpu_max = np.max(base_features[:3*16])
+            mem_max = np.max(base_features[3*16:(3+6)*16])
+            io_max = np.max(base_features[(3+6)*16:(3+6+13)*16])
+            net_max = np.max(base_features[(3+6+13)*16:(3+6+13+12)*16])
+            trans_max = np.max(base_features[(3+6+13+12)*16:])
+            
+            # Add key cross-category interactions
+            interaction_features.extend([
+                cpu_max * io_max,     # CPU-IO interaction
+                cpu_max * mem_max,    # CPU-Memory interaction
+                net_max * io_max,     # Network-IO interaction
+                cpu_max * net_max,    # CPU-Network interaction
+                mem_max * io_max      # Memory-IO interaction
+            ])
+            
+            # Convert to numpy array and concatenate with base features
+            interaction_array = np.array(interaction_features)
+            
+            # Concatenate base features with interaction features
+            enhanced_features = np.concatenate([base_features, interaction_array])
+            
+            logger.debug(f"Enhanced feature vector with {len(interaction_features)} interaction features")
+            
+            return enhanced_features
         except Exception as e:
             logger.error(f"Error processing metrics: {str(e)}")
             return None
@@ -356,8 +769,9 @@ class DistDiagnosis:
                 return 0.5  # Moderate default correlation
             
             # Add a small amount of noise to avoid identical vectors
-            x_features_noise = x_features + np.random.normal(0, 1e-6, size=len(x_features))
-            y_features_noise = y_features + np.random.normal(0, 1e-6, size=len(y_features))
+            # Increase noise scale slightly for better differentiation between similar nodes
+            x_features_noise = x_features + np.random.normal(0, 1e-4, size=len(x_features))
+            y_features_noise = y_features + np.random.normal(0, 1e-4, size=len(y_features))
             
             # Calculate correlation using more reliable method
             try:
@@ -366,19 +780,18 @@ class DistDiagnosis:
                 # Handle NaN values that might result from constant vectors
                 if np.isnan(correlation):
                     if np.allclose(x_features, y_features, rtol=1e-5, atol=1e-8):
-                        correlation = 0.8  # High correlation for similar vectors
+                        correlation = 0.7  # Reduced from 0.8 to create more differentiation
                     else:
                         correlation = 0.1  # Low correlation for different but constant vectors
                 
-                # Apply sigmoid scaling to amplify strong correlations
-                correlation = 2.0 / (1.0 + np.exp(-5 * abs(correlation))) - 1.0
+                # Apply sigmoid scaling with increased sensitivity to amplify differences
+                correlation = 2.0 / (1.0 + np.exp(-8 * abs(correlation))) - 1.0  # Increased from 5 to 8
                 
             except Exception:
                 correlation = 0.3  # Moderate-low default
             
-            # Apply small random noise to correlation to avoid identical values
-            if 0.89 <= correlation <= 0.91 or -0.01 <= correlation <= 0.01:
-                correlation += (np.random.rand() - 0.5) * 0.1
+            # Apply more significant random noise to create better differentiation between nodes
+            correlation += (np.random.rand() - 0.5) * 0.15  # Increased from 0.1 to 0.15
             
             # Ensure correlation is within valid range
             correlation = max(-1.0, min(1.0, correlation))
@@ -543,14 +956,20 @@ class DistDiagnosis:
                             anomaly_probability = 0
                         
                         # Combine with normalized node importance (PageRank)
-                        # Use a balanced geometric mean to prevent one factor from dominating
                         node_importance = normalized_node_scores[node_idx]
                         
-                        # Combined score calculation:
-                        # 1. Take square root of node importance to reduce its impact
-                        # 2. Multiply by anomaly probability
-                        # 3. Scale by a larger factor for clarity in reporting
-                        combined_score = 10.0 * anomaly_probability * np.sqrt(node_importance)
+                        # Modified score calculation with higher discrimination:
+                        # 1. Apply more aggressive exponent to node_importance to amplify differences
+                        # 2. Use a power function to create more separation between node scores
+                        # 3. Scale appropriately for consistent reporting
+                        node_importance_factor = np.power(node_importance, 0.4)  # Less aggressive than square root (0.5)
+                        
+                        # Use cubic scaling on probability to increase separation
+                        probability_factor = np.power(anomaly_probability, 1.2)  # Slightly more weight to high probabilities
+                        
+                        # Combine factors with variable scaling based on node count
+                        scale_factor = 10.0
+                        combined_score = scale_factor * probability_factor * node_importance_factor
                         
                         anomaly_type = self.classes[clf_idx]
                         node_results[anomaly_type] = combined_score
@@ -968,6 +1387,16 @@ class DiagnosisService:
         )
         self.diagnosis.time_window = self.time_window  # Set time window for metric processing
         self.diagnosis.use_pca = False  # Explicitly disable PCA
+
+        # Configure advanced features - enable adaptive window by default for compound anomalies
+        self.enable_adaptive_window = os.getenv('ENABLE_ADAPTIVE_WINDOW', 'true').lower() == 'true'
+        self.enable_drift_awareness = os.getenv('ENABLE_DRIFT_AWARENESS', 'false').lower() == 'true'
+        
+        # Apply advanced feature settings
+        if self.enable_adaptive_window:
+            self.enable_adaptive_window_alignment()
+        if self.enable_drift_awareness:
+            self.enable_drift_aware_feature_preservation()
         
         # Select model to use - either specified or latest available
         available_models = self.get_available_models()
@@ -993,6 +1422,87 @@ class DiagnosisService:
             self.model_path = None
             self.metrics_path = os.path.join(self.models_path, 'metrics')
             os.makedirs(self.metrics_path, exist_ok=True)
+
+    def enable_adaptive_window_alignment(self, min_window_size=60, max_window_size=600, enable=True):
+        """
+        Enable adaptive window alignment feature
+        
+        This feature automatically adjusts observation windows (60s-600s) based on
+        metric stability, optimizing for both transient and compound anomalies.
+        
+        Args:
+            min_window_size: Minimum window size in seconds (default: 60 seconds)
+            max_window_size: Maximum window size in seconds (default: 600 seconds/10 minutes)
+            enable: Whether to enable or disable the feature
+        """
+        try:
+            if enable:
+                self.diagnosis.adaptive_window = True
+                self.diagnosis.min_window_size = min_window_size
+                self.diagnosis.max_window_size = max_window_size
+                self.enable_adaptive_window = True
+                logger.info(f"Enabled adaptive window alignment (range: {min_window_size}s-{max_window_size}s)")
+            else:
+                self.diagnosis.adaptive_window = False
+                self.diagnosis.time_window = self.time_window  # Reset to default time window
+                self.enable_adaptive_window = False
+                logger.info("Disabled adaptive window alignment")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error configuring adaptive window alignment: {str(e)}")
+            return False
+
+    def enable_drift_aware_feature_preservation(self, smoothing_factor=0.2, drift_threshold=0.3, enable=True):
+        """
+        Enable drift-aware feature preservation
+        
+        This feature maintains historical statistical baselines while incrementally updating
+        distribution models through exponential smoothing. This preserves important features
+        while allowing the model to adapt to gradual system behavior changes.
+        
+        Args:
+            smoothing_factor: Alpha value for exponential smoothing (default: 0.2)
+            drift_threshold: Threshold to determine significant drift (default: 0.3)
+            enable: Whether to enable or disable the feature
+        """
+        try:
+            if enable:
+                self.diagnosis.use_drift_aware = True
+                self.diagnosis.smoothing_factor = smoothing_factor
+                self.diagnosis.drift_threshold = drift_threshold
+                self.diagnosis.baseline_metrics = {}  # Initialize or reset baseline metrics
+                self.enable_drift_awareness = True
+                logger.info(f"Enabled drift-aware feature preservation (α={smoothing_factor}, threshold={drift_threshold})")
+            else:
+                self.diagnosis.use_drift_aware = False
+                self.enable_drift_awareness = False
+                logger.info("Disabled drift-aware feature preservation")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error configuring drift-aware feature preservation: {str(e)}")
+            return False
+
+    def get_feature_status(self):
+        """Get status of advanced features"""
+        return {
+            "adaptive_window": {
+                "enabled": self.diagnosis.adaptive_window,
+                "min_window_size": self.diagnosis.min_window_size,
+                "max_window_size": self.diagnosis.max_window_size,
+                "current_window": self.diagnosis.time_window
+            },
+            "drift_aware": {
+                "enabled": self.diagnosis.use_drift_aware,
+                "smoothing_factor": self.diagnosis.smoothing_factor,
+                "drift_threshold": self.diagnosis.drift_threshold,
+                "baseline_metrics_count": sum(len(metrics) for category, metrics in self.diagnosis.baseline_metrics.items()) if hasattr(self.diagnosis, 'baseline_metrics') else 0
+            },
+            "pca": {
+                "enabled": self.diagnosis.use_pca
+            }
+        }
 
     def train(self, X: np.ndarray, y: np.ndarray):
         """Train the model with collected data"""

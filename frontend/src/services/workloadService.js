@@ -16,10 +16,18 @@ export const workloadService = {
 
   startWorkload: async (config) => {
     try {
+      // Ensure node field is included in options
+      const options = { ...config.options || {} };
+      
+      // If node exists at top level, move it to options
+      if (config.node && !options.node) {
+        options.node = config.node;
+      }
+      
       const response = await axios.post(`${API_BASE_URL}/api/workload/start`, {
         type: config.type,
         threads: config.threads,
-        options: config.options,
+        options: options,
         task_name: config.task_name
       });
       return response.data;

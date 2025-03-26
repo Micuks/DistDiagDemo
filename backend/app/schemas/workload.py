@@ -22,7 +22,7 @@ class WorkloadMetrics(BaseModel):
 
 class WorkloadOptions(BaseModel):
     # Node selection
-    target_node: Optional[str] = None
+    node: Optional[List[str]] = None
     
     # Common options
     prepare_db: Optional[bool] = False

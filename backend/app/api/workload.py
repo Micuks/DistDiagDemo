@@ -15,7 +15,7 @@ async def prepare_database(request: WorkloadRequest):
     try:
         success = False
         if request.type == WorkloadType.SYSBENCH:
-            success = workload_service.prepare_database()
+            success = workload_service.prepare_database(request.type.value)
         elif request.type == WorkloadType.TPCC:
             success = workload_service.prepare_tpcc()
         elif request.type == WorkloadType.TPCH:
@@ -48,6 +48,8 @@ async def start_workload(config: WorkloadRequest):
     """Start a new workload with custom configuration"""
     try:
         logger.info(f"Received start workload request: type={config.type}, threads={config.threads}, task_name={config.task_name}")
+        logger.info(f"Received options: {config.options.dict() if config.options else {}}")
+        
         if config.type == 'tpcc':
             type = WorkloadType.TPCC
         elif config.type == 'sysbench':

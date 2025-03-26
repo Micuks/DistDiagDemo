@@ -7,6 +7,9 @@ from pydantic import BaseModel
 from app.services.metrics_service import MetricsService
 import os
 import json
+import numpy as np
+from collections import defaultdict
+from app.services.metric_inferor_service import analyze_node_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -404,9 +407,20 @@ async def get_model_ranks(
 def get_related_metrics_for_anomaly(metrics, node_name, anomaly_type):
     """Get related metrics for an anomaly's root cause analysis"""
     try:
-        if not node_name or not anomaly_type or node_name not in metrics:
+        if not node_name or not anomaly_type:
             return []
             
+        # Translate node name if needed
+        translated_node = translate_node_name(node_name, metrics)
+        if translated_node != node_name:
+            logger.debug(f"Translated node name from {node_name} to {translated_node}")
+            node_name = translated_node
+        
+        # Check if node exists in metrics
+        if node_name not in metrics:
+            logger.warning(f"Node {node_name} not found in metrics data")
+            return []
+        
         node_metrics = metrics.get(node_name, {})
         related_metrics = []
         
@@ -449,3 +463,127 @@ def get_related_metrics_for_anomaly(metrics, node_name, anomaly_type):
     except Exception as e:
         logger.error(f"Error getting related metrics for anomaly: {str(e)}")
         return []
+
+@router.get("/metrics_ranks")
+async def get_metric_ranks(
+    node: str,
+    model_name: Optional[str] = None,
+):
+    """Get detailed metric rankings for a specific node using MetricRooter analysis, independent of anomaly type"""
+    try:
+        logger.info(f"Received request for metric rankings: node={node}, model={model_name}")
+        
+        # Get detailed metrics with time series data
+        metrics = metrics_service.get_detailed_metrics()
+        if not metrics:
+            logger.warning("No metrics data available")
+            return JSONResponse(
+                content={"error": "No metrics data available"},
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true"
+                }
+            )
+        
+        # Translate node name if it's an IP address
+        translated_node = translate_node_name(node, metrics)
+        if translated_node != node:
+            logger.info(f"Translated node name from {node} to {translated_node}")
+            node = translated_node
+        
+        # Check if node exists in metrics
+        if node not in metrics:
+            logger.warning(f"Node {node} not found in metrics data")
+            return JSONResponse(
+                content={"error": f"Node {node} not found in metrics data"},
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true"
+                }
+            )
+        
+        node_metrics = metrics[node]
+
+        # Perform the metric ranking analysis
+        analysis_result = analyze_node_metrics(node_metrics, node)
+        
+        # Return the results
+        return JSONResponse(
+            content=analysis_result,
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get metric rankings: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+
+def translate_node_name(node_name, metrics=None):
+    """
+    Utility function to translate between IP addresses and Kubernetes pod names.
+    This helps maintain consistency across different parts of the application.
+    
+    Args:
+        node_name: The node name or IP address to translate
+        metrics: Optional metrics dictionary to check for node names
+        
+    Returns:
+        Translated node name if a match is found, otherwise the original node name
+    """
+    try:
+        # If metrics is provided and node already exists, no translation needed
+        if metrics and node_name in metrics:
+            return node_name
+            
+        # Get available nodes from k8s_service
+        k8s_nodes = []
+        try:
+            # Try to get K8s nodes from service
+            from app.services.k8s_service import k8s_service
+            try:
+                # Use event loop if available
+                import asyncio
+                loop = asyncio.get_event_loop()
+                k8s_nodes = loop.run_until_complete(k8s_service.get_available_nodes())
+            except Exception as e:
+                logger.debug(f"Error getting nodes from k8s_service: {str(e)}")
+                
+                # Fallback to WorkloadService
+                from app.services.workload_service import workload_service
+                k8s_nodes = workload_service.get_available_nodes()
+        except Exception as e:
+            logger.warning(f"Failed to get nodes from services: {str(e)}")
+        
+        # First check if node_name is directly in K8s nodes
+        if node_name in k8s_nodes:
+            return node_name
+            
+        # Then check against metric nodes if provided
+        if metrics:
+            for metric_node in metrics.keys():
+                # If one contains the other (partial match)
+                if node_name in metric_node or metric_node in node_name:
+                    logger.info(f"Translated node {node_name} to {metric_node} based on metrics")
+                    return metric_node
+        
+        # Finally check against k8s nodes for partial matches
+        for k8s_node in k8s_nodes:
+            if node_name in k8s_node or k8s_node in node_name:
+                logger.info(f"Translated node {node_name} to {k8s_node} based on K8s nodes")
+                return k8s_node
+        
+        # No translation found, return original
+        return node_name
+        
+    except Exception as e:
+        logger.error(f"Error translating node name: {str(e)}")
+        return node_name

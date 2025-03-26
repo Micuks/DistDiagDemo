@@ -13,6 +13,7 @@ from enum import Enum
 from dotenv import load_dotenv
 from datetime import datetime
 import uuid
+from kubernetes import client, config
 
 # Load environment variables from .env file
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
@@ -36,11 +37,57 @@ class WorkloadService:
         self.workload_outputs = {}
         # Initialize with default zones, will be updated with actual zones
         self.ob_zones = []
+        # Node to port mapping
+        self.available_nodes = self._fetch_available_nodes()
+        self.node_port_mapping = self._build_node_port_mapping()
         # Fetch zones from database during initialization
         self._fetch_zones()
         logger.info("WorkloadService initialized")
         logger.info(f"Database connection: host={self.db_host}, port={self.db_port}, user={self.db_user}")
 
+    def _build_node_port_mapping(self):
+        """Build node to port mapping from available nodes"""
+        # Map each available node to a port
+        # Use a dictionary to track assigned ports
+        used_ports = {}
+        base_port = 22811
+        port_map = {}
+
+        # First try to assign based on node number if it follows the pattern obcluster-X-*
+        for node in self.available_nodes:
+            # Check if node matches the pattern obcluster-X-* where X is a number
+            import re
+            node_match = re.match(r'obcluster-(\d+)-.*', node)
+            if node_match:
+                # Use the node number as index
+                node_index = int(node_match.group(1)) - 1
+                port = base_port + node_index * 10
+                # If port is already used, assign it sequentially
+                while port in used_ports.values():
+                    port += 10
+                port_map[node] = port
+                used_ports[node] = port
+            else:
+                # For nodes that don't match pattern, assign sequentially
+                for i in range(9):  # Maximum 9 ports (22811, 22821, ..., 22891)
+                    port = base_port + i * 10
+                    if port not in used_ports.values():
+                        port_map[node] = port
+                        used_ports[node] = port
+                        break
+
+        # Add fallback entries for node1, node2, etc. for backward compatibility
+        for i, node_name in enumerate(['node1', 'node2', 'node3']):
+            if node_name not in port_map:
+                port = base_port + i * 10
+                # Make sure not to override existing ports
+                while port in used_ports.values():
+                    port += 10
+                port_map[node_name] = port
+
+        logger.info(f"Built node port mapping: {port_map}")
+        return port_map
+        
     def _fetch_zones(self) -> List[str]:
         """Fetch OceanBase zones from database"""
         try:
@@ -54,7 +101,7 @@ class WorkloadService:
             cursor = conn.cursor()
             
             # Query zones from DBA_OB_ZONES view
-            cursor.execute("SELECT zone FROM DBA_OB_ZONES")
+            cursor.execute("SELECT zone FROM oceanbase.DBA_OB_ZONES")
             zones = [row[0] for row in cursor.fetchall()]
             
             if zones:
@@ -126,50 +173,12 @@ class WorkloadService:
         logger.info(f"Found {len(active_tasks)} active tasks")
         return active_tasks
 
-    def _create_database(self):
-        """Create the sysbench database if it doesn't exist"""
-        try:
-            logger.info(f"Attempting to create database {self.db_name}")
-            conn = mysql.connector.connect(
-                host=self.db_host,
-                port=self.db_port,
-                user=self.db_user,
-                password=self.db_password
-            )
-            cursor = conn.cursor()
-            
-            # Make sure we have the latest zones
-            if not self.ob_zones:
-                self._fetch_zones()
-                
-            # Set open_cursors parameter for all zones
-            for zone in self.ob_zones:
-                alter_cmd = f"ALTER SYSTEM SET open_cursors=65535 ZONE='{zone}'"
-                logger.info(f"Executing: {alter_cmd}")
-                cursor.execute(alter_cmd)
-                conn.commit()
-            
-            # Create database if not exists
-            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.db_name}")
-            conn.commit()
-            
-            logger.info(f"Database {self.db_name} created successfully")
-            return True
-        except Exception as e:
-            logger.exception(f"Error creating database: {str(e)}")
-            return False
-        finally:
-            if 'cursor' in locals():
-                cursor.close()
-            if 'conn' in locals():
-                conn.close()
-
-    def _check_tables_exist(self) -> bool:
+    def _check_tables_exist(self, port: int = None) -> bool:
         """Check if sysbench tables already exist"""
         try:
             conn = mysql.connector.connect(
                 host=self.db_host,
-                port=self.db_port,
+                port=port or self.db_port,
                 user=self.db_user,
                 password=self.db_password,
                 database=self.db_name
@@ -182,7 +191,7 @@ class WorkloadService:
             
             return exists
         except Exception as e:
-            logger.exception(f"Error checking tables: {str(e)}")
+            logger.exception(f"Error checking tables on port {port or self.db_port}: {str(e)}")
             return False
         finally:
             if 'cursor' in locals():
@@ -190,22 +199,22 @@ class WorkloadService:
             if 'conn' in locals():
                 conn.close()
 
-    def prepare_database(self):
+    def prepare_database(self, workload_type: str) -> bool:
         """Prepare the database for sysbench workload"""
         try:
-            logger.info("Preparing database for sysbench workload")
+            logger.info(f"Preparing database for {workload_type} workload")
             
-            # First create the database
-            if not self._create_database():
-                logger.error("Failed to create database")
+            # Create the database on proxy node only
+            if not self._create_database_on_node(self.db_port):
+                logger.error(f"Failed to create database on proxy node")
                 return False
             
             # Check if tables already exist
             if self._check_tables_exist():
-                logger.info("Sysbench tables already exist, skipping preparation")
+                logger.info("Tables already exist, skipping preparation")
                 return True
             
-            # Build sysbench prepare command with database connection parameters
+            # Build sysbench prepare command with default database connection
             cmd = (
                 f"sysbench oltp_read_write "
                 f"--mysql-host={self.db_host} "
@@ -237,24 +246,50 @@ class WorkloadService:
                 logger.info("Database preparation completed successfully")
             else:
                 logger.error(f"Database preparation failed with return code {process.returncode}")
-                # Try to get more information about the failure
-                try:
-                    conn = mysql.connector.connect(
-                        host=self.db_host,
-                        port=self.db_port,
-                        user=self.db_user,
-                        password=self.db_password,
-                        database=self.db_name,
-                    )
-                    logger.info("Database connection test successful")
-                    conn.close()
-                except Exception as e:
-                    logger.error(f"Database connection test failed: {str(e)}")
             
             return process.returncode == 0
         except Exception as e:
             logger.exception("Error preparing database")
             return False
+
+    def _create_database_on_node(self, port: int) -> bool:
+        """Create the database on a specific node"""
+        try:
+            node_type = "proxy node" if port == self.db_port else f"node with port {port}"
+            logger.info(f"Creating database {self.db_name} on {node_type}")
+            conn = mysql.connector.connect(
+                host=self.db_host,
+                port=port,
+                user=self.db_user,
+                password=self.db_password
+            )
+            cursor = conn.cursor()
+            
+            # Make sure we have the latest zones
+            if not self.ob_zones:
+                self._fetch_zones()
+            
+            # Set open_cursors parameter for all zones
+            for zone in self.ob_zones:
+                alter_cmd = f"ALTER SYSTEM SET open_cursors=65535 ZONE='{zone}'"
+                logger.info(f"Executing: {alter_cmd}")
+                cursor.execute(alter_cmd)
+                conn.commit()
+            
+            # Create database if not exists
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.db_name}")
+            conn.commit()
+            
+            logger.info(f"Database {self.db_name} created successfully on {node_type}")
+            return True
+        except Exception as e:
+            logger.exception(f"Error creating database on port {port}: {str(e)}")
+            return False
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+            if 'conn' in locals():
+                conn.close()
 
     def _parse_sysbench_metrics(self, line: str) -> Optional[Dict]:
         """Parse sysbench output line for metrics"""
@@ -335,10 +370,30 @@ class WorkloadService:
         """Prepare the database for TPCC workload"""
         try:
             logger.info("Preparing database for TPCC workload")
+            
+            # Prepare TPC-C only on proxy node
+            node_success = self._prepare_tpcc_on_node(self.db_port)
+            
+            if not node_success:
+                logger.error(f"Failed to prepare TPC-C database on proxy node")
+                return False
+            
+            logger.info("TPC-C database preparation completed successfully")
+            return True
+        except Exception as e:
+            logger.exception("Error preparing TPCC database")
+            return False
+        
+    def _prepare_tpcc_on_node(self, port: int) -> bool:
+        """Prepare the TPCC database on a specific node"""
+        try:
+            node_type = "proxy node" if port == self.db_port else f"node with port {port}"
+            logger.info(f"Preparing TPC-C database on {node_type}")
+            
             # Create TPCC database if not exists
             conn = mysql.connector.connect(
                 host=self.db_host,
-                port=self.db_port,
+                port=port,
                 user=self.db_user,
                 password=self.db_password
             )
@@ -356,7 +411,7 @@ class WorkloadService:
             create_tables_cmd = (
                 f"mysql "
                 f"-h {self.db_host} "
-                f"-P {self.db_port} "
+                f"-P {port} "
                 f"-u {self.db_user} "
                 f"-p{self.db_password} "
                 f"{self.tpcc_db} "
@@ -364,14 +419,14 @@ class WorkloadService:
             )
             logger.info(f"Creating tables with command: {create_tables_cmd}")
             if os.system(create_tables_cmd) != 0:
-                logger.error("Failed to create tables")
+                logger.error(f"Failed to create tables on {node_type}")
                 return False
 
             # Load data
             load_data_cmd = (
                 f"{os.path.join(tpcc_dir, 'tpcc_load')} "
                 f"-h {self.db_host} "
-                f"-P {self.db_port} "
+                f"-P {port} "
                 f"-d {self.tpcc_db} "
                 f"-u {self.db_user} "
                 f"-p {self.db_password} "
@@ -379,14 +434,14 @@ class WorkloadService:
             )
             logger.info(f"Loading data with command: {load_data_cmd}")
             if os.system(load_data_cmd) != 0:
-                logger.error("Failed to load data")
+                logger.error(f"Failed to load data on {node_type}")
                 return False
 
             # Add foreign keys and indexes
             add_indexes_cmd = (
                 f"mysql "
                 f"-h {self.db_host} "
-                f"-P {self.db_port} "
+                f"-P {port} "
                 f"-u {self.db_user} "
                 f"-p{self.db_password} "
                 f"{self.tpcc_db} "
@@ -394,23 +449,43 @@ class WorkloadService:
             )
             logger.info(f"Adding indexes with command: {add_indexes_cmd}")
             if os.system(add_indexes_cmd) != 0:
-                logger.error("Failed to add indexes")
+                logger.error(f"Failed to add indexes on {node_type}")
                 return False
 
-            logger.info("TPC-C database preparation completed successfully")
+            logger.info(f"TPC-C database preparation completed successfully on {node_type}")
             return True
         except Exception as e:
-            logger.exception("Error preparing TPCC database")
+            logger.exception(f"Error preparing TPCC database on {node_type}: {str(e)}")
             return False
 
     def prepare_tpch(self) -> bool:
         """Prepare the database for TPCH workload"""
         try:
             logger.info("Preparing database for TPCH workload")
+            
+            # Prepare TPC-H only on proxy node
+            node_success = self._prepare_tpch_on_node(self.db_port)
+            
+            if not node_success:
+                logger.error(f"Failed to prepare TPC-H database on proxy node")
+                return False
+            
+            logger.info("TPC-H database preparation completed successfully")
+            return True
+        except Exception as e:
+            logger.exception("Error preparing TPCH database")
+            return False
+
+    def _prepare_tpch_on_node(self, port: int) -> bool:
+        """Prepare the TPCH database on a specific node"""
+        try:
+            node_type = "proxy node" if port == self.db_port else f"node with port {port}"
+            logger.info(f"Preparing TPC-H database on {node_type}")
+            
             # Create TPCH database if not exists
             conn = mysql.connector.connect(
                 host=self.db_host,
-                port=self.db_port,
+                port=port,
                 user=self.db_user,
                 password=self.db_password
             )
@@ -424,7 +499,7 @@ class WorkloadService:
             cmd = (
                 f"tpch-mysql "
                 f"--host={self.db_host} "
-                f"--port={self.db_port} "
+                f"--port={port} "
                 f"--user={self.db_user} "
                 f"--password={self.db_password} "
                 f"--database={self.tpch_db} "
@@ -432,9 +507,16 @@ class WorkloadService:
                 "prepare"
             )
             process = subprocess.run(cmd.split(), capture_output=True, text=True)
-            return process.returncode == 0
+            success = process.returncode == 0
+            
+            if success:
+                logger.info(f"TPC-H database preparation completed successfully on {node_type}")
+            else:
+                logger.error(f"TPC-H database preparation failed on {node_type}")
+            
+            return success
         except Exception as e:
-            logger.exception("Error preparing TPCH database")
+            logger.exception(f"Error preparing TPCH database on {node_type}: {str(e)}")
             return False
 
     def _read_workload_output(self, workload_id: str, process: subprocess.Popen):
@@ -483,14 +565,69 @@ class WorkloadService:
             else:
                 logger.warning("No task_name provided, skipping task creation")
             
+            # Check if specific nodes are requested
+            target_nodes = options.get('node', []) if options else []
+            if not isinstance(target_nodes, list):
+                target_nodes = [target_nodes]  # Convert to list if it's a single string
+            
+            # If no specific nodes are selected, use the default connection
+            if not target_nodes:
+                logger.info("No specific nodes selected, using default database connection")
+                return self._start_workload_on_node(
+                    workload_type, 
+                    num_threads, 
+                    options, 
+                    task, 
+                    workload_id,
+                    self.db_host, 
+                    self.db_port
+                )
+            
+            # Start workload on each selected node
+            success = False
+            logger.info(f"Node_port_mapping: {self.node_port_mapping}")
+            for node in target_nodes:
+                node_port = self.node_port_mapping.get(node)
+                if not node_port:
+                    logger.warning(f"Unknown node: {node}, not found in mapping. Available nodes: {list(self.node_port_mapping.keys())}")
+                    continue
+                
+                logger.info(f"Starting workload on node {node} with port {node_port}")
+                node_success = self._start_workload_on_node(
+                    workload_type, 
+                    num_threads, 
+                    options, 
+                    task, 
+                    f"{workload_id}_{node}",  # Add node to ID for uniqueness
+                    self.db_host,  # Host remains the same (all in K8s)
+                    node_port
+                )
+                
+                # If at least one node succeeds, consider it a success
+                success = success or node_success
+            
+            if success and task:
+                self.update_task_status(task.id, WorkloadStatus.RUNNING)
+            
+            return success
+            
+        except Exception as e:
+            logger.exception(f"Error starting workload: {str(e)}")
+            if task:
+                self.update_task_status(task.id, WorkloadStatus.ERROR, str(e))
+            return False
+    
+    def _start_workload_on_node(self, workload_type: WorkloadType, num_threads: int, options: Dict, task, workload_id: str, host: str, port: int) -> bool:
+        """Start a workload on a specific node"""
+        try:
             cmd = None
             if workload_type == WorkloadType.SYSBENCH:
                 # Build sysbench command with custom options
                 cmd = (
                     f"sysbench oltp_read_write "
                     f"--db-driver=mysql "
-                    f"--mysql-host={self.db_host} "
-                    f"--mysql-port={self.db_port} "
+                    f"--mysql-host={host} "
+                    f"--mysql-port={port} "
                     f"--mysql-user={self.db_user} "
                     f"--mysql-password={self.db_password} "
                     f"--mysql-db={self.db_name} "
@@ -523,8 +660,8 @@ class WorkloadService:
                 # Check if TPCC database exists
                 try:
                     with pymysql.connect(
-                        host=self.db_host,
-                        port=self.db_port,
+                        host=host,
+                        port=port,
                         user=self.db_user,
                         password=self.db_password
                     ) as conn:
@@ -534,14 +671,14 @@ class WorkloadService:
                                 logger.error(f"TPCC database {self.tpcc_db} does not exist")
                                 return False
                 except Exception as e:
-                    logger.error(f"Failed to check TPCC database: {str(e)}")
+                    logger.error(f"Failed to check TPCC database on {host}:{port}: {str(e)}")
                     return False
                 
                 # Build TPCC command with custom options
                 cmd = (
                     f"{tpcc_script} "
-                    f"-h {self.db_host} "
-                    f"-P {self.db_port} "
+                    f"-h {host} "
+                    f"-P {port} "
                     f"-d {self.tpcc_db} "
                     f"-u {self.db_user} "
                     f"-p {self.db_password} "
@@ -555,8 +692,8 @@ class WorkloadService:
             elif workload_type == WorkloadType.TPCH:
                 cmd = (
                     f"tpch-mysql "
-                    f"--host={self.db_host} "
-                    f"--port={self.db_port} "
+                    f"--host={host} "
+                    f"--port={port} "
                     f"--user={self.db_user} "
                     f"--password={self.db_password} "
                     f"--database={self.tpch_db} "
@@ -601,32 +738,49 @@ class WorkloadService:
             output_thread.daemon = True
             output_thread.start()
             
-            # Update task status if task was created
-            if task:
-                self.update_task_status(task.id, WorkloadStatus.RUNNING)
-            
             return True
-            
         except Exception as e:
-            logger.exception(f"Error starting workload: {str(e)}")
-            if task:
-                self.update_task_status(task.id, WorkloadStatus.ERROR, str(e))
+            logger.exception(f"Error starting workload on specific node: {str(e)}")
             return False
 
     def stop_workload(self, workload_id: str) -> bool:
         """Stop a running workload"""
         try:
-            if workload_id not in self.active_workloads:
+            # First check for direct match
+            if workload_id in self.active_workloads:
+                process = self.active_workloads[workload_id]
+                process.terminate()
+                process.wait(timeout=5)
+                
+                del self.active_workloads[workload_id]
+                if workload_id in self.workload_outputs:
+                    del self.workload_outputs[workload_id]
+                
+                # Update associated task status
+                for task in self.tasks.values():
+                    if task.workload_id == workload_id:
+                        self.update_task_status(task.id, WorkloadStatus.STOPPED)
+                        break
+                
+                return True
+            
+            # If not found directly, check for node-specific workloads
+            # Format: original_workload_id_nodename
+            matching_workloads = [wid for wid in self.active_workloads.keys() if wid.startswith(f"{workload_id}_")]
+            
+            if not matching_workloads:
                 logger.warning(f"Workload {workload_id} is not running")
                 return False
             
-            process = self.active_workloads[workload_id]
-            process.terminate()
-            process.wait(timeout=5)
-            
-            del self.active_workloads[workload_id]
-            if workload_id in self.workload_outputs:
-                del self.workload_outputs[workload_id]
+            # Stop all matching workloads
+            for wid in matching_workloads:
+                process = self.active_workloads[wid]
+                process.terminate()
+                process.wait(timeout=5)
+                
+                del self.active_workloads[wid]
+                if wid in self.workload_outputs:
+                    del self.workload_outputs[wid]
             
             # Update associated task status
             for task in self.tasks.values():
@@ -643,18 +797,39 @@ class WorkloadService:
     def get_workload_status(self, workload_id: str) -> Dict:
         """Get the status of a workload"""
         try:
-            if workload_id not in self.active_workloads:
+            # Direct match
+            if workload_id in self.active_workloads:
+                process = self.active_workloads[workload_id]
+                is_running = process.poll() is None
+                
                 return {
-                    "status": "not_found",
-                    "output": []
+                    "status": "running" if is_running else "stopped",
+                    "output": self.workload_outputs.get(workload_id, [])
                 }
             
-            process = self.active_workloads[workload_id]
-            is_running = process.poll() is None
+            # Check for node-specific workloads
+            # Format: original_workload_id_nodename
+            matching_workloads = [wid for wid in self.active_workloads.keys() if wid.startswith(f"{workload_id}_")]
+            
+            if matching_workloads:
+                # Combine output from all matching workloads
+                combined_output = []
+                all_running = True
+                
+                for wid in matching_workloads:
+                    process = self.active_workloads[wid]
+                    is_running = process.poll() is None
+                    all_running = all_running and is_running
+                    combined_output.extend(self.workload_outputs.get(wid, []))
+                
+                return {
+                    "status": "running" if all_running else "partially_running",
+                    "output": combined_output
+                }
             
             return {
-                "status": "running" if is_running else "stopped",
-                "output": self.workload_outputs.get(workload_id, [])
+                "status": "not_found",
+                "output": []
             }
             
         except Exception as e:
@@ -664,29 +839,66 @@ class WorkloadService:
                 "output": []
             }
 
-    def get_available_nodes(self) -> List[str]:
+    def _fetch_available_nodes(self) -> List[str]:
         """Get list of available nodes for running workloads"""
         try:
-            # Use the k8s_service implementation for consistency
-            from app.services.k8s_service import k8s_service
-            # We need to run the async method in a synchronous context
-            import asyncio
-            loop = asyncio.get_event_loop()
+            # First try to use the kubernetes API directly
             try:
-                return loop.run_until_complete(k8s_service.get_available_nodes())
-            except RuntimeError:
-                # If there's no running event loop
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    return new_loop.run_until_complete(k8s_service.get_available_nodes())
-                finally:
-                    new_loop.close()
+                # Load kubernetes configuration
+                if os.getenv('KUBERNETES_SERVICE_HOST'):
+                    config.load_incluster_config()
+                else:
+                    config.load_kube_config()
+                
+                # Create API client
+                core_api = client.CoreV1Api()
+                namespace = os.getenv('OCEANBASE_NAMESPACE', 'oceanbase')
+                
+                # List pods
+                pods = core_api.list_namespaced_pod(
+                    namespace=namespace, 
+                    label_selector="ref-obcluster"
+                )
+                
+                # Extract pod names
+                pod_names = []
+                for pod in pods.items:
+                    if pod.metadata.name.startswith("obcluster-"):
+                        pod_names.append(pod.metadata.name)
+                
+                if pod_names:
+                    logger.info(f"Found {len(pod_names)} pods using direct Kubernetes API")
+                    return pod_names
+            except Exception as direct_api_error:
+                logger.warning(f"Failed to get nodes using direct Kubernetes API: {str(direct_api_error)}")
+                
+            # If direct API access failed, try using k8s_service as a fallback
+            from backend.app.services.k8s_service import k8s_service
+            try:
+                # Try to use a synchronous method from k8s_service if available
+                if hasattr(k8s_service, '_fetch_available_nodes_sync'):
+                    nodes = k8s_service._fetch_available_nodes_sync()
+                    if nodes:
+                        logger.info(f"Found {len(nodes)} nodes using k8s_service sync method")
+                        return nodes
+            except Exception as k8s_service_error:
+                logger.warning(f"Failed to get nodes using k8s_service sync method: {str(k8s_service_error)}")
+                
+            # Fallback to environment variable
+            nodes_str = os.getenv('AVAILABLE_NODES', 'node1,node2,node3')
+            nodes = [node.strip() for node in nodes_str.split(',')]
+            logger.info(f"Using default nodes from environment: {nodes}")
+            return nodes
         except Exception as e:
-            logger.error(f"Error getting available nodes from k8s: {str(e)}")
-            # Fall back to environment variable as before
+            logger.error(f"Error getting available nodes: {str(e)}")
             nodes_str = os.getenv('AVAILABLE_NODES', 'node1,node2,node3')
             return [node.strip() for node in nodes_str.split(',')]
+
+    def get_available_nodes(self) -> List[str]:
+        """Get list of available nodes for running workloads"""
+        if not self.available_nodes:
+            self._fetch_available_nodes()
+        return self.available_nodes
 
     def get_active_workloads(self) -> List[Dict]:
         """Get list of active workloads with system metrics"""
@@ -708,19 +920,35 @@ class WorkloadService:
 
             active_workloads = []
             for workload_id, process in self.active_workloads.items():
-                workload_type, threads = workload_id.split('_')
+                # Parse node from workload_id if present
+                # Format could be either "type_threads" or "type_threads_nodename"
+                parts = workload_id.split('_')
+                if len(parts) >= 3:  # Has node info
+                    workload_type = parts[0]
+                    threads = parts[1]
+                    node = '_'.join(parts[2:])  # Rejoin in case node name has underscores
+                else:
+                    workload_type = parts[0]
+                    threads = parts[1]
+                    node = None
                 
                 # Find associated task
                 task = next((t for t in self.tasks.values() if t.workload_id == workload_id), None)
                 
-                active_workloads.append({
+                workload_info = {
                     'id': workload_id,
                     'type': workload_type,
                     'threads': int(threads),
                     'pid': process.pid,
                     'start_time': task.start_time if task else datetime.utcnow(),
                     'status': task.status if task else WorkloadStatus.RUNNING
-                })
+                }
+                
+                # Add node information if available
+                if node:
+                    workload_info['node'] = node
+                
+                active_workloads.append(workload_info)
             
             logger.debug(f"Active workloads: {active_workloads}")
             return active_workloads
@@ -777,5 +1005,44 @@ class WorkloadService:
                 'disk_usage': 0.0
             }
             
+    def stop_all_workloads(self) -> bool:
+        """Stop all running workloads"""
+        try:
+            if not self.active_workloads:
+                logger.info("No active workloads to stop")
+                return True
+            
+            logger.info(f"Stopping all {len(self.active_workloads)} active workloads")
+            success = True
+            
+            # Make a copy of keys since we'll be modifying the dictionary
+            workload_ids = list(self.active_workloads.keys())
+            
+            for workload_id in workload_ids:
+                try:
+                    process = self.active_workloads[workload_id]
+                    process.terminate()
+                    process.wait(timeout=5)
+                    
+                    del self.active_workloads[workload_id]
+                    if workload_id in self.workload_outputs:
+                        del self.workload_outputs[workload_id]
+                        
+                    # Update associated task status
+                    for task in self.tasks.values():
+                        if task.workload_id == workload_id:
+                            self.update_task_status(task.id, WorkloadStatus.STOPPED)
+                            break
+                        
+                    logger.info(f"Stopped workload: {workload_id}")
+                except Exception as e:
+                    logger.error(f"Failed to stop workload {workload_id}: {str(e)}")
+                    success = False
+                
+            return success
+        except Exception as e:
+            logger.exception("Error stopping all workloads")
+            return False
+
 # Singleton instance of WorkloadService
 workload_service = WorkloadService()

@@ -1,3 +1,4 @@
+from dotenv import load_dotenv
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 import logging
@@ -11,6 +12,8 @@ from async_lru import alru_cache
 import json
 import pymysql
 import threading
+
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,20 @@ class K8sService:
         self._last_request_time = 0  # This will force a refresh on next request
         self.collection_duration = 180  # Collection duration in seconds
         self.experiment_types = ["cpu_stress", "io_bottleneck", "network_bottleneck", "cache_bottleneck", "too_many_indexes"]
-        
+        self.available_nodes = []
+        try:
+            self.available_nodes = loop.run_until_complete(self._fetch_available_nodes())
+        except RuntimeError:
+            # If there's no running event loop
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                self.available_nodes = new_loop.run_until_complete(self._fetch_available_nodes())
+            finally:
+                new_loop.close()
+        except Exception as e:
+            logger.error(f"Error getting available nodes: {e}")
+            self.available_nodes = []
         # Force immediate refresh of active anomalies on startup
         self._last_cache_update = 0
         # Create event loop for initialization if none exists
@@ -956,7 +972,7 @@ class K8sService:
         except Exception as e:
             logger.error(f"Error initializing active anomalies: {str(e)}")
 
-    async def get_available_nodes(self) -> List[str]:
+    async def _fetch_available_nodes(self) -> List[str]:
         """Get list of available pods for running experiments"""
         try:
             pods = await asyncio.to_thread(
@@ -973,6 +989,12 @@ class K8sService:
             logger.error(f"Error getting available pods: {str(e)}")
             return []
         
+    async def get_available_nodes(self) -> List[str]:
+        """Get list of available pods for running experiments"""
+        if not self.available_nodes:
+            return await self._fetch_available_nodes()
+        return self.available_nodes
+    
     def _fetch_ob_zones(self):
         """Fetch OceanBase zones from the database"""
         try:

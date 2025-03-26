@@ -128,6 +128,39 @@ DistDiagnosis is an integrated anomaly detection and diagnosis system that combi
    - Trains XGBoost classifiers for each anomaly type
    - Saves the trained model for future use
 
+### Compound Anomaly Detection
+
+For more advanced diagnosis capabilities, the system now supports training and detection of compound anomalies (multiple simultaneous issues):
+
+1. **Collecting Compound Anomaly Data**:
+   - Use the compound anomaly collection endpoint to gather data for multiple simultaneous anomalies:
+     ```bash
+     curl -X POST http://localhost:8001/api/training/compound \
+       -H "Content-Type: application/json" \
+       -d '{"anomaly_types": ["cpu_stress", "network_bottleneck"]}'
+     ```
+   - The system automatically extends collection duration by 50% (270s) for compound anomalies
+   - Multi-label classification allows the model to identify each component of a compound anomaly
+
+2. **Adaptive Window Processing**:
+   - The system automatically adjusts its observation window based on metric stability:
+     - Stable metrics: Larger window (up to 10 minutes) for subtle pattern detection
+     - Unstable metrics: Smaller window (minimum 1 minute) for rapid change detection
+   - This adaptive behavior is enabled by default and helps capture both:
+     - Short-term, high-intensity anomalies
+     - Slower-developing compound issues with complex interactions
+
+3. **Feature Engineering for Interactions**:
+   - The system generates cross-feature interactions to detect compound effects
+   - Example: A CPU issue combined with network latency creates unique interaction patterns
+   - These compound patterns are detected using specially engineered interaction features
+
+4. **Best Practices**:
+   - Collect at least 10 samples of each important compound anomaly combination
+   - Ensure your training dataset includes both single and compound anomalies
+   - Include some normal state data immediately before and after compound anomalies
+   - Test model performance with various compound scenarios to validate accuracy
+
 ### Using the System
 
 1. Real-time Monitoring:
@@ -240,6 +273,41 @@ MIT License - see the [LICENSE](LICENSE) file for details
   - Proper capitalization of technical terms (CPU, IO, MySQL, etc.)
   - Two-line display for long metric names with ellipsis
   - Responsive metric cards with consistent sizing
+
+### Compound Anomaly Detection
+
+- **Compound Anomaly Training Data Collection**
+  - Support for collecting training data with multiple simultaneous anomalies
+  - Extended collection duration (270s) for compound scenarios to capture full interactions
+  - Multi-label classification support with enhanced label encoding
+  - Automatic node selection to ensure diverse training data
+
+- **Adaptive Time Window Processing**
+  - Dynamic window sizing (60-600s) based on metric stability
+  - Automatically adjusts observation window to optimize for anomaly type:
+    - Larger windows (up to 10 minutes) for stable metrics to detect subtle patterns
+    - Smaller windows (minimum 1 minute) for rapidly changing metrics
+  - Coefficient of variation-based stability calculation
+
+- **Cross-Feature Interactions**
+  - Feature engineering for compound anomaly detection
+  - Automatic generation of interaction features between key metrics
+  - Cross-category correlation detection (CPU-IO, Network-Memory, etc.)
+  - Optimized feature selection to avoid combinatorial explosion
+
+- **Usage**
+  - Use the new API endpoint to collect compound anomaly data:
+    ```bash
+    curl -X POST http://localhost:8001/api/training/compound \
+      -H "Content-Type: application/json" \
+      -d '{"anomaly_types": ["cpu_stress", "network_bottleneck"]}'
+    ```
+  - Enable adaptive window sizing (on by default):
+    ```bash
+    curl -X POST http://localhost:8001/api/diagnosis/config \
+      -H "Content-Type: application/json" \
+      -d '{"adaptive_window": true, "min_window_size": 60, "max_window_size": 600}'
+    ```
 
 ### Backend Improvements
 

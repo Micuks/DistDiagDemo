@@ -14,6 +14,7 @@ from fastapi_cache.coder import JsonCoder
 import logging
 import json
 from typing import Union, Any
+from app.api.training import setup_shutdown_handler as setup_training_shutdown_handler
 
 # Load environment variables from .env file
 load_dotenv()
@@ -95,6 +96,9 @@ app.include_router(workload.router, prefix="/api/workload", tags=["workload"])
 app.include_router(metrics.router, prefix="/api/metrics", tags=["metrics"])
 app.include_router(models.router, prefix="/api/models", tags=["models"])
 app.include_router(training.router, prefix="/api/training", tags=["training"])
+
+# Set up training service shutdown handler
+setup_training_shutdown_handler(app)
 
 # Create metrics endpoint
 metrics_app = make_asgi_app()

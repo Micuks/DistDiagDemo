@@ -7,6 +7,10 @@ from app.services.metrics_service import metrics_service
 import threading
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
+from fastapi.applications import FastAPI
+from starlette.requests import Request
+from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,7 @@ def _init_training_status(stats: Dict = {}):
 _training_in_progress = False
 _training_lock = asyncio.Lock()
 _training_status = _init_training_status()
+_training_executor = ThreadPoolExecutor(max_workers=1)  # Dedicated executor for training
 
 # Add global variables for tracking collection state
 _normal_collection_in_progress = False
@@ -40,6 +45,10 @@ class AnomalyRequest(BaseModel):
 
 class TrainingStopRequest(BaseModel):
     save_post_data: Optional[bool] = True
+
+class CompoundAnomalyRequest(BaseModel):
+    anomaly_types: List[str]
+    node: Optional[str] = None
 
 @router.post("/collect")
 async def start_training_collection(request: AnomalyRequest):
@@ -377,17 +386,52 @@ async def _run_training_in_background():
         from app.services.diagnosis_service import DiagnosisService
         diagnosis_service = DiagnosisService()
         
-        # Update status - training
-        async with _training_lock:
-            _training_status.update({
-                "stage": "training",
-                "progress": 50,
-                "message": "Training model..."
-            })
-        
-        # Run the CPU-intensive training in a thread pool to avoid blocking the event loop
-        result = await asyncio.to_thread(diagnosis_service.train, X, y)
-        logger.info(f"Model training completed successfully: {result['model_name']}")
+        # Set up a progress reporting task that runs in parallel with training
+        progress_task = None
+        try:
+            async def update_progress():
+                """Periodically update training progress to keep the API responsive"""
+                progress = 50
+                while True:
+                    await asyncio.sleep(5)  # Update every 5 seconds
+                    # Increment progress slightly each time (max 75%)
+                    if progress < 75:
+                        progress += 1
+                    async with _training_lock:
+                        _training_status.update({
+                            "stage": "training",
+                            "progress": progress,
+                            "message": f"Training model... ({progress}%)"
+                        })
+                    logger.debug(f"Updated training progress to {progress}%")
+
+            # Start progress reporting task
+            progress_task = asyncio.create_task(update_progress())
+            
+            # Update status - training
+            async with _training_lock:
+                _training_status.update({
+                    "stage": "training",
+                    "progress": 50,
+                    "message": "Training model..."
+                })
+            
+            # Run the CPU-intensive training in a dedicated thread pool to avoid blocking API requests
+            result = await asyncio.get_event_loop().run_in_executor(
+                _training_executor,  # Use dedicated executor instead of default
+                diagnosis_service.train, 
+                X, 
+                y
+            )
+            logger.info(f"Model training completed successfully: {result['model_name']}")
+        finally:
+            # Cancel progress task if it exists
+            if progress_task and not progress_task.done():
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
         
         # Update status - evaluating
         async with _training_lock:
@@ -473,3 +517,69 @@ async def get_process_status():
             "anomaly_collection_in_progress": _anomaly_collection_in_progress,
             "normal_collection_in_progress": _normal_collection_in_progress
         }
+
+@router.post("/compound")
+async def start_compound_collection(request: CompoundAnomalyRequest):
+    """
+    Start collecting training data for compound anomaly scenarios (multiple simultaneous anomalies)
+    
+    Compound anomalies are situations where multiple issues occur simultaneously,
+    creating complex interactions that are more challenging to diagnose.
+    
+    Args:
+        request: CompoundAnomalyRequest with:
+            - anomaly_types: List of anomaly types to simulate simultaneously (min 2)
+            - node: Optional target node (auto-selected if not specified)
+    """
+    global _anomaly_collection_in_progress
+    
+    # Validate we have at least 2 anomaly types
+    if len(request.anomaly_types) < 2:
+        raise HTTPException(
+            status_code=400, 
+            detail="Compound collection requires at least 2 anomaly types"
+        )
+    
+    # Check if collection is already in progress
+    async with _collection_lock:
+        if _anomaly_collection_in_progress:
+            logger.warning("Anomaly collection already in progress, ignoring duplicate request")
+            return {
+                "status": "pending", 
+                "message": "Anomaly collection is already in progress",
+                "types": request.anomaly_types,
+                "node": request.node
+            }
+        # Mark collection as in progress
+        _anomaly_collection_in_progress = True
+    
+    try:
+        metrics_service.toggle_send_to_training(True)
+        await training_service.start_compound_collection(
+            anomaly_types=request.anomaly_types,
+            node=request.node,
+        )
+        return {
+            "status": "success",
+            "message": f"Started compound anomaly collection with {len(request.anomaly_types)} anomaly types",
+            "types": request.anomaly_types,
+            "node": request.node or "auto-selected"
+        }
+    except Exception as e:
+        # Reset collection flag on error
+        async with _collection_lock:
+            _anomaly_collection_in_progress = False
+        logger.error(f"Error starting compound anomaly collection: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error starting compound anomaly collection: {str(e)}")
+
+# Add a shutdown handler at the end of the file
+def setup_shutdown_handler(app: FastAPI):
+    """Set up a shutdown handler to gracefully close the training executor."""
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        logger.info("Shutting down training executor...")
+        try:
+            _training_executor.shutdown(wait=False)
+            logger.info("Training executor shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down training executor: {str(e)}")

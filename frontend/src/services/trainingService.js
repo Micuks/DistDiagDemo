@@ -113,8 +113,20 @@ class TrainingService {
     }
 
     async getTrainingStatus() {
+        // Use a longer timeout for training status to avoid issues during model training
+        const trainingStatusClient = axios.create({
+            baseURL: API_BASE_URL,
+            timeout: 60000, // 60s timeout for training status
+        });
+        
+        trainingStatusClient.interceptors.response.use(
+            response => response.data,
+            error => this._handleError(error)
+        );
+        
         return this._retryableRequest(() =>
-            this.client.get('/api/training/training-status')
+            trainingStatusClient.get('/api/training/training-status'), 
+            5  // More retries for this critical endpoint
         );
     }
 }

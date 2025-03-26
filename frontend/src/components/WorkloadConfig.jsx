@@ -151,7 +151,7 @@ const WorkloadConfig = ({ onConfigChange, initialConfig }) => {
 
                     <Form.Item
                         label="Target Node(s)"
-                        name="node"
+                        name={['options', 'node']}
                         rules={[{ required: true, message: 'Please select at least one target node' }]}
                     >
                         <Select mode="multiple" placeholder="Select one or more nodes">

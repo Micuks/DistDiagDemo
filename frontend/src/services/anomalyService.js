@@ -338,6 +338,17 @@ class AnomalyService {
         );
     }
 
+    async getMetricRankings(node, modelName = null) {
+        return this._retryableRequest(() => 
+            this.client.get('/api/models/metrics_ranks', {
+                params: {
+                    node: node,
+                    model_name: modelName
+                },
+            })
+        );
+    }
+
     async startAnomalyCollection(type, node) {
         return this._retryableRequest(() =>
             this.client.post('/api/training/collect', {
