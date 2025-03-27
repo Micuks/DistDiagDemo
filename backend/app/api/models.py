@@ -9,7 +9,7 @@ import os
 import json
 import numpy as np
 from collections import defaultdict
-from app.services.metric_inferor_service import analyze_node_metrics
+from app.services.metric_inferor_service import analyze_node_metrics, get_metric_summary
 
 logger = logging.getLogger(__name__)
 
@@ -518,6 +518,76 @@ async def get_metric_ranks(
         
     except Exception as e:
         logger.error(f"Failed to get metric rankings: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+
+@router.get("/metrics_summary")
+async def get_metrics_summary(
+    node: str,
+    languages: Optional[List[str]] = Query(["Chinese", "English"], alias="languages[]"),
+):
+    """Get an LLM-generated summary and actions for metrics analysis separately"""
+    try:
+        logger.info(f"Received request for metrics summary: node={node}, languages={languages}")
+        
+        # Get detailed metrics with time series data
+        metrics = metrics_service.get_detailed_metrics()
+        if not metrics:
+            logger.warning("No metrics data available")
+            return JSONResponse(
+                content={"error": "No metrics data available"},
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true"
+                }
+            )
+        
+        # Translate node name if it's an IP address
+        translated_node = translate_node_name(node, metrics)
+        if translated_node != node:
+            logger.info(f"Translated node name from {node} to {translated_node}")
+            node = translated_node
+        
+        # Check if node exists in metrics
+        if node not in metrics:
+            logger.warning(f"Node {node} not found in metrics data")
+            return JSONResponse(
+                content={"error": f"Node {node} not found in metrics data"},
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true"
+                }
+            )
+        
+        node_metrics = metrics[node]
+
+        # First get metrics analysis to get ranked metrics
+        analysis_result = analyze_node_metrics(node_metrics, node)
+        ranked_metrics = analysis_result.get("metrics", [])
+        
+        # Generate summary and actions with LLM
+        result = get_metric_summary(ranked_metrics, node, languages)
+        
+        # Return summary and actions
+        return JSONResponse(
+            content={
+                "summary": result.get("summary", ""),
+                "actions": result.get("actions", [])
+            },
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get metrics summary: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"error": str(e)},

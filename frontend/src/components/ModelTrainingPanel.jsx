@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select, Tabs } from 'antd';
-import { DatabaseOutlined, ApiOutlined, ExperimentOutlined, LineChartOutlined } from '@ant-design/icons';
+import { DatabaseOutlined, ApiOutlined, ExperimentOutlined, LineChartOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import { trainingService } from '../services/trainingService';
 import { useAnomalyData } from '../hooks/useAnomalyData';
 import ModelPerformanceView from './ModelPerformanceView';
@@ -465,26 +465,36 @@ const ModelTrainingPanel = () => {
   };
 
   return (
-    <Tabs activeKey={activeTab} onChange={setActiveTab}>
-      <TabPane 
-        tab={<span><DatabaseOutlined />Data Collection</span>} 
-        key="1"
-      >
-        {renderDataCollectionTab()}
-      </TabPane>
-      <TabPane 
-        tab={<span><ApiOutlined />Training Process</span>} 
-        key="2"
-      >
-        {renderTrainingProgressTab()}
-      </TabPane>
-      <TabPane 
-        tab={<span><LineChartOutlined />Model Performance</span>} 
-        key="3"
-      >
-        {renderModelPerformanceTab()}
-      </TabPane>
-    </Tabs>
+    <>
+      <Alert
+        message="Optional Training Module"
+        description="This module is for training and improving models but is not required during anomaly diagnosis. You can skip this step in the workflow."
+        type="info"
+        showIcon
+        icon={<InfoCircleOutlined />}
+        style={{ marginBottom: 16 }}
+      />
+      <Tabs activeKey={activeTab} onChange={setActiveTab}>
+        <TabPane 
+          tab={<span><DatabaseOutlined />Data Collection</span>} 
+          key="1"
+        >
+          {renderDataCollectionTab()}
+        </TabPane>
+        <TabPane 
+          tab={<span><ApiOutlined />Training Process</span>} 
+          key="2"
+        >
+          {renderTrainingProgressTab()}
+        </TabPane>
+        <TabPane 
+          tab={<span><LineChartOutlined />Model Performance</span>} 
+          key="3"
+        >
+          {renderModelPerformanceTab()}
+        </TabPane>
+      </Tabs>
+    </>
   );
 };
 

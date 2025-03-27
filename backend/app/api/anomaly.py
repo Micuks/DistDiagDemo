@@ -164,15 +164,47 @@ async def clear_anomaly(request: AnomalyRequest):
         target_node = request.target_node if request.target_node is not None else request.node
         
         # Log the request details
-        logger.info(f"Clearing anomaly: {request.type}, experiment: {request.experiment_name}")
+        logger.info(f"Clearing anomaly - type: {request.type}, experiment: {request.experiment_name}")
         
         # Clear all caches first
         await clear_caches()
         
-        # Clear the anomaly
-        deleted_experiments = await retry_with_backoff(
-            lambda: k8s_service.delete_chaos_experiment(request.type, request.experiment_name)
-        )
+        # First priority: Use experiment_name if provided (precise deletion by ID)
+        if request.experiment_name:
+            # Find the anomaly type if not provided
+            if not request.type:
+                active_anomalies = await k8s_service.get_active_anomalies()
+                target_anomaly = next((a for a in active_anomalies if a.get('name') == request.experiment_name), None)
+                
+                if target_anomaly:
+                    request.type = target_anomaly.get('type')
+                    logger.info(f"Found anomaly type {request.type} for experiment {request.experiment_name}")
+                else:
+                    logger.warning(f"Experiment {request.experiment_name} not found in active anomalies")
+            
+            if not request.type:
+                return {
+                    "status": "warning",
+                    "message": f"Anomaly with ID {request.experiment_name} not found or missing type information"
+                }
+            
+            # Delete the specific experiment by ID
+            logger.info(f"Deleting specific experiment: {request.experiment_name}")
+            deleted_experiments = await retry_with_backoff(
+                lambda: k8s_service.delete_chaos_experiment(request.type, request.experiment_name)
+            )
+        else:
+            # Second priority: Delete by type (will delete all experiments of this type)
+            if not request.type:
+                return {
+                    "status": "error",
+                    "message": "Either type or experiment_name must be provided"
+                }
+            
+            logger.info(f"Deleting all experiments of type: {request.type}")
+            deleted_experiments = await retry_with_backoff(
+                lambda: k8s_service.delete_chaos_experiment(request.type, None)
+            )
         
         # Log the deleted experiments
         logger.info(f"Deleted experiments: {deleted_experiments}")
@@ -190,26 +222,27 @@ async def clear_anomaly(request: AnomalyRequest):
             current_anomalies = await k8s_service.get_active_anomalies()
             logger.info(f"Active anomalies after clear: {[a.get('name', '') for a in current_anomalies]}")
             
-            # Check if we still have anomalies of this type
-            remaining = [a for a in current_anomalies if a.get('type') == request.type]
-            if remaining:
-                logger.warning(f"Still have {len(remaining)} anomalies of type {request.type} after deletion")
-                
-                # Try one more time to delete them specifically
-                for anomaly in remaining:
-                    try:
-                        name = anomaly.get('name')
-                        if name:
-                            logger.info(f"Attempting to delete remaining anomaly: {name}")
-                            await k8s_service.delete_chaos_experiment(request.type, name)
-                    except Exception as e:
-                        logger.error(f"Failed to delete remaining anomaly: {str(e)}")
+            # If we were deleting by type, check if any anomalies of that type remain
+            if not request.experiment_name and request.type:
+                remaining = [a for a in current_anomalies if a.get('type') == request.type]
+                if remaining:
+                    logger.warning(f"Still have {len(remaining)} anomalies of type {request.type} after deletion")
+                    
+                    # Try one more time to delete them specifically
+                    for anomaly in remaining:
+                        try:
+                            name = anomaly.get('name')
+                            if name:
+                                logger.info(f"Attempting to delete remaining anomaly: {name}")
+                                await k8s_service.delete_chaos_experiment(request.type, name)
+                        except Exception as e:
+                            logger.error(f"Failed to delete remaining anomaly: {str(e)}")
         except Exception as e:
             logger.error(f"Error checking remaining anomalies: {str(e)}")
             
         return {
             "status": "success", 
-            "message": f"Cleared {request.type} anomaly from node {target_node}",
+            "message": f"Cleared anomaly successfully",
             "deleted": deleted_experiments
         }
     except Exception as e:

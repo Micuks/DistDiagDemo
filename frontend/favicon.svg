@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="64 64 896 896" focusable="false" data-icon="dashboard" width="1em" height="1em" fill="currentColor" aria-hidden="true">
+  <path d="M880 112H144C64.1 112 0 176.1 0 256v512c0 79.9 64.1 144 144 144h736c79.9 0 144-64.1 144-144V256c0-79.9-64.1-144-144-144zm-40 656H204V280h636v488z"/>
+</svg> 

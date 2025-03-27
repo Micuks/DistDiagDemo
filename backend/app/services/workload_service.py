@@ -744,7 +744,7 @@ class WorkloadService:
             return False
 
     def stop_workload(self, workload_id: str) -> bool:
-        """Stop a running workload"""
+        """Stop a running workload by ID"""
         try:
             # First check for direct match
             if workload_id in self.active_workloads:
@@ -756,11 +756,16 @@ class WorkloadService:
                 if workload_id in self.workload_outputs:
                     del self.workload_outputs[workload_id]
                 
-                # Update associated task status
-                for task in self.tasks.values():
+                # Try to find the associated task and update its status
+                associated_task = None
+                for task in self.get_active_tasks():
                     if task.workload_id == workload_id:
-                        self.update_task_status(task.id, WorkloadStatus.STOPPED)
+                        associated_task = task
                         break
+                
+                # Update task status if workload was successfully stopped
+                if associated_task:
+                    self.update_task_status(associated_task.id, WorkloadStatus.STOPPED)
                 
                 return True
             
@@ -1006,7 +1011,7 @@ class WorkloadService:
             }
             
     def stop_all_workloads(self) -> bool:
-        """Stop all running workloads"""
+        """Stop all active workloads"""
         try:
             if not self.active_workloads:
                 logger.info("No active workloads to stop")
@@ -1039,6 +1044,10 @@ class WorkloadService:
                     logger.error(f"Failed to stop workload {workload_id}: {str(e)}")
                     success = False
                 
+            # Update status of all active tasks to STOPPED
+            for task in self.get_active_tasks():
+                self.update_task_status(task.id, WorkloadStatus.STOPPED)
+            
             return success
         except Exception as e:
             logger.exception("Error stopping all workloads")

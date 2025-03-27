@@ -219,4 +219,40 @@ async def get_task(task_id: str):
             raise HTTPException(status_code=404, detail="Task not found")
         return task
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/tasks/{task_id}/stop", response_model=Task)
+async def stop_task(task_id: str):
+    """Stop a running task and all its associated workloads and anomalies"""
+    try:
+        logger.info(f"Received request to stop task: {task_id}")
+        
+        # First get the task
+        task = workload_service.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+            
+        # If task is already stopped, just return it
+        if task.status != WorkloadStatus.RUNNING:
+            return task
+            
+        # Try to stop associated workload if it exists
+        if task.workload_id:
+            try:
+                workload_service.stop_workload(task.workload_id)
+            except Exception as e:
+                logger.warning(f"Failed to stop workload {task.workload_id}: {str(e)}")
+                # Continue anyway to update task status
+        
+        # Update task status
+        updated_task = workload_service.update_task_status(task_id, WorkloadStatus.STOPPED)
+        
+        if not updated_task:
+            raise HTTPException(status_code=500, detail="Failed to update task status")
+            
+        return updated_task
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error stopping task: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

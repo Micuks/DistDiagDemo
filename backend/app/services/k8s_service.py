@@ -103,9 +103,9 @@ class K8sService:
                 {"workers": 32, "load": 100}
             ],
             "io_bottleneck": [
-                {"delay": "500ms", "percent": 75},
-                {"delay": "1000ms", "percent": 85},
-                {"delay": "2000ms", "percent": 100}
+                {"intensity": "low", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=64k count=5000 oflag=dsync & sleep %s"},
+                {"intensity": "medium", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file2 bs=64k count=5000 oflag=dsync & sleep %s"},
+                {"intensity": "high", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file2 bs=1M count=1024 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file3 bs=64k count=10000 conv=fsync & sleep %s"}
             ],
             "network_bottleneck": [
                 {"latency": "1000ms", "correlation": "75"},
@@ -198,11 +198,155 @@ class K8sService:
                 await self._update_ob_parameter({
                     "memstore_limit_percentage": "0"  # Restore default value 0
                 })
+                
+                # Since we now create an actual Kubernetes resource for cache_bottleneck,
+                # we need to delete it like other experiment types
+                plural = self._get_experiment_plural(anomaly_type)
+                deleted_experiments = []
+                
+                # If no specific experiment name is provided, delete all experiments of this type
+                if experiment_name is None:
+                    # List all experiments of this type
+                    experiments = await asyncio.to_thread(
+                        self.custom_api.list_namespaced_custom_object,
+                        group="chaos-mesh.org",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=plural
+                    )
+                    
+                    # Filter experiments by type prefix
+                    type_prefix = f"ob-cache-stress"
+                    matching_experiments = [
+                        exp for exp in experiments.get("items", [])
+                        if exp["metadata"]["name"].startswith(type_prefix)
+                    ]
+                    
+                    # Delete each matching experiment
+                    for exp in matching_experiments:
+                        exp_name = exp["metadata"]["name"]
+                        try:
+                            await asyncio.to_thread(
+                                self.custom_api.delete_namespaced_custom_object,
+                                group="chaos-mesh.org",
+                                version="v1alpha1",
+                                namespace=self.namespace,
+                                plural=plural,
+                                name=exp_name
+                            )
+                            # Remove from active anomalies tracking
+                            if exp_name in self.active_anomalies:
+                                del self.active_anomalies[exp_name]
+                            deleted_experiments.append(exp_name)
+                            logger.info(f"Deleted {anomaly_type} experiment {exp_name}")
+                        except ApiException as e:
+                            if e.status != 404:  # Ignore 404 Not Found errors
+                                logger.warning(f"Error deleting experiment {exp_name}: {str(e)}")
+                else:
+                    # Delete specific experiment
+                    try:
+                        await asyncio.to_thread(
+                            self.custom_api.delete_namespaced_custom_object,
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=plural,
+                            name=experiment_name
+                        )
+                        # Remove from active anomalies tracking
+                        if experiment_name in self.active_anomalies:
+                            del self.active_anomalies[experiment_name]
+                        deleted_experiments.append(experiment_name)
+                        logger.info(f"Deleted experiment {experiment_name}")
+                    except ApiException as e:
+                        if e.status != 404:  # Ignore 404 Not Found errors
+                            logger.warning(f"Error deleting experiment {experiment_name}: {str(e)}")
+                
+                # Invalidate cache to get fresh data
+                self.invalidate_cache()
+                self._last_cache_update = 0
+                
+                return deleted_experiments
+            
+            # Special handling for io_bottleneck 
+            elif anomaly_type == "io_bottleneck":
+                # Find and remove any io_bottleneck tracking entries
+                deleted_experiments = []
+                type_prefix = f"ob-io-bottleneck"
+                
+                # If a specific experiment name is provided, only delete that one
                 if experiment_name:
                     if experiment_name in self.active_anomalies:
                         del self.active_anomalies[experiment_name]
-                    return [experiment_name]
-                return []
+                        deleted_experiments.append(experiment_name)
+                        logger.info(f"Removed IO bottleneck experiment {experiment_name}")
+                else:
+                    # Remove all io_bottleneck experiments from tracking
+                    for name in list(self.active_anomalies.keys()):
+                        if name.startswith(type_prefix) or self.active_anomalies[name].get("type") == anomaly_type:
+                            del self.active_anomalies[name]
+                            deleted_experiments.append(name)
+                            logger.info(f"Removed IO bottleneck experiment {name}")
+                
+                # Delete any actual StressChaos resources if they exist (for backup tracking)
+                plural = self._get_experiment_plural(anomaly_type)
+                
+                try:
+                    # List all StressChaos resources
+                    experiments = await asyncio.to_thread(
+                        self.custom_api.list_namespaced_custom_object,
+                        group="chaos-mesh.org",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=plural
+                    )
+                    
+                    # Filter experiments by type prefix
+                    matching_experiments = [
+                        exp for exp in experiments.get("items", [])
+                        if exp["metadata"]["name"].startswith(type_prefix)
+                    ]
+                    
+                    # Delete each matching experiment
+                    for exp in matching_experiments:
+                        exp_name = exp["metadata"]["name"]
+                        try:
+                            await asyncio.to_thread(
+                                self.custom_api.delete_namespaced_custom_object,
+                                group="chaos-mesh.org",
+                                version="v1alpha1",
+                                namespace=self.namespace,
+                                plural=plural,
+                                name=exp_name
+                            )
+                            if exp_name not in deleted_experiments:
+                                deleted_experiments.append(exp_name)
+                                logger.info(f"Deleted StressChaos resource for IO bottleneck: {exp_name}")
+                        except ApiException as e:
+                            if e.status != 404:  # Ignore 404 Not Found errors
+                                logger.warning(f"Error deleting StressChaos resource {exp_name}: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"Error listing StressChaos resources: {str(e)}")
+                
+                # Kill any running dd processes on each pod
+                for name in deleted_experiments:
+                    # Try to extract the node name from the experiment name
+                    parts = name.split("-")
+                    if len(parts) >= 5:  # Format should be ob-io-bottleneck-timestamp-nodename...
+                        node_name = "-".join(parts[4:])
+                        try:
+                            logger.info(f"Stopping IO stress on node {node_name}")
+                            # Kill any running dd processes on the pod
+                            kubectl_cmd = f"kubectl exec -n {self.namespace} {node_name} -- pkill -f 'dd if=/dev/zero' || true"
+                            os.system(kubectl_cmd)
+                        except Exception as e:
+                            logger.warning(f"Error stopping IO stress on node {node_name}: {str(e)}")
+                
+                # Invalidate cache to get fresh data
+                self.invalidate_cache()
+                self._last_cache_update = 0
+                
+                return deleted_experiments
             
             # Special handling for too_many_indexes
             elif anomaly_type == "too_many_indexes":
@@ -520,13 +664,17 @@ class K8sService:
                 }
             },
             "io_bottleneck": {
-                "kind": "IOChaos",
+                "kind": "StressChaos",
                 "spec": {
-                    "action": "latency",
-                    "delay": severity.get("delay", "1000ms"),
-                    "path": "/home/admin/",
-                    "percent": severity.get("percent", 100),
-                    "methods": ["write", "read"],
+                    "stressors": {
+                        "exec": {
+                            "command": [
+                                "/bin/bash",
+                                "-c",
+                                severity.get("command", "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & sleep %s") % self.collection_duration
+                            ]
+                        }
+                    },
                     "duration": f"{self.collection_duration}s"
                 }
             },
@@ -693,7 +841,7 @@ class K8sService:
         if normalized_type == "cpu_stress":
             return "stresschaos"
         elif normalized_type == "io_bottleneck":
-            return "iochaos"
+            return "stresschaos"
         elif normalized_type == "network_bottleneck":
             return "networkchaos"
         elif normalized_type == "cache_bottleneck":
@@ -779,7 +927,7 @@ class K8sService:
                 await self._update_ob_parameter({
                     "memstore_limit_percentage": "20"  # Reduce from default 0
                 })
-                # Create a tracking experiment without actual chaos mesh resource
+                # Create a tracking experiment with an actual chaos mesh resource
                 experiment = {
                     "apiVersion": "chaos-mesh.org/v1alpha1",
                     "kind": "StressChaos",
@@ -792,9 +940,99 @@ class K8sService:
                         "selector": {
                             "namespaces": [self.namespace],
                             "labelSelectors": {"ref-obcluster": "obcluster"}
-                        }
+                        },
+                        "stressors": {
+                            "memory": {
+                                "workers": 1,
+                                "size": "100MB"  # Very small stress just to keep the resource alive
+                            }
+                        },
+                        "duration": f"{self.collection_duration}s"
                     }
                 }
+            
+            # Special handling for io_bottleneck
+            elif anomaly_type == "io_bottleneck":
+                # Generate a unique experiment name for tracking
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                experiment_name = f"ob-io-bottleneck-{timestamp}"
+                
+                # If no specific target nodes were provided, use a default
+                if not target_nodes:
+                    target_nodes = await self.get_available_nodes()
+                
+                # Get severity from severity variations
+                severity_index = len(self.active_anomalies) % len(self.severity_variations.get(anomaly_type, [{"default": "default"}]))
+                severity = self.severity_variations.get(anomaly_type, [{}])[severity_index]
+                
+                # Get the IO stress command
+                io_command = severity.get("command", "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & sleep %s") % self.collection_duration
+                
+                # Create a tracking experiment with a minimal StressChaos resource
+                experiment = {
+                    "apiVersion": "chaos-mesh.org/v1alpha1",
+                    "kind": "StressChaos",
+                    "metadata": {
+                        "name": experiment_name,
+                        "namespace": self.namespace
+                    },
+                    "spec": {
+                        "mode": "all",
+                        "selector": {
+                            "namespaces": [self.namespace],
+                            "labelSelectors": {"ref-obcluster": "obcluster"}
+                        },
+                        "stressors": {
+                            "memory": {
+                                "workers": 1,
+                                "size": "10MB"  # Minimal resource just for tracking
+                            }
+                        },
+                        "duration": f"{self.collection_duration}s"
+                    }
+                }
+                
+                # Create the tracking resource in Kubernetes
+                try:
+                    await asyncio.to_thread(
+                        self.custom_api.create_namespaced_custom_object,
+                        group="chaos-mesh.org",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=self._get_experiment_plural(anomaly_type),
+                        body=experiment
+                    )
+                    logger.info(f"Created tracking resource for IO bottleneck: {experiment_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to create tracking resource for IO bottleneck: {str(e)}")
+                
+                # For each target node, execute IO stress command directly on the pod 
+                for node in target_nodes:
+                    node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
+                    
+                    try:
+                        logger.info(f"Running IO stress command on node {node}")
+                        
+                        # Execute dd command directly on the pod (this runs in background)
+                        io_bg_command = f"{io_command} > /dev/null 2>&1 &"
+                        kubectl_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c '{io_bg_command}'"
+                        logger.info(f"Executing kubectl command: {kubectl_cmd}")
+                        os.system(kubectl_cmd)
+                        
+                        # Track this specific anomaly
+                        self.active_anomalies[node_experiment_name] = {
+                            "start_time": datetime.now().isoformat(),
+                            "status": "active",
+                            "type": anomaly_type,
+                            "name": node_experiment_name,
+                            "target": "obcluster",
+                            "node": node,
+                            "command": io_command
+                        }
+                        
+                        logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
+                    except Exception as e:
+                        logger.error(f"Error running IO stress on node {node}: {str(e)}")
             
             # Special handling for too_many_indexes
             elif anomaly_type == "too_many_indexes":
@@ -854,47 +1092,50 @@ class K8sService:
                 node_experiment["metadata"]["name"] = node_experiment_name
                 
                 # Update selector to target specific pod if needed
-                if anomaly_type not in ["cache_bottleneck", "too_many_indexes"]:
+                if anomaly_type not in ["too_many_indexes", "io_bottleneck"]:  # Skip for special cases
                     # Adjust selector to target the specific pod
                     if "pod-selector" not in node_experiment["spec"]["selector"]:
                         node_experiment["spec"]["selector"]["podNames"] = [node]
                 
-                # Only create chaos mesh experiment for non-special cases
-                if anomaly_type not in ["cache_bottleneck", "too_many_indexes"]:
-                    # Create experiment with retry logic
-                    max_retries = 5
-                    retry_delay = 2
+                # Only create chaos mesh experiment for non-special cases or special cases that need it
+                if anomaly_type not in ["too_many_indexes"]:
+                    if anomaly_type != "io_bottleneck" or not target_nodes:  # Only create for io_bottleneck if no target nodes
+                        # Create experiment with retry logic
+                        max_retries = 5
+                        retry_delay = 2
+                        
+                        for attempt in range(max_retries):
+                            try:
+                                await asyncio.to_thread(
+                                    self.custom_api.create_namespaced_custom_object,
+                                    group="chaos-mesh.org",
+                                    version="v1alpha1",
+                                    namespace=self.namespace,
+                                    plural=self._get_experiment_plural(anomaly_type),
+                                    body=node_experiment
+                                )
+                                break
+                            except ApiException as e:
+                                if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
+                                    logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
+                                    await asyncio.sleep(retry_delay)
+                                    retry_delay *= 2
+                                    continue
+                                raise e
+                
+                # Skip tracking for io_bottleneck since we already track it above
+                if anomaly_type != "io_bottleneck" or not target_nodes:
+                    # Track this specific anomaly
+                    self.active_anomalies[node_experiment_name] = {
+                        "start_time": datetime.now().isoformat(),
+                        "status": "active",
+                        "type": anomaly_type,
+                        "name": node_experiment_name,
+                        "target": target,
+                        "node": node
+                    }
                     
-                    for attempt in range(max_retries):
-                        try:
-                            await asyncio.to_thread(
-                                self.custom_api.create_namespaced_custom_object,
-                                group="chaos-mesh.org",
-                                version="v1alpha1",
-                                namespace=self.namespace,
-                                plural=self._get_experiment_plural(anomaly_type),
-                                body=node_experiment
-                            )
-                            break
-                        except ApiException as e:
-                            if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
-                                logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
-                                await asyncio.sleep(retry_delay)
-                                retry_delay *= 2
-                                continue
-                            raise e
-                
-                # Track this specific anomaly
-                self.active_anomalies[node_experiment_name] = {
-                    "start_time": datetime.now().isoformat(),
-                    "status": "active",
-                    "type": anomaly_type,
-                    "name": node_experiment_name,
-                    "target": target,
-                    "node": node
-                }
-                
-                logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
+                    logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
             
             # Invalidate cache
             self.invalidate_cache()

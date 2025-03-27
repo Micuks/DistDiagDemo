@@ -8,12 +8,54 @@ const AnomalyControlPanel = () => {
     const [loading, setLoading] = useState(false);
     const [tableLoading, setTableLoading] = useState(true);
     const [lastStableData, setLastStableData] = useState([]);
+    const [groupedAnomalies, setGroupedAnomalies] = useState([]);
+    
+    // Group anomalies by type
+    useEffect(() => {
+        // Group anomalies of the same type together
+        const groupAnomalies = (anomalies) => {
+            if (!anomalies || anomalies.length === 0) return [];
+            
+            const groups = {};
+            
+            anomalies.forEach(anomaly => {
+                const key = anomaly.type;
+                
+                if (!groups[key]) {
+                    // Create a new group
+                    groups[key] = {
+                        ...anomaly,
+                        nodes: [anomaly.node],
+                        names: [anomaly.name],
+                        original_entries: [anomaly]
+                    };
+                } else {
+                    // Add to existing group
+                    if (!groups[key].nodes.includes(anomaly.node)) {
+                        groups[key].nodes.push(anomaly.node);
+                    }
+                    if (!groups[key].names.includes(anomaly.name)) {
+                        groups[key].names.push(anomaly.name);
+                    }
+                    groups[key].original_entries.push(anomaly);
+                }
+            });
+            
+            return Object.values(groups);
+        };
+        
+        const grouped = groupAnomalies(activeAnomalies);
+        setGroupedAnomalies(grouped);
+    }, [activeAnomalies]);
     
     // Use stable data for table to prevent flickering
     useEffect(() => {
         // Only update the lastStableData when we have data and aren't in a loading state
         // This keeps the table populated with previous data during refreshes
-        if (activeAnomalies && activeAnomalies.length > 0) {
+        if (groupedAnomalies && groupedAnomalies.length > 0) {
+            setLastStableData(groupedAnomalies);
+        } else if (activeAnomalies && activeAnomalies.length > 0) {
+            // Fallback to ungrouped if grouping fails
             setLastStableData(activeAnomalies);
         }
         
@@ -22,7 +64,7 @@ const AnomalyControlPanel = () => {
         if (!isLoading && tableLoading) {
             setTableLoading(false);
         }
-    }, [activeAnomalies, isLoading]);
+    }, [groupedAnomalies, activeAnomalies, isLoading, tableLoading]);
 
     const anomalyOptions = [
         { id: 'cpu_stress', name: 'CPU Stress' },
@@ -43,10 +85,26 @@ const AnomalyControlPanel = () => {
             }
         },
         {
-            title: 'Target Node',
-            dataIndex: 'node',
-            key: 'node',
-            render: (node) => node || 'Default'
+            title: 'Target Node(s)',
+            dataIndex: 'nodes',
+            key: 'nodes',
+            render: (nodes) => {
+                if (Array.isArray(nodes)) {
+                    if (nodes.length === 1) {
+                        return nodes[0] || 'Default';
+                    }
+                    return (
+                        <span>
+                            {nodes[0]} (+{nodes.length - 1} more)
+                            <div style={{ fontSize: '11px', marginTop: '2px' }}>
+                                {nodes.slice(1, 4).map(node => node).join(', ')}
+                                {nodes.length > 4 ? '...' : ''}
+                            </div>
+                        </span>
+                    );
+                }
+                return nodes || 'Default';
+            }
         },
         {
             title: 'Start Time',
@@ -71,7 +129,7 @@ const AnomalyControlPanel = () => {
                 <Button 
                     type="primary" 
                     danger 
-                    onClick={() => handleAnomalyToggle(record.type)}
+                    onClick={() => handleAnomalyToggle(record.type, record.names)}
                     loading={loading}
                 >
                     Stop
@@ -86,12 +144,29 @@ const AnomalyControlPanel = () => {
         );
     };
 
-    const handleAnomalyToggle = async (anomalyId) => {
+    const handleAnomalyToggle = async (anomalyId, anomalyNames) => {
         try {
             setLoading(true);
             if (isAnomalyActive(anomalyId)) {
-                await anomalyService.stopAnomaly(anomalyId);
-                message.success(`Anomaly ${anomalyId} stopped`);
+                // If it's a grouped entry with multiple names, stop each one
+                if (Array.isArray(anomalyNames) && anomalyNames.length > 1) {
+                    message.loading(`Stopping all ${anomalyId} anomalies...`, 1);
+                    
+                    for (const name of anomalyNames) {
+                        try {
+                            await anomalyService.stopAnomaly(anomalyId, name);
+                        } catch (innerError) {
+                            console.error(`Failed to stop anomaly ${name}:`, innerError);
+                            // Continue with others even if one fails
+                        }
+                    }
+                    
+                    message.success(`All ${anomalyId} anomalies stopped`);
+                } else {
+                    // Just stop by type if no names array
+                    await anomalyService.stopAnomaly(anomalyId);
+                    message.success(`Anomaly ${anomalyId} stopped`);
+                }
             } else {
                 await anomalyService.startAnomaly(anomalyId);
                 message.success(`Anomaly ${anomalyId} started`);
@@ -162,7 +237,7 @@ const AnomalyControlPanel = () => {
     }
 
     // Determine which data to show - use lastStableData during refreshes to prevent flickering
-    const tableData = (isLoading && lastStableData.length > 0) ? lastStableData : (activeAnomalies || []);
+    const tableData = (isLoading && lastStableData.length > 0) ? lastStableData : (groupedAnomalies || []);
 
     return (
         <div>
@@ -220,7 +295,7 @@ const AnomalyControlPanel = () => {
                                     <Table
                                         columns={columns}
                                         dataSource={tableData}
-                                        rowKey="name"
+                                        rowKey="type"
                                         pagination={false}
                                         locale={{ 
                                             emptyText: 'No active anomalies' 

@@ -151,10 +151,11 @@ class AnomalyService {
         );
     }
 
-    async stopAnomaly(type) {
+    async stopAnomaly(typeOrId, experimentName = null) {
         return this._retryableRequest(() =>
             this.client.post('/api/anomaly/clear', {
-                type: type,
+                type: typeof typeOrId === 'object' ? typeOrId.type : typeOrId,
+                experiment_name: experimentName || (typeof typeOrId === 'object' ? typeOrId.name : null),
                 collect_training_data: false
             })
         );
@@ -177,7 +178,8 @@ class AnomalyService {
             for (const anomaly of activeAnomalies) {
                 try {
                     console.log(`Stopping anomaly: ${anomaly.type} (${anomaly.name})`);
-                    const result = await this.stopAnomaly(anomaly.type);
+                    // Use both type and name for more precise deletion
+                    const result = await this.stopAnomaly(anomaly.type, anomaly.name);
                     results.push({ 
                         type: anomaly.type, 
                         name: anomaly.name,
@@ -349,6 +351,17 @@ class AnomalyService {
         );
     }
 
+    async getMetricSummary(node, languages = ["Chinese", "English"]) {
+        return this._retryableRequest(() => 
+            this.client.get('/api/models/metrics_summary', {
+                params: {
+                    node: node,
+                    languages: languages
+                },
+            })
+        );
+    }
+
     async startAnomalyCollection(type, node) {
         return this._retryableRequest(() =>
             this.client.post('/api/training/collect', {
@@ -424,16 +437,6 @@ class AnomalyService {
         }
     }
 
-    async stopAnomaly(anomalyId) {
-        try {
-            const response = await this.client.post(`/api/anomaly/${anomalyId}/stop`);
-            return response.data;
-        } catch (error) {
-            console.error('Error stopping anomaly:', error);
-            throw new Error('Failed to stop anomaly: ' + (error.response?.data?.detail || error.message));
-        }
-    }
-
     async stopAllAnomalies() {
         try {
             const response = await this.client.post('/api/anomaly/stop-all');
@@ -441,16 +444,6 @@ class AnomalyService {
         } catch (error) {
             console.error('Error stopping all anomalies:', error);
             throw new Error('Failed to stop all anomalies: ' + (error.response?.data?.detail || error.message));
-        }
-    }
-
-    async getAnomalyStatus(anomalyId) {
-        try {
-            const response = await this.client.get(`/api/anomaly/${anomalyId}/status`);
-            return response.data;
-        } catch (error) {
-            console.error('Error getting anomaly status:', error);
-            throw new Error('Failed to get anomaly status: ' + (error.response?.data?.detail || error.message));
         }
     }
 
@@ -480,6 +473,11 @@ class AnomalyService {
                 key: 'too_many_indexes',
                 name: 'Too Many Indexes',
                 description: 'Create unnecessary database indexes'
+            },
+            {
+                key: 'cache_bottleneck',
+                name: 'Cache Bottleneck',
+                description: 'Reduce available memory storage for the database'
             }
         ];
     }

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { ReloadOutlined } from '@ant-design/icons';
 import {
   Card,
@@ -26,9 +26,9 @@ import {
   getCategoryColorHex, 
   getScoreStatus, 
   getCategoryDistribution, 
-  renderCustomizedLabel, 
-  getRecommendedActions 
+  renderCustomizedLabel 
 } from '../utils/rankUtils.jsx';
+import { anomalyService } from '../services/anomalyService.js';
 
 const { Text } = Typography;
 
@@ -39,6 +39,29 @@ const MetricRooterPanel = ({
   proceedToMetricRanking,
   goBackToAnomalySelection
 }) => {
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryText, setSummaryText] = useState("");
+  const [recommendedActions, setRecommendedActions] = useState([]);
+  
+  // Fetch summary separately when metrics are loaded
+  useEffect(() => {
+    if (!metricRankingLoading && metricRankings && selectedAnomaly) {
+      setSummaryLoading(true);
+      
+      anomalyService.getMetricSummary(selectedAnomaly.node)
+        .then(response => {
+          setSummaryText(response.summary || "No detailed analysis available.");
+          setRecommendedActions(response.actions || []);
+          setSummaryLoading(false);
+        })
+        .catch(error => {
+          console.error('Error fetching metric summary:', error);
+          setSummaryText("Error loading analysis. Please try again.");
+          setRecommendedActions(["No specific actions could be recommended at this time."]);
+          setSummaryLoading(false);
+        });
+    }
+  }, [metricRankingLoading, metricRankings, selectedAnomaly]);
   
   // Format the value based on the metric type
   const formatMetricValue = (metric) => {
@@ -223,11 +246,21 @@ const MetricRooterPanel = ({
                   <Card 
                     title="MetricRooter Analysis Summary" 
                     className="chart-card"
+                    extra={summaryLoading && <Spin size="small" />}
                   >
                     <div className="summary-content">
-                      <p style={{ fontSize: '14px', lineHeight: '1.8' }}>
-                        {metricRankings.summary || 'No detailed analysis available.'}
-                      </p>
+                      {summaryLoading ? (
+                        <div style={{ padding: '20px 0', textAlign: 'center' }}>
+                          <Spin />
+                          <div style={{ marginTop: '10px' }}>
+                            <Text type="secondary">Generating detailed analysis with LLM...</Text>
+                          </div>
+                        </div>
+                      ) : (
+                        <p style={{ fontSize: '14px', lineHeight: '1.8' }}>
+                          {summaryText}
+                        </p>
+                      )}
                       
                       {metricRankings.metrics && metricRankings.metrics.length > 0 && (
                         <div className="category-distribution metric-chart-container">
@@ -262,14 +295,30 @@ const MetricRooterPanel = ({
                     title="Recommended Actions" 
                     className="chart-card"
                     style={{ background: "#f0f7ff" }}
+                    extra={summaryLoading && <Spin size="small" />}
                   >
-                    <ul className="action-list" style={{ paddingLeft: '20px', marginTop: '10px' }}>
-                      {getRecommendedActions(metricRankings.metrics).map((action, index) => (
-                        <li key={index} className="action-item" style={{ marginBottom: '10px' }}>
-                          <Text>{action}</Text>
-                        </li>
-                      ))}
-                    </ul>
+                    {summaryLoading ? (
+                      <div style={{ padding: '20px 0', textAlign: 'center' }}>
+                        <Spin />
+                        <div style={{ marginTop: '10px' }}>
+                          <Text type="secondary">Generating recommendations...</Text>
+                        </div>
+                      </div>
+                    ) : (
+                      <ul className="action-list" style={{ paddingLeft: '20px', marginTop: '10px' }}>
+                        {recommendedActions.length > 0 ? (
+                          recommendedActions.map((action, index) => (
+                            <li key={index} className="action-item" style={{ marginBottom: '10px' }}>
+                              <Text>{action}</Text>
+                            </li>
+                          ))
+                        ) : (
+                          <li className="action-item" style={{ marginBottom: '10px' }}>
+                            <Text>No specific actions recommended at this time.</Text>
+                          </li>
+                        )}
+                      </ul>
+                    )}
                   </Card>
                 </Col>
               </Row>

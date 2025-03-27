@@ -153,9 +153,6 @@ const ExecutionSummary = ({
                                         {getWorkloadTypeName(workloadConfig?.type)}
                                     </Tag>
                                 </Descriptions.Item>
-                                <Descriptions.Item label="Target Node">
-                                    <Tag color="green">{workloadConfig?.node?.join(", ")}</Tag>
-                                </Descriptions.Item>
                                 <Descriptions.Item label="Threads">
                                     {workloadConfig?.threads}
                                 </Descriptions.Item>
@@ -163,14 +160,19 @@ const ExecutionSummary = ({
                                     {workloadConfig?.prepareDatabase ? "Yes" : "No"}
                                 </Descriptions.Item>
                                 {workloadConfig?.options &&
-                                    Object.entries(workloadConfig.options).map(([key, value]) => (
-                                        <Descriptions.Item
-                                            key={key}
-                                            label={key.replace(/([A-Z])/g, " $1").trim()}
-                                        >
-                                            {value}
-                                        </Descriptions.Item>
-                                    ))}
+                                    Object.entries(workloadConfig.options)
+                                        .filter(([key]) => key !== 'node')
+                                        .map(([key, value]) => (
+                                            <Descriptions.Item
+                                                key={key}
+                                                label={key.replace(/([A-Z])/g, " $1").trim()}
+                                            >
+                                                {value}
+                                            </Descriptions.Item>
+                                        ))}
+                                <Descriptions.Item label="Target Node">
+                                    <Tag color="green">{workloadConfig?.options?.node?.join(", ")}</Tag>
+                                </Descriptions.Item>
                             </Descriptions>
                         )
                     )}

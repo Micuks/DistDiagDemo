@@ -6,13 +6,14 @@ import logging
 from typing import Dict, List, Tuple, Any
 import requests
 import json
+import re
 
 logger = logging.getLogger(__name__)
 
 def generate_MetricRooter_summary(ranked_metrics, node, languages=["Chinese", "English"]):
     """Generate a summary of the MetricRooter analysis results using qwq:32b model"""
     if not ranked_metrics:
-        return "No significant metrics found for analysis."
+        return {"summary": "No significant metrics found for analysis.", "actions": ["No specific actions recommended at this time."]}
     
     try:
         # Prepare data for the model
@@ -39,14 +40,17 @@ For node {node}, the following metrics have been identified as anomalous (ranked
 
 {json.dumps(metrics_data, indent=2)}
 
-Please generate a concise summary (maximum 200 words) that:
-1. Identifies the most likely root cause metrics
-2. Explains their significance 
-3. Provides a brief, actionable recommendation for addressing the issue
+Please provide two sections:
+
+SUMMARY:
+A concise summary (maximum 200 words) that identifies the most likely root cause metrics, explains their significance, and their relationships.
+
+RECOMMENDED ACTIONS:
+A list of 3-5 specific, actionable recommendations to address the issues identified. Format as a JSON array of strings.
 
 Focus on the top-ranked metrics, especially those showing high PageRank scores and z-scores.
 
-And you need to repeat the summary in the following languages: {languages}.
+Provide your response in the following languages: {languages}.
 """
 
         # Call Ollama API
@@ -68,31 +72,88 @@ And you need to repeat the summary in the following languages: {languages}.
         # Check if request was successful
         if response.status_code == 200:
             result = response.json()
-            generated_summary = result.get("response", "")
+            generated_text = result.get("response", "")
             
             # Trim any unnecessary text markers
-            generated_summary = generated_summary.replace("```", "").strip()
+            generated_text = generated_text.replace("```", "").strip()
             
-            # Add fallback if summary is too short
-            if len(generated_summary) < 20:
-                logger.warning(f"Generated summary too short, using fallback: {generated_summary}")
-                return generate_fallback_summary(ranked_metrics, node)
-                
-            logger.info(f"Generated summary using qwq:32b model for node {node}")
-            return generated_summary
+            # Try to extract summary and actions from the generated text
+            result = parse_llm_response(generated_text)
+            
+            logger.info(f"Generated summary and actions using qwq:32b model for node {node}")
+            return result
             
         else:
             logger.error(f"Error calling Ollama API: {response.status_code} - {response.text}")
             # Fallback to original summary generation
-            return generate_fallback_summary(ranked_metrics, node)
+            fallback_result = generate_fallback_summary_and_actions(ranked_metrics, node)
+            return fallback_result
             
     except Exception as e:
         logger.error(f"Error generating summary with model: {str(e)}")
         # Fallback to original summary generation
-        return generate_fallback_summary(ranked_metrics, node)
+        fallback_result = generate_fallback_summary_and_actions(ranked_metrics, node)
+        return fallback_result
 
-def generate_fallback_summary(ranked_metrics, node):
-    """Fallback summary generation when model is unavailable"""
+def parse_llm_response(text):
+    """Parse the LLM response to extract summary and actions"""
+    try:
+        # Initialize with default values
+        summary = text
+        actions = []
+        
+        # Try to find SUMMARY and RECOMMENDED ACTIONS sections
+        summary_match = re.search(r"SUMMARY:?\s*(.*?)(?:RECOMMENDED ACTIONS|$)", text, re.DOTALL)
+        actions_match = re.search(r"RECOMMENDED ACTIONS:?\s*(.*?)(?:$)", text, re.DOTALL)
+        
+        if summary_match:
+            summary = summary_match.group(1).strip()
+        
+        if actions_match:
+            # Try to parse JSON array if present
+            actions_text = actions_match.group(1).strip()
+            try:
+                # Check if it's already in JSON format
+                if actions_text.startswith('[') and actions_text.endswith(']'):
+                    actions = json.loads(actions_text)
+                else:
+                    # Otherwise, split by newlines and filter out empty lines
+                    action_items = [line.strip() for line in actions_text.split('\n') 
+                                  if line.strip() and not line.strip().startswith('SUMMARY')]
+                    
+                    # Clean up bullet points and numbering
+                    actions = [re.sub(r'^[\d\.\-\*]+\s*', '', item).strip() for item in action_items]
+                    actions = [item for item in actions if item]  # Filter empty items
+            except:
+                # If parsing fails, try to extract bullet points or numbered items
+                actions = re.findall(r'[\d\.\-\*]+\s*(.*?)(?:\n|$)', actions_text)
+                if not actions:
+                    # Just split by newlines if no structure is detected
+                    actions = [line.strip() for line in actions_text.split('\n') if line.strip()]
+        
+        # If no actions were found, extract from full text for fallback
+        if not actions:
+            # Look for bullet points or numbered items in the entire text
+            actions = re.findall(r'[\d\.\-\*]+\s*(.*?)(?:\n|$)', text)
+            
+            # If still empty, create a generic recommendation
+            if not actions:
+                actions = ["Investigate the anomalous metrics identified in the summary."]
+        
+        return {
+            "summary": summary,
+            "actions": actions
+        }
+        
+    except Exception as e:
+        logger.error(f"Error parsing LLM response: {str(e)}")
+        return {
+            "summary": text,
+            "actions": ["Investigate the anomalous metrics identified in the summary."]
+        }
+
+def generate_fallback_summary_and_actions(ranked_metrics, node):
+    """Fallback summary and actions generation when model is unavailable"""
     # Get top 3 metrics for the summary
     top_metrics = ranked_metrics[:3]
     
@@ -127,25 +188,35 @@ def generate_fallback_summary(ranked_metrics, node):
     else:
         summary += "none found with significant deviation"
     
-    # Add general recommendation based on top metric category
-    if ranked_metrics:
-        top_category = ranked_metrics[0]["category"]
-        recommendation = ""
-        
-        if top_category == "cpu":
-            recommendation = " Consider investigating CPU usage patterns and resource allocation."
-        elif top_category == "memory":
-            recommendation = " Consider examining memory allocation and potential leaks."
-        elif top_category == "io":
-            recommendation = " Consider analyzing I/O patterns and storage performance."
-        elif top_category == "network":
-            recommendation = " Consider checking network configurations and traffic patterns."
-        elif top_category == "transaction":
-            recommendation = " Consider analyzing transaction patterns and performance."
-        
-        summary += "." + recommendation
+    # Generate actions based on metric categories
+    actions = []
+    # Group by category
+    categories = set(metric.get('category', 'unknown') for metric in ranked_metrics[:5])
     
-    return summary
+    for category in categories:
+        if category == "cpu":
+            actions.append(f"Investigate CPU usage patterns on node {node} and consider resource allocation.")
+        elif category == "memory":
+            actions.append(f"Examine memory allocation patterns on node {node} and look for potential memory leaks.")
+        elif category == "io":
+            actions.append(f"Analyze I/O patterns on node {node} and check for storage performance issues.")
+        elif category == "network":
+            actions.append(f"Check network configurations on node {node} and monitor traffic patterns.")
+        elif category == "transaction":
+            actions.append(f"Review transaction processing on node {node} and analyze request handling performance.")
+    
+    # Add a general recommendation
+    if len(categories) > 1:
+        actions.append(f"Since multiple categories ({', '.join(categories)}) are affected, perform a holistic system review of node {node}.")
+    
+    # Ensure we have at least one action
+    if not actions:
+        actions.append(f"Monitor the anomalous metrics on node {node} and investigate their behavior.")
+    
+    return {
+        "summary": summary,
+        "actions": actions
+    }
 
 def create_wudg_from_metrics(metrics: Dict[str, Dict], anomaly_threshold: float = 1.5) -> Tuple[nx.Graph, List[Dict]]:
     """
@@ -343,9 +414,6 @@ def analyze_node_metrics(metrics: Dict[str, Dict], node: str) -> Dict:
         # Rank metrics using weighted PageRank
         ranked_metrics = rank_metrics_with_weighted_pagerank(wudg, anomalous_metrics)
         
-        # Generate summary
-        summary = generate_MetricRooter_summary(ranked_metrics, node)
-        
         # Build graph representation for visualization
         graph_data = {
             "nodes": [],
@@ -381,7 +449,8 @@ def analyze_node_metrics(metrics: Dict[str, Dict], node: str) -> Dict:
         
         return {
             "metrics": ranked_metrics,
-            "summary": summary,
+            "summary": "",  # Empty summary initially
+            "summary_pending": True,  # Indicate summary needs to be generated
             "node": node,
             "graph": graph_data,
             "anomaly_count": len(anomalous_metrics),
@@ -393,7 +462,29 @@ def analyze_node_metrics(metrics: Dict[str, Dict], node: str) -> Dict:
         return {
             "metrics": [],
             "summary": f"Error in analysis: {str(e)}",
+            "summary_pending": False,
             "node": node,
             "graph": {"nodes": [], "links": []},
             "error": str(e)
+        }
+
+def get_metric_summary(ranked_metrics: List[Dict], node: str, languages=["Chinese", "English"]) -> Dict:
+    """
+    Get summary and actions for metrics analysis separately from the main analysis
+    
+    Args:
+        ranked_metrics: List of ranked metrics from analyze_node_metrics
+        node: Node name being analyzed
+        languages: Languages to generate summary in
+        
+    Returns:
+        Dictionary with generated summary and actions
+    """
+    try:
+        return generate_MetricRooter_summary(ranked_metrics, node, languages)
+    except Exception as e:
+        logger.error(f"Error generating metrics summary: {str(e)}")
+        return {
+            "summary": f"Error generating summary: {str(e)}",
+            "actions": ["Investigate the node for potential issues based on anomalous metrics."]
         }

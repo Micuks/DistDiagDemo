@@ -194,5 +194,15 @@ export const workloadService = {
       console.error('Error fetching task:', error);
       throw error;
     }
+  },
+
+  async stopTask(taskId) {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/api/workload/tasks/${taskId}/stop`);
+      return response.data;
+    } catch (error) {
+      console.error('Error stopping task:', error);
+      throw new Error('Failed to stop task: ' + (error.response?.data?.detail || error.message));
+    }
   }
 }; 

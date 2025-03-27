@@ -49,9 +49,8 @@ const Navigation = () => {
     // Determine current step based on path
     const pathToStepMap = {
       "/control": 0,
-      "/training": 1,
-      "/metrics": 2,
-      "/ranks": 3,
+      "/metrics": 1,
+      "/ranks": 2,
     };
 
     if (pathToStepMap[location.pathname] >= 0) {
@@ -102,12 +101,6 @@ const Navigation = () => {
       icon: <ControlOutlined />,
     },
     {
-      title: "Train",
-      description: "Collect data & train models",
-      path: "/training",
-      icon: <ApiOutlined />,
-    },
-    {
       title: "Monitor",
       description: "View system metrics",
       path: "/metrics",
@@ -137,19 +130,17 @@ const Navigation = () => {
       key: "/training",
       icon: <ApiOutlined style={{ color: "#fff" }} />,
       label: (
-        <Badge dot={currentStep === 1} offset={[5, 0]}>
-          <Tooltip title="Step 2: Collect data and train models">
-            <span style={{ color: "#fff" }}>Model Training</span>
-          </Tooltip>
-        </Badge>
+        <Tooltip title="Train models (optional)">
+          <span style={{ color: "#fff" }}>Model Training</span>
+        </Tooltip>
       ),
     },
     {
       key: "/metrics",
       icon: <LineChartOutlined style={{ color: "#fff" }} />,
       label: (
-        <Badge dot={currentStep === 2} offset={[5, 0]}>
-          <Tooltip title="Step 3: View database system metrics">
+        <Badge dot={currentStep === 1} offset={[5, 0]}>
+          <Tooltip title="Step 2: View database system metrics">
             <span style={{ color: "#fff" }}>System Metrics</span>
           </Tooltip>
         </Badge>
@@ -159,8 +150,8 @@ const Navigation = () => {
       key: "/ranks",
       icon: <ExperimentOutlined style={{ color: "#fff" }} />,
       label: (
-        <Badge dot={currentStep === 3} offset={[5, 0]}>
-          <Tooltip title="Step 4: View root cause analysis">
+        <Badge dot={currentStep === 2} offset={[5, 0]}>
+          <Tooltip title="Step 3: View root cause analysis">
             <span style={{ color: "#fff" }}>Anomaly Ranks</span>
           </Tooltip>
         </Badge>
@@ -198,11 +189,9 @@ const Navigation = () => {
   const getNextStepTips = () => {
     switch (currentStep) {
       case 0:
-        return "Step 2: Collect data and train models";
+        return "Step 2: View database system metrics";
       case 1:
-        return "Step 3: View database system metrics";
-      case 2:
-        return "Step 4: View root cause analysis";
+        return "Step 3: View root cause analysis";
       default:
         return "Next step in workflow";
     }
@@ -275,10 +264,6 @@ const Navigation = () => {
             <li>
               <strong>Control Panel:</strong> Configure your workload and
               anomaly scenarios
-            </li>
-            <li>
-              <strong>Model Training:</strong> Collect training data and train
-              anomaly detection models
             </li>
             <li>
               <strong>System Metrics:</strong> View real-time system metrics to

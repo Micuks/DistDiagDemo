@@ -12,6 +12,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
   const [activeWorkloads, setActiveWorkloads] = useState([]);
   const [workloadLoading, setWorkloadLoading] = useState(true);
   const [workloadStopLoading, setWorkloadStopLoading] = useState(false);
+  const [groupedWorkloads, setGroupedWorkloads] = useState([]);
   const { data: activeAnomalies = [], isLoading: anomalyLoading, refetch: refetchAnomalies } = useAnomalyData();
   const [anomalyStopLoading, setAnomalyStopLoading] = useState(false);
   const [refreshInterval, setRefreshInterval] = useState(null);
@@ -20,6 +21,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  const [groupedAnomalies, setGroupedAnomalies] = useState([]);
 
   // Set flag for execution dashboard in localStorage
   useEffect(() => {
@@ -36,6 +38,98 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       window.dispatchEvent(new Event('storage'));
     };
   }, []);
+
+  // Group anomalies by type and similar creation time
+  useEffect(() => {
+    // Group anomalies that are similar (same type, created within 30 seconds of each other)
+    const groupAnomalies = (anomalies) => {
+      if (!anomalies || anomalies.length === 0) return [];
+      
+      // Sort by time to ensure consistent grouping
+      const sorted = [...anomalies].sort((a, b) => {
+        const timeA = new Date(a.start_time).getTime();
+        const timeB = new Date(b.start_time).getTime();
+        return timeA - timeB;
+      });
+      
+      const groups = {};
+      
+      sorted.forEach(anomaly => {
+        const anomalyType = anomaly.type;
+        const timeStamp = new Date(anomaly.start_time).getTime();
+        
+        // Create a key based on anomaly type
+        const key = anomalyType;
+        
+        if (!groups[key]) {
+          // Create a new group
+          groups[key] = {
+            ...anomaly,
+            nodes: [anomaly.node], // Array of nodes
+            names: [anomaly.name], // Array of names (useful for stopping individual ones)
+            original_entries: [anomaly] // Keep original entries for reference
+          };
+        } else {
+          // Add to existing group
+          if (!groups[key].nodes.includes(anomaly.node)) {
+            groups[key].nodes.push(anomaly.node);
+          }
+          if (!groups[key].names.includes(anomaly.name)) {
+            groups[key].names.push(anomaly.name);
+          }
+          groups[key].original_entries.push(anomaly);
+        }
+      });
+      
+      return Object.values(groups);
+    };
+    
+    const grouped = groupAnomalies(activeAnomalies);
+    setGroupedAnomalies(grouped);
+  }, [activeAnomalies]);
+
+  // Group workloads by type and similar start time
+  useEffect(() => {
+    const groupWorkloads = (workloads) => {
+      if (!workloads || workloads.length === 0) return [];
+      
+      const groups = {};
+      
+      workloads.forEach(workload => {
+        // Create a key based on workload type and threads
+        const key = `${workload.type}_${workload.threads}`;
+        
+        if (!groups[key]) {
+          // Create a new group
+          groups[key] = {
+            ...workload,
+            ids: [workload.id],
+            pids: [workload.pid],
+            nodes: [workload.node || workload.id.split('_')[2]], // Extract node from ID if not explicitly provided
+            original_entries: [workload]
+          };
+        } else {
+          // Add to existing group
+          const nodeValue = workload.node || workload.id.split('_')[2]; // Extract node from ID if not explicitly provided
+          if (!groups[key].nodes.includes(nodeValue)) {
+            groups[key].nodes.push(nodeValue);
+          }
+          if (!groups[key].ids.includes(workload.id)) {
+            groups[key].ids.push(workload.id);
+          }
+          if (!groups[key].pids.includes(workload.pid)) {
+            groups[key].pids.push(workload.pid);
+          }
+          groups[key].original_entries.push(workload);
+        }
+      });
+      
+      return Object.values(groups);
+    };
+    
+    const grouped = groupWorkloads(activeWorkloads);
+    setGroupedWorkloads(grouped);
+  }, [activeWorkloads]);
 
   // Define columns for tasks table
   const taskColumns = [
@@ -104,7 +198,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
         <Button
           type="primary"
           danger
-          onClick={() => handleStopWorkload(record.workload_id)}
+          onClick={() => handleStopTask(record.id)}
           disabled={record.status !== 'running'}
         >
           Stop
@@ -115,11 +209,6 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
 
   // Define columns for workloads table
   const workloadColumns = [
-    {
-      title: 'Workload ID',
-      dataIndex: 'id',
-      key: 'id',
-    },
     {
       title: 'Type',
       dataIndex: 'type',
@@ -136,9 +225,48 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       key: 'threads',
     },
     {
-      title: 'PID',
-      dataIndex: 'pid',
-      key: 'pid',
+      title: 'PIDs',
+      dataIndex: 'pids',
+      key: 'pids',
+      render: (pids) => {
+        if (Array.isArray(pids)) {
+          if (pids.length === 1) {
+            return pids[0];
+          }
+          return (
+            <span>
+              {pids[0]} (+{pids.length - 1} more)
+              <div style={{ fontSize: '11px', marginTop: '2px' }}>
+                {pids.slice(1, 4).join(', ')}
+                {pids.length > 4 ? '...' : ''}
+              </div>
+            </span>
+          );
+        }
+        return pids;
+      }
+    },
+    {
+      title: 'Nodes',
+      dataIndex: 'nodes',
+      key: 'nodes',
+      render: (nodes) => {
+        if (Array.isArray(nodes)) {
+          if (nodes.length === 1) {
+            return nodes[0];
+          }
+          return (
+            <span>
+              {nodes[0]} (+{nodes.length - 1} more)
+              <div style={{ fontSize: '11px', marginTop: '2px' }}>
+                {nodes.slice(1, 4).join(', ')}
+                {nodes.length > 4 ? '...' : ''}
+              </div>
+            </span>
+          );
+        }
+        return nodes;
+      }
     },
     {
       title: "Start Time",
@@ -163,7 +291,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
         <Button
           type="primary"
           danger
-          onClick={() => handleStopWorkload(record.id)}
+          onClick={() => handleStopWorkload(record.ids)}
           disabled={record.status !== 'running'}
         >
           Stop
@@ -218,6 +346,13 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       dataIndex: 'name',
       key: 'name',
       ellipsis: true,
+      render: (_, record) => {
+        // If there are multiple names, show the first one with a count
+        if (record.names && record.names.length > 1) {
+          return <span>{record.name} (+{record.names.length - 1} more)</span>;
+        }
+        return record.name;
+      }
     },
     {
       title: 'Target',
@@ -227,9 +362,25 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     },
     {
       title: 'Node',
-      dataIndex: 'node',
-      key: 'node',
-      render: renderNode
+      dataIndex: 'nodes',
+      key: 'nodes',
+      render: (nodes) => {
+        if (Array.isArray(nodes)) {
+          if (nodes.length === 1) {
+            return renderNode(nodes[0]);
+          }
+          return (
+            <span>
+              {renderNode(nodes[0])} (+{nodes.length - 1} more)
+              <div style={{ fontSize: '11px', marginTop: '2px' }}>
+                {nodes.slice(1, 4).map(node => node).join(', ')}
+                {nodes.length > 4 ? '...' : ''}
+              </div>
+            </span>
+          );
+        }
+        return renderNode(nodes);
+      }
     },
     {
       title: 'Start Time',
@@ -259,7 +410,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
         <Button
           type="primary"
           danger
-          onClick={() => handleStopAnomaly(record.type)}
+          onClick={() => handleStopAnomaly(record.type, record.name)}
           loading={anomalyStopLoading === record.type}
         >
           Stop
@@ -337,12 +488,67 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     };
   }, []);
 
-  const handleStopWorkload = async (workloadId) => {
+  const handleStopTask = async (taskId) => {
     try {
-      setWorkloadStopLoading(workloadId);
-      await workloadService.stopWorkload(workloadId);
+      setWorkloadStopLoading(taskId);
+      await workloadService.stopTask(taskId);
+      message.success('Task stopped successfully');
       
-      message.success('Workload stopped successfully');
+      // Refresh data
+      setIsRefreshing(true);
+      await Promise.all([fetchTasks(), fetchActiveWorkloads()]);
+      setIsRefreshing(false);
+    } catch (error) {
+      console.error('Failed to stop task:', error);
+      message.error(`Failed to stop task: ${error.message}`);
+    } finally {
+      setWorkloadStopLoading(false);
+    }
+  };
+
+  const handleStopWorkload = async (workloadIds) => {
+    try {
+      setWorkloadStopLoading(Array.isArray(workloadIds) ? workloadIds[0] : workloadIds);
+      
+      if (Array.isArray(workloadIds)) {
+        message.loading(`Stopping workloads...`, 1);
+        
+        // Find the matching grouped workload to get original entries
+        const matchingGroup = groupedWorkloads.find(
+          group => group.ids && group.ids.some(id => workloadIds.includes(id))
+        );
+        
+        if (matchingGroup && matchingGroup.original_entries) {
+          // Stop each workload using its original ID
+          for (const workload of matchingGroup.original_entries) {
+            try {
+              // Use the original ID for stopping
+              await workloadService.stopWorkload(workload.id);
+            } catch (innerError) {
+              console.error(`Failed to stop workload ${workload.id}:`, innerError);
+            }
+          }
+        } else {
+          // Fallback to using the IDs directly
+          for (const id of workloadIds) {
+            try {
+              await workloadService.stopWorkload(id);
+            } catch (innerError) {
+              console.error(`Failed to stop workload ${id}:`, innerError);
+            }
+          }
+        }
+        
+        message.success('Workloads stopped successfully');
+      } else {
+        try {
+          await workloadService.stopWorkload(workloadIds);
+          message.success('Workload stopped successfully');
+        } catch (error) {
+          // If workload not found (likely already stopped), try to refresh tasks anyway
+          console.warn(`Workload ${workloadIds} not found, refreshing tasks to update status`);
+        }
+      }
       
       // Refresh data
       setIsRefreshing(true);
@@ -356,11 +562,40 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     }
   };
 
-  const handleStopAnomaly = async (anomalyType) => {
+  const handleStopAnomaly = async (anomalyType, anomalyName) => {
     try {
       setAnomalyStopLoading(anomalyType);
-      await anomalyService.stopAnomaly(anomalyType);
-      message.success(`Anomaly ${anomalyType} stopped`);
+      
+      // Check if this is a grouped anomaly record with multiple names
+      const matchingGroupEntry = groupedAnomalies.find(
+        g => g.type === anomalyType && (g.name === anomalyName || g.names?.includes(anomalyName))
+      );
+      
+      if (matchingGroupEntry && matchingGroupEntry.names && matchingGroupEntry.names.length > 1) {
+        // If it's a grouped entry, stop all experiments in the group
+        message.loading(`Stopping all ${anomalyType} anomalies...`, 1);
+        
+        // Stop each experiment individually
+        for (const name of matchingGroupEntry.names) {
+          try {
+            await anomalyService.stopAnomaly(anomalyType, name);
+          } catch (innerError) {
+            console.error(`Failed to stop anomaly ${name}:`, innerError);
+            // Continue with others even if one fails
+          }
+        }
+        
+        message.success(`All ${anomalyType} anomalies stopped`);
+      } else {
+        // If it's a single entry, just stop that one
+        await anomalyService.stopAnomaly(anomalyType, anomalyName);
+        
+        if (anomalyName) {
+          message.success(`Anomaly ${anomalyName} stopped`);
+        } else {
+          message.success(`Anomaly ${anomalyType} stopped`);
+        }
+      }
       
       // Wait a short timeout before refreshing to allow backend to process
       setTimeout(() => {
@@ -564,8 +799,8 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
             >
               <Table 
                 columns={workloadColumns} 
-                dataSource={activeWorkloads} 
-                rowKey={(record) => record.id || Math.random().toString(36).substring(2, 9)}
+                dataSource={groupedWorkloads} 
+                rowKey={(record) => record.ids ? record.ids.join('-') : Math.random().toString(36).substring(2, 9)}
                 pagination={false}
                 locale={{ 
                   emptyText: error ? 'Error loading workloads: ' + error : 'No active workloads' 
@@ -598,7 +833,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
             >
               <Table 
                 columns={anomalyColumns} 
-                dataSource={activeAnomalies} 
+                dataSource={groupedAnomalies} 
                 rowKey={(record) => record.name || record.type || Math.random().toString(36).substring(2, 9)}
                 pagination={false}
                 locale={{ 
