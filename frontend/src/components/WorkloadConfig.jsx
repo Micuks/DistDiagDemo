@@ -8,20 +8,6 @@ const { Option } = Select;
 const WorkloadConfig = ({ onConfigChange, initialConfig }) => {
     const [form] = Form.useForm();
     const [workloadType, setWorkloadType] = useState(initialConfig?.type);
-    const [availableNodes, setAvailableNodes] = useState([]);
-
-    useEffect(() => {
-        // Load available nodes
-        const loadNodes = async () => {
-            try {
-                const nodes = await workloadService.getAvailableNodes();
-                setAvailableNodes(nodes);
-            } catch (error) {
-                console.error('Failed to load nodes:', error);
-            }
-        };
-        loadNodes();
-    }, []);
 
     useEffect(() => {
         if (initialConfig) {
@@ -41,32 +27,16 @@ const WorkloadConfig = ({ onConfigChange, initialConfig }) => {
             case 'sysbench':
                 return (
                     <>
-                        <Form.Item
-                            label="Table Size"
-                            name={['options', 'tableSize']}
-                            initialValue={100000}
-                        >
+                        <Form.Item label="Table Size" name={['options', 'tableSize']} initialValue={100000}>
                             <InputNumber min={1000} max={1000000} />
                         </Form.Item>
-                        <Form.Item
-                            label="Number of Tables"
-                            name={['options', 'tables']}
-                            initialValue={10}
-                        >
+                        <Form.Item label="Number of Tables" name={['options', 'tables']} initialValue={10}>
                             <InputNumber min={1} max={100} />
                         </Form.Item>
-                        <Form.Item
-                            label="Report Interval (seconds)"
-                            name={['options', 'reportInterval']}
-                            initialValue={10}
-                        >
+                        <Form.Item label="Report Interval (seconds)" name={['options', 'reportInterval']} initialValue={10}>
                             <InputNumber min={1} max={3600} />
                         </Form.Item>
-                        <Form.Item
-                            label="Random Type"
-                            name={['options', 'randType']}
-                            initialValue="uniform"
-                        >
+                        <Form.Item label="Random Type" name={['options', 'randType']} initialValue="uniform">
                             <Select>
                                 <Option value="uniform">Uniform</Option>
                                 <Option value="gaussian">Gaussian</Option>
@@ -79,32 +49,16 @@ const WorkloadConfig = ({ onConfigChange, initialConfig }) => {
             case 'tpcc':
                 return (
                     <>
-                        <Form.Item
-                            label="Number of Warehouses"
-                            name={['options', 'warehouses']}
-                            initialValue={10}
-                        >
+                        <Form.Item label="Number of Warehouses" name={['options', 'warehouses']} initialValue={10}>
                             <InputNumber min={1} max={100} />
                         </Form.Item>
-                        <Form.Item
-                            label="Warmup Time (seconds)"
-                            name={['options', 'warmupTime']}
-                            initialValue={10}
-                        >
+                        <Form.Item label="Warmup Time (seconds)" name={['options', 'warmupTime']} initialValue={10}>
                             <InputNumber min={0} max={3600} />
                         </Form.Item>
-                        <Form.Item
-                            label="Running Time (minutes)"
-                            name={['options', 'runningTime']}
-                            initialValue={60}
-                        >
+                        <Form.Item label="Running Time (minutes)" name={['options', 'runningTime']} initialValue={60}>
                             <InputNumber min={1} max={1440} />
                         </Form.Item>
-                        <Form.Item
-                            label="Report Interval (seconds)"
-                            name={['options', 'reportInterval']}
-                            initialValue={10}
-                        >
+                        <Form.Item label="Report Interval (seconds)" name={['options', 'reportInterval']} initialValue={10}>
                             <InputNumber min={1} max={3600} />
                         </Form.Item>
                     </>
@@ -122,8 +76,7 @@ const WorkloadConfig = ({ onConfigChange, initialConfig }) => {
             initialValues={{
                 type: workloadType,
                 threads: 4,
-                prepareDatabase: false,
-                options: {}
+                options: {},
             }}
         >
             <Space direction="vertical" style={{ width: '100%' }} size="large">
@@ -136,7 +89,7 @@ const WorkloadConfig = ({ onConfigChange, initialConfig }) => {
                     >
                         <Select>
                             <Option value="sysbench">Sysbench OLTP</Option>
-                            <Option value="tpcc">TPC-C</Option>
+                            <Option value="tpcc">TPC - C</Option>
                             {/* <Option value="tpch">TPC-H</Option> */}
                         </Select>
                     </Form.Item>
@@ -147,27 +100,6 @@ const WorkloadConfig = ({ onConfigChange, initialConfig }) => {
                         rules={[{ required: true, message: 'Please specify number of threads' }]}
                     >
                         <InputNumber min={1} max={64} />
-                    </Form.Item>
-
-                    <Form.Item
-                        label="Target Node(s)"
-                        name={['options', 'node']}
-                        rules={[{ required: true, message: 'Please select at least one target node' }]}
-                    >
-                        <Select mode="multiple" placeholder="Select one or more nodes">
-                            {availableNodes.map(node => (
-                                <Option key={node} value={node}>{node}</Option>
-                            ))}
-                        </Select>
-                    </Form.Item>
-
-                    <Form.Item
-                        label="Prepare Database"
-                        help="* Database only need to be prepared once"
-                        name="prepareDatabase"
-                        valuePropName="checked"
-                    >
-                        <Switch />
                     </Form.Item>
                 </Card>
 

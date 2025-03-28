@@ -1,12 +1,138 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select, Tabs } from 'antd';
-import { DatabaseOutlined, ApiOutlined, ExperimentOutlined, LineChartOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select, Tabs, Timeline, Typography } from 'antd';
+import { DatabaseOutlined, ApiOutlined, ExperimentOutlined, LineChartOutlined, InfoCircleOutlined, SyncOutlined, RiseOutlined, FallOutlined } from '@ant-design/icons';
 import { trainingService } from '../services/trainingService';
 import { useAnomalyData } from '../hooks/useAnomalyData';
 import ModelPerformanceView from './ModelPerformanceView';
 import ModelTrainingProgress from './ModelTrainingProgress';
 
 const { TabPane } = Tabs;
+
+const ModelAdaptationInfo = ({ activeAnomalies, trainingStats, isAutoMonitoring }) => {
+  // TODO: Drop the feature
+  const [adaptationHistory, setAdaptationHistory] = useState([
+    { time: new Date().toISOString(), event: 'System initialized', type: 'info' }
+  ]);
+
+  // Add adaptation events to history
+  useEffect(() => {
+    const now = new Date().toISOString();
+    
+    // When auto-monitoring is toggled
+    if (isAutoMonitoring) {
+      setAdaptationHistory(prev => [
+        { time: now, event: 'Automatic adaptation enabled', type: 'success' },
+        ...prev
+      ]);
+    }
+    
+    // When anomalies are detected
+    if (activeAnomalies?.length > 0) {
+      const anomalyType = activeAnomalies[0].type;
+      
+      // Check if this anomaly was already logged recently (avoid duplicates)
+      const recentEntries = adaptationHistory.slice(0, 3);
+      const isDuplicate = recentEntries.some(entry => 
+        entry.event.includes(anomalyType) && entry.type === 'warning'
+      );
+      
+      if (!isDuplicate) {
+        setAdaptationHistory(prev => [
+          { time: now, event: `New anomaly pattern detected: ${anomalyType}`, type: 'warning' },
+          ...prev
+        ]);
+      }
+    }
+  }, [isAutoMonitoring, activeAnomalies]);
+  
+  // Add training stats changes to history
+  useEffect(() => {
+    if (!trainingStats) return;
+    
+    const now = new Date().toISOString();
+    
+    // Check for significant changes in class balance
+    if (trainingStats.is_balanced && adaptationHistory[0]?.event !== 'Dataset balanced successfully') {
+      setAdaptationHistory(prev => [
+        { time: now, event: 'Dataset balanced successfully', type: 'success' },
+        ...prev
+      ]);
+    }
+    
+    // Add new anomaly types when detected
+    if (trainingStats.anomaly_types) {
+      const anomalyTypes = Object.keys(trainingStats.anomaly_types);
+      
+      // Get previously seen types from recent history
+      const recentEvents = adaptationHistory.slice(0, 10);
+      const recentTypes = new Set();
+      recentEvents.forEach(event => {
+        const match = event.event.match(/New anomaly type collected: (\w+)/);
+        if (match) recentTypes.add(match[1]);
+      });
+      
+      // Add new types that weren't seen recently
+      anomalyTypes.forEach(type => {
+        if (!recentTypes.has(type) && trainingStats.anomaly_types[type] > 0) {
+          setAdaptationHistory(prev => [
+            { time: now, event: `New anomaly type collected: ${type}`, type: 'info' },
+            ...prev
+          ]);
+        }
+      });
+    }
+  }, [trainingStats]);
+  
+  // Limit history length
+  useEffect(() => {
+    if (adaptationHistory.length > 20) {
+      setAdaptationHistory(prev => prev.slice(0, 20));
+    }
+  }, [adaptationHistory]);
+  
+  return (
+    <></>
+  )
+  // return (
+  //   <Card title={
+  //     <span>
+  //       <SyncOutlined spin={isAutoMonitoring} style={{ marginRight: 8 }} />
+  //       Model Adaptation Status
+  //     </span>
+  //   }>
+  //     <Space direction="vertical" style={{ width: '100%' }}>
+  //       <Alert
+  //         message="Continuous Learning System"
+  //         description={
+  //           <>
+  //             <Typography.Paragraph>
+  //               The system {isAutoMonitoring ? 'is actively monitoring' : 'can monitor'} for data drift and class imbalances, 
+  //               automatically collecting samples to maintain model accuracy.
+  //             </Typography.Paragraph>
+  //             <Typography.Paragraph>
+  //               <strong>Feature drift adaptation:</strong> Exponential smoothing (α=0.2) preserves critical feature distributions
+  //               while adapting to emerging patterns.
+  //             </Typography.Paragraph>
+  //           </>
+  //         }
+  //         type="info"
+  //         showIcon
+  //       />
+        
+  //       <Divider>Adaptation Timeline</Divider>
+        
+  //       <Timeline
+  //         mode="left"
+  //         items={adaptationHistory.map(item => ({
+  //           label: new Date(item.time).toLocaleTimeString(),
+  //           color: item.type === 'success' ? 'green' : item.type === 'warning' ? 'orange' : 'blue',
+  //           children: item.event
+  //         }))}
+  //       />
+  //     </Space>
+  //   </Card>
+  // );
+};
 
 const ModelTrainingPanel = () => {
   const [loading, setLoading] = useState(false);
@@ -16,6 +142,7 @@ const ModelTrainingPanel = () => {
   });
   const [trainingStats, setTrainingStats] = useState(null);
   const [isAutoBalancing, setIsAutoBalancing] = useState(false);
+  const [isAutoMonitoring, setIsAutoMonitoring] = useState(false);
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(null);
   const { data: activeAnomalies = [] } = useAnomalyData();
@@ -28,6 +155,7 @@ const ModelTrainingPanel = () => {
   const fetchStatusIntervalRef = useRef(null);
   const fetchStatsIntervalRef = useRef(null);
   const fetchTrainingStatusIntervalRef = useRef(null);
+  const autoMonitoringIntervalRef = useRef(null);
 
   useEffect(() => {
     fetchModels();
@@ -36,6 +164,7 @@ const ModelTrainingPanel = () => {
       if (fetchStatusIntervalRef.current) clearInterval(fetchStatusIntervalRef.current);
       if (fetchStatsIntervalRef.current) clearInterval(fetchStatsIntervalRef.current);
       if (fetchTrainingStatusIntervalRef.current) clearInterval(fetchTrainingStatusIntervalRef.current);
+      if (autoMonitoringIntervalRef.current) clearInterval(autoMonitoringIntervalRef.current);
     };
   }, []);
 
@@ -113,6 +242,55 @@ const ModelTrainingPanel = () => {
       if (fetchTrainingStatusIntervalRef.current) clearInterval(fetchTrainingStatusIntervalRef.current);
     };
   },[]);
+
+  useEffect(() => {
+    if (isAutoMonitoring) {
+      const checkAndBalanceDataset = async () => {
+        try {
+          const stats = await trainingService.getTrainingStats();
+          
+          if (stats && stats.status === 'success' && stats.stats) {
+            if (!stats.stats.is_balanced && !collectionStatus.isCollecting) {
+              message.info('Auto-monitoring detected imbalanced dataset, initiating balancing...');
+              
+              const anomalyTypes = stats.stats.anomaly_types || {};
+              const threshold = stats.stats.total_samples * 0.1;
+              const underrepresentedTypes = [];
+              
+              if (activeAnomalies.length > 0) {
+                const activeType = activeAnomalies[0].type;
+                const count = anomalyTypes[activeType] || 0;
+                
+                if (count < threshold) {
+                  message.info(`Auto-collecting underrepresented active anomaly type: ${activeType}`);
+                  await trainingService.startAnomalyCollection(activeType, activeAnomalies[0].node);
+                  return;
+                }
+              }
+              
+              await trainingService.autoBalanceDataset();
+            }
+          }
+        } catch (error) {
+          console.error('Error in auto-monitoring:', error);
+        }
+      };
+      
+      checkAndBalanceDataset();
+      autoMonitoringIntervalRef.current = setInterval(checkAndBalanceDataset, 30000);
+    } else {
+      if (autoMonitoringIntervalRef.current) {
+        clearInterval(autoMonitoringIntervalRef.current);
+        autoMonitoringIntervalRef.current = null;
+      }
+    }
+    
+    return () => {
+      if (autoMonitoringIntervalRef.current) {
+        clearInterval(autoMonitoringIntervalRef.current);
+      }
+    };
+  }, [isAutoMonitoring, activeAnomalies, collectionStatus.isCollecting]);
 
   const fetchModels = async () => {
     try {
@@ -210,6 +388,13 @@ const ModelTrainingPanel = () => {
     }
   };
 
+  const handleAutoMonitoringToggle = () => {
+    setIsAutoMonitoring(prev => !prev);
+    message.info(isAutoMonitoring 
+      ? 'Disabled automatic anomaly monitoring' 
+      : 'Enabled automatic anomaly monitoring');
+  };
+
   const fetchTrainingStats = useCallback(async () => {
     try {
       const response = await trainingService.getTrainingStats();
@@ -289,6 +474,14 @@ const ModelTrainingPanel = () => {
                       disabled={loading || isTraining}
                     />
                     <span>Auto-balance</span>
+                    <Divider type="vertical" />
+                    <Switch
+                      checked={isAutoMonitoring}
+                      onChange={handleAutoMonitoringToggle}
+                      loading={loading}
+                      disabled={isTraining}
+                    />
+                    <span>Auto-monitor</span>
                   </Space>
                 </Col>
               </Row>
@@ -314,6 +507,14 @@ const ModelTrainingPanel = () => {
               )}
             </Space>
           </Card>
+        </Col>
+        
+        <Col span={24}>
+          {/* <ModelAdaptationInfo 
+            activeAnomalies={activeAnomalies}
+            trainingStats={trainingStats}
+            isAutoMonitoring={isAutoMonitoring}
+          /> */}
         </Col>
         
         <Col span={24}>
@@ -382,7 +583,14 @@ const ModelTrainingPanel = () => {
                 ) : (
                   <Alert
                     message="Data is imbalanced"
-                    description="Consider enabling auto-balance or collecting more data"
+                    description={
+                      <div>
+                        Consider enabling auto-balance or collecting more data
+                        {isAutoMonitoring && (
+                          <strong> - Automatic monitoring is active and will address this imbalance</strong>
+                        )}
+                      </div>
+                    }
                     type="warning"
                     showIcon
                     style={{ marginTop: 16 }}
@@ -466,14 +674,6 @@ const ModelTrainingPanel = () => {
 
   return (
     <>
-      <Alert
-        message="Optional Training Module"
-        description="This module is for training and improving models but is not required during anomaly diagnosis. You can skip this step in the workflow."
-        type="info"
-        showIcon
-        icon={<InfoCircleOutlined />}
-        style={{ marginBottom: 16 }}
-      />
       <Tabs activeKey={activeTab} onChange={setActiveTab}>
         <TabPane 
           tab={<span><DatabaseOutlined />Data Collection</span>} 

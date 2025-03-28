@@ -1,6 +1,6 @@
 import React from "react";
 import { Empty } from "antd";
-import { getModelColor } from "../utils/rankUtils.jsx";
+import { getModelColor, getFullNodeName } from "../utils/rankUtils.jsx";
 
 // Force directed graph visualization of the propagation graph
 export const renderForceGraph = (comparisonData, selectedModels) => {
@@ -20,9 +20,9 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
   // Create array of nodes
   const nodeObjects = nodes.map((node, index) => {
     // Calculate position in a circle
-    const radius = 180;
+    const radius = 200; // Slightly larger radius
     const angle = (2 * Math.PI * index) / nodes.length;
-    const x = radius * Math.cos(angle) + 220;
+    const x = radius * Math.cos(angle) + 250; // Centered better
     const y = radius * Math.sin(angle) + 220;
     
     // Check if node has anomaly
@@ -30,7 +30,10 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
     const anomalyType = hasAnomaly ? 
       comparisonData[model].ranks.find(r => r.node === node).type : null;
     
-    return { id: node, x, y, hasAnomaly, anomalyType };
+    // Get full node name
+    const fullNodeName = getFullNodeName(node);
+    
+    return { id: node, fullName: fullNodeName, x, y, hasAnomaly, anomalyType };
   });
   
   // Create array of links
@@ -51,12 +54,12 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
   return (
     <div style={{ padding: '20px', textAlign: 'center' }}>
       <h3>Node Propagation Graph</h3>
-      <div style={{ marginBottom: '10px' }}>
-        <div style={{ display: 'inline-block', marginRight: '10px', padding: '2px 8px', background: '#ff4d4f', color: 'white', borderRadius: '2px' }}>Anomaly Node</div>
-        <div style={{ display: 'inline-block', marginRight: '10px', padding: '2px 8px', background: '#1890ff', color: 'white', borderRadius: '2px' }}>Strong Correlation (≥ 0.9)</div>
-        <div style={{ display: 'inline-block', padding: '2px 8px', background: '#52c41a', color: 'white', borderRadius: '2px' }}>Medium Correlation (≥ 0.7)</div>
+      <div style={{ marginBottom: '15px' }}>
+        <div style={{ display: 'inline-block', marginRight: '15px', padding: '4px 10px', background: '#ff4d4f', color: 'white', borderRadius: '4px', fontWeight: 'bold' }}>Anomaly Node</div>
+        <div style={{ display: 'inline-block', marginRight: '15px', padding: '4px 10px', background: '#1890ff', color: 'white', borderRadius: '4px', fontWeight: 'bold' }}>Strong Correlation (≥ 0.9)</div>
+        <div style={{ display: 'inline-block', padding: '4px 10px', background: '#52c41a', color: 'white', borderRadius: '4px', fontWeight: 'bold' }}>Medium Correlation (≥ 0.7)</div>
       </div>
-      <svg width="500" height="440" style={{ border: '1px solid #f0f0f0', borderRadius: '5px' }}>
+      <svg width="550" height="500" style={{ border: '1px solid #f0f0f0', borderRadius: '8px', background: '#fafafa', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
         {/* Draw links first so they appear behind nodes */}
         {links.map((link, index) => {
           const sourceNode = nodeObjects.find(n => n.id === link.source);
@@ -76,6 +79,29 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
             strokeWidth = 2;
           }
           
+          // Check if this is a bidirectional link (the reverse link exists)
+          const isReverseLinkPresent = links.some(l => 
+            l.source === link.target && l.target === link.source
+          );
+          
+          // Calculate label offset for bidirectional links
+          const dx = targetNode.x - sourceNode.x;
+          const dy = targetNode.y - sourceNode.y;
+          const angle = Math.atan2(dy, dx);
+          
+          // Offset label position for bidirectional edges
+          const offset = isReverseLinkPresent ? 15 : 0; // Offset in pixels
+          const perpX = Math.sin(angle) * offset;
+          const perpY = -Math.cos(angle) * offset;
+          
+          // Calculate midpoint of the line
+          const midX = (sourceNode.x + targetNode.x) / 2;
+          const midY = (sourceNode.y + targetNode.y) / 2;
+          
+          // Position label with offset
+          const labelX = midX + perpX;
+          const labelY = midY + perpY;
+          
           return (
             <g key={`link-${index}`}>
               <line 
@@ -85,18 +111,47 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
                 y2={targetNode.y} 
                 stroke={strokeColor}
                 strokeWidth={strokeWidth}
-                strokeOpacity={0.6}
+                strokeOpacity={0.8}
+                markerEnd={`url(#arrow-${index})`}
               />
-              {/* Add correlation label */}
+              
+              {/* Arrow marker definition */}
+              <defs>
+                <marker
+                  id={`arrow-${index}`}
+                  viewBox="0 0 10 10"
+                  refX="5"
+                  refY="5"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill={strokeColor} />
+                </marker>
+              </defs>
+              
+              {/* Add correlation label with background */}
+              <rect
+                x={labelX - 16}
+                y={labelY - 10}
+                width={32}
+                height={20}
+                rx={4}
+                fill="white"
+                stroke={strokeColor}
+                strokeWidth={1}
+                opacity={0.9}
+              />
               <text 
-                x={(sourceNode.x + targetNode.x) / 2} 
-                y={(sourceNode.y + targetNode.y) / 2}
+                x={labelX} 
+                y={labelY}
                 textAnchor="middle"
-                fontSize="12"
+                dominantBaseline="central"
+                fontSize="11"
+                fontWeight="bold"
                 fill="#666"
-                dy="-5"
               >
-                {(link.correlation * 100).toFixed(0)}%
+                {link.correlation.toFixed(2)}
               </text>
             </g>
           );
@@ -105,33 +160,56 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
         {/* Draw nodes */}
         {nodeObjects.map((node, index) => (
           <g key={`node-${index}`}>
-            {/* Node circle */}
+            {/* Node circle with gradient */}
+            <defs>
+              <radialGradient id={`gradient-${index}`} cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
+                <stop offset="0%" stopColor={node.hasAnomaly ? '#ff7875' : '#fff'} />
+                <stop offset="100%" stopColor={node.hasAnomaly ? '#ff4d4f' : '#f0f0f0'} />
+              </radialGradient>
+            </defs>
+            
             <circle 
               cx={node.x} 
               cy={node.y} 
-              r={node.hasAnomaly ? 25 : 20}
-              fill={node.hasAnomaly ? '#ff4d4f' : '#fff'}
+              r={node.hasAnomaly ? 28 : 22}
+              fill={`url(#gradient-${index})`}
               stroke={node.hasAnomaly ? '#ff4d4f' : '#d9d9d9'}
               strokeWidth={node.hasAnomaly ? 2 : 1}
+              filter="drop-shadow(0px 2px 3px rgba(0,0,0,0.1))"
             />
-            {/* Node label */}
+            
+            {/* Node ID (shorter version, fits better) */}
             <text 
               x={node.x} 
               y={node.y}
               textAnchor="middle"
               dominantBaseline="central"
-              fontSize="12"
-              fill={node.hasAnomaly ? '#fff' : '#000'}
+              fontSize="11"
+              fontWeight="bold"
+              fill={node.hasAnomaly ? '#fff' : '#333'}
             >
-              {node.id.split('.').pop()}
+              {node.id.match(/\d+/)[0]}
             </text>
+            
+            {/* Node full name label below circle */}
+            <text 
+              x={node.x} 
+              y={node.y + (node.hasAnomaly ? 40 : 35)}
+              textAnchor="middle"
+              fontSize="10"
+              fill="#666"
+            >
+              {node.fullName}
+            </text>
+            
             {/* Anomaly type label */}
             {node.hasAnomaly && (
               <text 
                 x={node.x} 
-                y={node.y + 40}
+                y={node.y + 55}
                 textAnchor="middle"
-                fontSize="11"
+                fontSize="10"
+                fontWeight="bold"
                 fill="#ff4d4f"
               >
                 {node.anomalyType}

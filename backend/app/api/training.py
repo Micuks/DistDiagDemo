@@ -233,8 +233,16 @@ async def get_training_stats():
 async def auto_balance_dataset():
     """Auto-balance the training dataset"""
     try:
-        await training_service.auto_balance_dataset()
-        return {"status": "success", "message": "Auto-balance started"}
+        result = await training_service.auto_balance_dataset()
+        if isinstance(result, dict):
+            return {
+                "status": "success" if result.get("success", False) else "warning",
+                "message": result.get("message", "Auto-balance process completed"),
+                "action_taken": result.get("message", "No specific action needed")
+            }
+        else:
+            # For backward compatibility
+            return {"status": "success", "message": "Auto-balance started"}
     except Exception as e:
         logger.error(f"Error in auto-balancing dataset: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error auto-balancing dataset: {str(e)}")

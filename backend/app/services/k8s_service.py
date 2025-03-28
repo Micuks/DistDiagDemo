@@ -4,7 +4,7 @@ from kubernetes.client.rest import ApiException
 import logging
 import os
 from typing import Dict, Any, List, Optional, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import time
 from functools import lru_cache, wraps
@@ -190,10 +190,115 @@ class K8sService:
         return False
 
     async def delete_chaos_experiment(self, anomaly_type: str, experiment_name: str = None):
-        """Delete a specific chaos mesh experiment with optimized retries"""
+        """Delete a chaos experiment"""
+        deleted_experiments = []
+        
         try:
+            # Special handling for io_bottleneck - clean up properly
+            if anomaly_type == "io_bottleneck":
+                # If experiment_name is provided, only delete that experiment
+                if experiment_name:
+                    # Find and remove from active_anomalies
+                    if experiment_name in self.active_anomalies:
+                        # Kill any running processes associated with this experiment
+                        process_id = self.active_anomalies[experiment_name].get('process_id')
+                        if process_id:
+                            try:
+                                import os
+                                import signal
+                                # Kill the parent process (kubectl)
+                                os.kill(process_id, signal.SIGKILL)
+                            except Exception as e:
+                                logger.warning(f"Failed to kill process {process_id}: {str(e)}")
+                                
+                        # Clean up files on the target node
+                        node = self.active_anomalies[experiment_name].get('node')
+                        if node:
+                            cleanup_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c 'pkill -f \"dd if=/dev/urandom\" 2>/dev/null; pkill -f \"yes > /dev/null\" 2>/dev/null; rm -rf /tmp/io_stress/*' || true"
+                            logger.info(f"Running cleanup: {cleanup_cmd}")
+                            import os
+                            os.system(cleanup_cmd)
+                            
+                        # Remove from active anomalies
+                        del self.active_anomalies[experiment_name]
+                        deleted_experiments.append(experiment_name)
+                else:
+                    # Delete all IO bottleneck experiments
+                    io_experiments = [name for name, anomaly in self.active_anomalies.items() 
+                                     if anomaly.get('type') == 'io_bottleneck']
+                    
+                    for exp_name in io_experiments:
+                        # Kill any running processes
+                        process_id = self.active_anomalies[exp_name].get('process_id')
+                        if process_id:
+                            try:
+                                import os
+                                import signal
+                                os.kill(process_id, signal.SIGKILL)
+                            except Exception as e:
+                                logger.warning(f"Failed to kill process {process_id}: {str(e)}")
+                                
+                        # Clean up files on the target node
+                        node = self.active_anomalies[exp_name].get('node')
+                        if node:
+                            cleanup_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c 'pkill -f \"dd if=/dev/urandom\" 2>/dev/null; pkill -f \"yes > /dev/null\" 2>/dev/null; rm -rf /tmp/io_stress/*' || true"
+                            logger.info(f"Running cleanup: {cleanup_cmd}")
+                            import os
+                            os.system(cleanup_cmd)
+                            
+                        # Remove from active anomalies
+                        del self.active_anomalies[exp_name]
+                        deleted_experiments.append(exp_name)
+                        
+                # Also delete any K8s tracking resources
+                plural = self._get_experiment_plural(anomaly_type)
+                
+                try:
+                    if experiment_name and 'ob-io-bottleneck' in experiment_name:
+                        # Extract the base name without node suffix
+                        base_name = experiment_name.split('-', 3)[-1]
+                        k8s_name = f"ob-io-bottleneck-{base_name}"
+                        
+                        await asyncio.to_thread(
+                            self.custom_api.delete_namespaced_custom_object,
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=plural,
+                            name=k8s_name
+                        )
+                        logger.info(f"Deleted K8s tracking resource: {k8s_name}")
+                    else:
+                        # List all io bottleneck experiments
+                        experiments = await asyncio.to_thread(
+                            self.custom_api.list_namespaced_custom_object,
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=plural
+                        )
+                        
+                        # Delete all io bottleneck experiments
+                        for exp in experiments.get('items', []):
+                            name = exp['metadata']['name']
+                            if 'io-bottleneck' in name:
+                                await asyncio.to_thread(
+                                    self.custom_api.delete_namespaced_custom_object,
+                                    group="chaos-mesh.org",
+                                    version="v1alpha1",
+                                    namespace=self.namespace,
+                                    plural=plural,
+                                    name=name
+                                )
+                                logger.info(f"Deleted K8s tracking resource: {name}")
+                except Exception as e:
+                    logger.warning(f"Error deleting K8s tracking resources: {str(e)}")
+                    
+                # Return deleted experiments
+                return deleted_experiments
+            
             # Special handling for cache bottleneck
-            if anomaly_type == "cache_bottleneck":
+            elif anomaly_type == "cache_bottleneck":
                 # Restore default memstore_limit_percentage
                 await self._update_ob_parameter({
                     "memstore_limit_percentage": "0"  # Restore default value 0
@@ -260,87 +365,7 @@ class K8sService:
                         logger.info(f"Deleted experiment {experiment_name}")
                     except ApiException as e:
                         if e.status != 404:  # Ignore 404 Not Found errors
-                            logger.warning(f"Error deleting experiment {experiment_name}: {str(e)}")
-                
-                # Invalidate cache to get fresh data
-                self.invalidate_cache()
-                self._last_cache_update = 0
-                
-                return deleted_experiments
-            
-            # Special handling for io_bottleneck 
-            elif anomaly_type == "io_bottleneck":
-                # Find and remove any io_bottleneck tracking entries
-                deleted_experiments = []
-                type_prefix = f"ob-io-bottleneck"
-                
-                # If a specific experiment name is provided, only delete that one
-                if experiment_name:
-                    if experiment_name in self.active_anomalies:
-                        del self.active_anomalies[experiment_name]
-                        deleted_experiments.append(experiment_name)
-                        logger.info(f"Removed IO bottleneck experiment {experiment_name}")
-                else:
-                    # Remove all io_bottleneck experiments from tracking
-                    for name in list(self.active_anomalies.keys()):
-                        if name.startswith(type_prefix) or self.active_anomalies[name].get("type") == anomaly_type:
-                            del self.active_anomalies[name]
-                            deleted_experiments.append(name)
-                            logger.info(f"Removed IO bottleneck experiment {name}")
-                
-                # Delete any actual StressChaos resources if they exist (for backup tracking)
-                plural = self._get_experiment_plural(anomaly_type)
-                
-                try:
-                    # List all StressChaos resources
-                    experiments = await asyncio.to_thread(
-                        self.custom_api.list_namespaced_custom_object,
-                        group="chaos-mesh.org",
-                        version="v1alpha1",
-                        namespace=self.namespace,
-                        plural=plural
-                    )
-                    
-                    # Filter experiments by type prefix
-                    matching_experiments = [
-                        exp for exp in experiments.get("items", [])
-                        if exp["metadata"]["name"].startswith(type_prefix)
-                    ]
-                    
-                    # Delete each matching experiment
-                    for exp in matching_experiments:
-                        exp_name = exp["metadata"]["name"]
-                        try:
-                            await asyncio.to_thread(
-                                self.custom_api.delete_namespaced_custom_object,
-                                group="chaos-mesh.org",
-                                version="v1alpha1",
-                                namespace=self.namespace,
-                                plural=plural,
-                                name=exp_name
-                            )
-                            if exp_name not in deleted_experiments:
-                                deleted_experiments.append(exp_name)
-                                logger.info(f"Deleted StressChaos resource for IO bottleneck: {exp_name}")
-                        except ApiException as e:
-                            if e.status != 404:  # Ignore 404 Not Found errors
-                                logger.warning(f"Error deleting StressChaos resource {exp_name}: {str(e)}")
-                except Exception as e:
-                    logger.warning(f"Error listing StressChaos resources: {str(e)}")
-                
-                # Kill any running dd processes on each pod
-                for name in deleted_experiments:
-                    # Try to extract the node name from the experiment name
-                    parts = name.split("-")
-                    if len(parts) >= 5:  # Format should be ob-io-bottleneck-timestamp-nodename...
-                        node_name = "-".join(parts[4:])
-                        try:
-                            logger.info(f"Stopping IO stress on node {node_name}")
-                            # Kill any running dd processes on the pod
-                            kubectl_cmd = f"kubectl exec -n {self.namespace} {node_name} -- pkill -f 'dd if=/dev/zero' || true"
-                            os.system(kubectl_cmd)
-                        except Exception as e:
-                            logger.warning(f"Error stopping IO stress on node {node_name}: {str(e)}")
+                            raise e
                 
                 # Invalidate cache to get fresh data
                 self.invalidate_cache()
@@ -509,6 +534,9 @@ class K8sService:
         try:
             # Always force update if _last_cache_update is 0
             if self._last_cache_update == 0 or self._should_update_cache():
+                # Check for any untracked IO bottleneck processes first
+                await self._check_for_untracked_io_bottlenecks()
+                
                 # Sync with Kubernetes to get current active experiments
                 experiment_types = self.experiment_types
                 current_experiments = []
@@ -577,11 +605,28 @@ class K8sService:
                     logger.info(f"No anomalies found in Kubernetes but have {len(self.active_anomalies)} local records. Verifying each.")
                     for name, anomaly in self.active_anomalies.items():
                         try:
-                            # Try to fetch each anomaly directly to verify it exists
+                            # Get the anomaly type
                             anomaly_type = anomaly.get('type')
                             if not anomaly_type:
                                 continue
                                 
+                            # Special handling for io_bottleneck anomalies
+                            if anomaly_type == 'io_bottleneck':
+                                # Check if it's still within expected duration
+                                start_time = datetime.fromisoformat(anomaly.get('start_time', ''))
+                                now = datetime.now()
+                                elapsed_seconds = (now - start_time).total_seconds()
+                                expected_duration = anomaly.get('expected_duration', self.collection_duration)
+                                
+                                if elapsed_seconds < expected_duration:
+                                    # Still within expected duration, keep it
+                                    new_active_anomalies[name] = anomaly
+                                    logger.info(f"Verified {name} still exists in our tracking")
+                                else:
+                                    logger.info(f"Anomaly {name} expired (duration {elapsed_seconds}s > expected {expected_duration}s)")
+                                continue
+                                
+                            # Standard verification through Kubernetes API for other anomaly types
                             plural = self._get_experiment_plural(anomaly_type)
                             try:
                                 await asyncio.to_thread(
@@ -623,6 +668,69 @@ class K8sService:
             logger.error(f"Failed to get active anomalies: {str(e)}")
             # If anything fails, return the locally tracked anomalies as a fallback
             return list(self.active_anomalies.values())
+
+    async def _check_for_untracked_io_bottlenecks(self):
+        """Check if there are any IO bottleneck processes running that aren't in our tracking"""
+        try:
+            # Look for any dd processes with io_stress in their command line
+            import subprocess
+            
+            # Use ps command to find IO stress processes
+            cmd = "ps aux | grep '[d]d if=/dev/urandom of=/tmp/io_stress' || true"
+            process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+            output = stdout.decode('utf-8')
+            
+            if output.strip():
+                logger.info(f"Found running IO bottleneck processes: {output.strip()}")
+                
+                # Check each line to see if it matches our expected pattern
+                for line in output.strip().split('\n'):
+                    if 'dd if=/dev/urandom of=/tmp/io_stress' in line:
+                        # Get the PID
+                        parts = line.split()
+                        if len(parts) > 1:
+                            pid = int(parts[1])
+                            
+                            # Check if we're already tracking this process
+                            already_tracked = False
+                            for name, anomaly in self.active_anomalies.items():
+                                if (anomaly.get('type') == 'io_bottleneck' and 
+                                    anomaly.get('process_id') == pid):
+                                    already_tracked = True
+                                    break
+                            
+                            if not already_tracked:
+                                # This is an untracked IO bottleneck process - add it to our tracking
+                                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                                experiment_name = f"ob-io-bottleneck-{timestamp}-recovered"
+                                
+                                # Try to determine which node this is for based on the command
+                                node = None
+                                for part in line.split():
+                                    if part.startswith('obcluster-') and '-zone' in part:
+                                        node = part
+                                        break
+                                
+                                if not node:
+                                    node = "unknown"
+                                    
+                                # Add to our tracking
+                                self.active_anomalies[experiment_name] = {
+                                    "start_time": (datetime.now() - timedelta(seconds=10)).isoformat(),  # Assume it just started
+                                    "status": "active",
+                                    "type": "io_bottleneck",
+                                    "name": experiment_name,
+                                    "target": "obcluster",
+                                    "node": node,
+                                    "process_id": pid,
+                                    "expected_duration": self.collection_duration,
+                                    "recovered": True  # Mark as recovered
+                                }
+                                
+                                logger.info(f"Recovered untracked IO bottleneck process with PID {pid} as {experiment_name}")
+        except Exception as e:
+            logger.error(f"Error checking for untracked IO bottlenecks: {str(e)}")
 
     def _get_experiment_template(self, anomaly_type: str) -> Dict[str, Any]:
         """Get the chaos experiment template with varying severity"""
@@ -951,24 +1059,12 @@ class K8sService:
                     }
                 }
             
-            # Special handling for io_bottleneck
+            # Special handling for io_bottleneck - direct execution for more control
             elif anomaly_type == "io_bottleneck":
                 # Generate a unique experiment name for tracking
-                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                experiment_name = f"ob-io-bottleneck-{timestamp}"
+                experiment_name = f"ob-io-bottleneck-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 
-                # If no specific target nodes were provided, use a default
-                if not target_nodes:
-                    target_nodes = await self.get_available_nodes()
-                
-                # Get severity from severity variations
-                severity_index = len(self.active_anomalies) % len(self.severity_variations.get(anomaly_type, [{"default": "default"}]))
-                severity = self.severity_variations.get(anomaly_type, [{}])[severity_index]
-                
-                # Get the IO stress command
-                io_command = severity.get("command", "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & sleep %s") % self.collection_duration
-                
-                # Create a tracking experiment with a minimal StressChaos resource
+                # Create tracking experiment for Kubernetes
                 experiment = {
                     "apiVersion": "chaos-mesh.org/v1alpha1",
                     "kind": "StressChaos",
@@ -1013,11 +1109,35 @@ class K8sService:
                     try:
                         logger.info(f"Running IO stress command on node {node}")
                         
-                        # Execute dd command directly on the pod (this runs in background)
-                        io_bg_command = f"{io_command} > /dev/null 2>&1 &"
-                        kubectl_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c '{io_bg_command}'"
+                        # Reliable IO stress command using multiple processes in /tmp directory
+                        # This improves the effectiveness of the anomaly by:
+                        # 1. Using multiple dd processes to increase I/O pressure in a writable area
+                        # 2. Adding CPU stress component to simulate busy system with IO contention
+                        # 3. Using fsync to ensure data hits the disk
+                        # 4. Making sure the command runs for the intended duration with proper cleanup
+                        io_command = (
+                            "mkdir -p /tmp/io_stress && "
+                            # Create multiple large files with different block sizes and sync options
+                            "dd if=/dev/urandom of=/tmp/io_stress/file1 bs=8M count=2000 conv=fsync & "
+                            "dd if=/dev/urandom of=/tmp/io_stress/file2 bs=4M count=3000 conv=fsync & "
+                            "dd if=/dev/urandom of=/tmp/io_stress/file3 bs=16M count=1000 & "
+                            # Add a CPU stress component to make IO issues more pronounced
+                            "for i in {1..4}; do yes > /dev/null & done; "
+                            # Sleep for the specified duration
+                            f"sleep {self.collection_duration}; "
+                            # Cleanup processes and files on completion
+                            "for pid in $(pgrep -f 'dd if=/dev/urandom'); do kill -9 $pid 2>/dev/null; done; "
+                            "for pid in $(pgrep -f 'yes > /dev/null'); do kill -9 $pid 2>/dev/null; done; "
+                            "rm -rf /tmp/io_stress/*"
+                        )
+                        
+                        # Execute dd command directly on the pod with proper cleanup
+                        kubectl_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c '{io_command}' > /dev/null 2>&1 &"
                         logger.info(f"Executing kubectl command: {kubectl_cmd}")
-                        os.system(kubectl_cmd)
+                        
+                        # Use subprocess instead of os.system for better process management
+                        import subprocess
+                        process = subprocess.Popen(kubectl_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         
                         # Track this specific anomaly
                         self.active_anomalies[node_experiment_name] = {
@@ -1027,7 +1147,9 @@ class K8sService:
                             "name": node_experiment_name,
                             "target": "obcluster",
                             "node": node,
-                            "command": io_command
+                            "command": io_command,
+                            "process_id": process.pid,
+                            "expected_duration": self.collection_duration  # Store expected duration for verification
                         }
                         
                         logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
@@ -1255,6 +1377,58 @@ class K8sService:
             logger.error(f"Error fetching OceanBase zones: {str(e)}")
             logger.info("Using default zones due to error")
             return ['zone1', 'zone2', 'zone3']
+
+    async def verify_experiment_exists(self, experiment_name: str, anomaly_type: str = None) -> bool:
+        """Verify if a specific experiment exists, with special handling for io_bottleneck"""
+        try:
+            # Special handling for IO bottleneck - we track it ourselves
+            if anomaly_type == "io_bottleneck" or (
+                not anomaly_type and experiment_name and "io-bottleneck" in experiment_name
+            ):
+                # If it's in our active_anomalies dict, check if it's within expected duration
+                if experiment_name in self.active_anomalies:
+                    anomaly = self.active_anomalies[experiment_name]
+                    start_time = datetime.fromisoformat(anomaly.get('start_time', ''))
+                    now = datetime.now()
+                    elapsed_seconds = (now - start_time).total_seconds()
+                    expected_duration = anomaly.get('expected_duration', self.collection_duration)
+                    
+                    # If within expected duration, consider it active
+                    return elapsed_seconds < expected_duration
+                
+                return False  # Not in our tracking
+            
+            # For all other anomaly types, check Kubernetes
+            if not anomaly_type:
+                # Try to determine type from experiment name
+                for exp_type in self.experiment_types:
+                    if exp_type.replace("_", "-") in experiment_name:
+                        anomaly_type = exp_type
+                        break
+            
+            if not anomaly_type:
+                logger.warning(f"Cannot verify existence of {experiment_name} without knowing its type")
+                return False
+            
+            # Check if it exists in Kubernetes
+            try:
+                await asyncio.to_thread(
+                    self.custom_api.get_namespaced_custom_object,
+                    group="chaos-mesh.org",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural=self._get_experiment_plural(anomaly_type),
+                    name=experiment_name
+                )
+                return True
+            except ApiException as e:
+                if e.status == 404:
+                    return False
+                raise e
+                
+        except Exception as e:
+            logger.error(f"Error verifying experiment existence: {str(e)}")
+            return False
 
 # Create singleton k8s service object
 k8s_service = K8sService()

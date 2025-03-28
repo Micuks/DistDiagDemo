@@ -10,6 +10,7 @@ import {
     Modal,
     Button,
     Tooltip,
+    Collapse,
 } from "antd";
 import {
     LineChart,
@@ -150,10 +151,16 @@ const MetricsPanel = () => {
         transactions: "trans commit count",
     });
     const [loadedSeries, setLoadedSeries] = useState({});
+    const [expandedNodes, setExpandedNodes] = useState({});
     const activeFetches = useRef(new Set()); // Track active fetch operations to prevent duplicates
     const fetchInterval = 5000;
 
     const fetchChartData = async (nodeIp, category, metric) => {
+        // Skip API calls for the 'cluster' node - we'll handle cluster data differently
+        if (nodeIp === 'cluster') {
+            return;
+        }
+
         const now = Date.now();
         const seriesKey = `${nodeIp}-${category}-${metric}`;
         const lastUpdated = loadedSeries[seriesKey];
@@ -348,6 +355,121 @@ const MetricsPanel = () => {
         }
     };
 
+    // New function to compute cluster-level metrics
+    const computeClusterMetrics = () => {
+        if (!metricPoint || !metricPoint.metrics) return null;
+
+        const nodeIps = Object.keys(metricPoint.metrics);
+        if (nodeIps.length === 0) return null;
+
+        // Initialize cluster metrics structure
+        const clusterMetrics = {
+            cpu: {},
+            memory: {},
+            io: {},
+            network: {},
+            transactions: {},
+        };
+
+        // Process each node and aggregate metrics
+        nodeIps.forEach(nodeIp => {
+            const nodeData = metricPoint.metrics[nodeIp];
+            if (!nodeData) return;
+
+            // Process each category for this node
+            Object.keys(clusterMetrics).forEach(category => {
+                if (!nodeData[category]) return;
+
+                // Process each metric in this category
+                Object.entries(nodeData[category]).forEach(([metricName, metricData]) => {
+                    // Skip if no valid data
+                    if (!metricData) return;
+
+                    const metricValue = Array.isArray(metricData) 
+                        ? metricData[metricData.length - 1]?.value || 0
+                        : metricData.value || 0;
+
+                    // Initialize metric in cluster data if not exists
+                    if (!clusterMetrics[category][metricName]) {
+                        clusterMetrics[category][metricName] = {
+                            count: 0,
+                            sum: 0,
+                            max: -Infinity,
+                            min: Infinity,
+                            values: [],
+                        };
+                    }
+
+                    // Aggregate the data
+                    clusterMetrics[category][metricName].count++;
+                    clusterMetrics[category][metricName].sum += metricValue;
+                    clusterMetrics[category][metricName].max = Math.max(
+                        clusterMetrics[category][metricName].max,
+                        metricValue
+                    );
+                    clusterMetrics[category][metricName].min = Math.min(
+                        clusterMetrics[category][metricName].min,
+                        metricValue
+                    );
+                    clusterMetrics[category][metricName].values.push(metricValue);
+                });
+            });
+        });
+
+        // Convert aggregated data to final format
+        Object.keys(clusterMetrics).forEach(category => {
+            Object.entries(clusterMetrics[category]).forEach(([metricName, data]) => {
+                // Skip metrics with no data
+                if (data.count === 0) {
+                    delete clusterMetrics[category][metricName];
+                    return;
+                }
+
+                // Calculate the appropriate aggregate value based on metric type
+                let value;
+                
+                // CPU usage and utilization metrics should be averaged
+                if (metricName === "cpu usage" || metricName.includes("util")) {
+                    value = data.sum / data.count;
+                }
+                // Memory, network, and io metrics that represent capacity should be summed
+                else if (
+                    (category === "memory" && (metricName.includes("memstore") || metricName.includes("memory"))) ||
+                    (category === "network" && metricName.includes("bytes")) ||
+                    (metricName.includes("write size") || metricName.includes("log total size")) ||
+                    (metricName.includes("count"))
+                ) {
+                    value = data.sum;
+                }
+                // For latency/delay metrics, use the average
+                else if (metricName.includes("time") || metricName.includes("delay")) {
+                    value = data.sum / data.count;
+                }
+                // For other metrics, use the sum by default
+                else {
+                    value = data.sum;
+                }
+
+                // Replace the aggregate object with a single value object like node metrics
+                clusterMetrics[category][metricName] = {
+                    value: value,
+                    timestamp: metricPoint.timestamp,
+                    // Add any other necessary fields that might be needed later
+                };
+            });
+        });
+
+        return clusterMetrics;
+    };
+
+    // Function to toggle node expansion
+    const toggleNodeExpansion = (nodeIp) => {
+        setExpandedNodes(prev => ({
+            ...prev,
+            [nodeIp]: !prev[nodeIp]
+        }));
+    };
+
     useEffect(() => {
         const fetchData = async () => {
             try {
@@ -537,9 +659,20 @@ const MetricsPanel = () => {
     };
 
     const renderMetricItem = (nodeIp, category, metricName) => {
-        // Get both data sources
-        const pointData = metricPoint?.metrics?.[nodeIp]?.[category]?.[metricName];
-        const seriesData = metricSeries[nodeIp]?.[category]?.[metricName];
+        // Get both data sources - with special handling for cluster metrics
+        let pointData;
+        let seriesData;
+
+        if (nodeIp === 'cluster') {
+            // For cluster metrics, use the computed metrics
+            const clusterMetrics = computeClusterMetrics();
+            pointData = clusterMetrics?.[category]?.[metricName];
+            seriesData = null; // We don't maintain time series for cluster in metricSeries
+        } else {
+            // Normal node metrics
+            pointData = metricPoint?.metrics?.[nodeIp]?.[category]?.[metricName];
+            seriesData = metricSeries[nodeIp]?.[category]?.[metricName];
+        }
 
         // Extract values and fluctuation data
         let value = 0;
@@ -551,8 +684,9 @@ const MetricsPanel = () => {
         // Get the latest value from either source
         const seriesValue = seriesData?.[seriesData?.length - 1]?.value;
         const pointValue =
-            pointData?.value ||
-            (Array.isArray(pointData) ? pointData?.[pointData?.length - 1]?.value : 0);
+            typeof pointData?.value !== 'undefined' 
+                ? pointData.value
+                : (Array.isArray(pointData) ? pointData?.[pointData?.length - 1]?.value : 0);
 
         // Use series value if it exists, otherwise fall back to point data
         value = seriesValue !== undefined ? seriesValue : pointValue;
@@ -571,68 +705,12 @@ const MetricsPanel = () => {
         // Check if the value is valid
         if (value === undefined || value === null || isNaN(value)) {
             console.warn(
-                `Invalid value for metric ${nodeIp}/${category}/${metricName}:`,
-                value
+                `Missing metric data for ${nodeIp}/${category}/${metricName}`
             );
             value = 0;
         }
 
-        if (!pointData && !seriesData) {
-            // Create a placeholder for missing metrics with zero values
-            console.warn(`Missing metric data for ${nodeIp}/${category}/${metricName}`);
-            return (
-                <Col span={8} key={metricName}>
-                    <div
-                        onClick={() => handleMetricClick(nodeIp, category, metricName)}
-                        style={{
-                            cursor: "pointer",
-                            padding: "8px",
-                            borderRadius: "4px",
-                            backgroundColor: "transparent",
-                            borderLeft: "1px solid transparent",
-                            height: "100%",
-                            display: "flex",
-                            flexDirection: "column",
-                            justifyContent: "space-between",
-                            opacity: 0.7,
-                        }}
-                    >
-                        <div
-                            style={{
-                                display: "flex",
-                                alignItems: "flex-start",
-                                justifyContent: "space-between",
-                                marginBottom: "4px",
-                            }}
-                        >
-                            <span
-                                style={{
-                                    fontSize: "16px",
-                                    fontWeight: "500",
-                                    color: "rgba(0, 0, 0, 0.5)",
-                                }}
-                            >
-                                0 {getMetricSuffix(category, metricName)}
-                            </span>
-                        </div>
-
-                        <div
-                            style={{
-                                fontSize: "13px",
-                                color: "rgba(0, 0, 0, 0.5)",
-                                lineHeight: "1.2",
-                                height: "31px",
-                            }}
-                        >
-                            {metricName
-                                .replace(/_/g, " ")
-                                .replace(/\b\w/g, (l) => l.toUpperCase())}
-                        </div>
-                    </div>
-                </Col>
-            );
-        }
-
+        // Even if we didn't find data, we'll still render the metric item with zero value
         const formattedValue = formatValue(category, metricName, value);
         const suffix = getMetricSuffix(category, metricName, value);
         const isSelected = selectedMetrics[category] === metricName;
@@ -750,6 +828,11 @@ const MetricsPanel = () => {
     };
 
     const renderTimeSeriesChart = (nodeIp, category, metric) => {
+        // Special handling for cluster metrics - we aggregate from existing node data
+        if (nodeIp === 'cluster') {
+            return renderClusterTimeSeriesChart(category, metric);
+        }
+
         // Get the time series data from metricSeries
         let data = metricSeries[nodeIp]?.[category]?.[metric];
         const seriesKey = `${nodeIp}-${category}-${metric}`;
@@ -922,6 +1005,183 @@ const MetricsPanel = () => {
         );
     };
 
+    // New function to render cluster time series chart by aggregating node data
+    const renderClusterTimeSeriesChart = (category, metric) => {
+        if (!metricPoint?.metrics) {
+            return (
+                <div style={{ textAlign: "center", padding: "20px", height: "200px" }}>
+                    No data available
+                </div>
+            );
+        }
+
+        // Get all node IPs
+        const nodeIps = Object.keys(metricPoint.metrics);
+        if (nodeIps.length === 0) {
+            return (
+                <div style={{ textAlign: "center", padding: "20px", height: "200px" }}>
+                    No nodes available
+                </div>
+            );
+        }
+
+        // Collect all time series data from all nodes
+        const allNodeSeries = [];
+        nodeIps.forEach(nodeIp => {
+            const nodeSeries = metricSeries[nodeIp]?.[category]?.[metric];
+            if (nodeSeries && Array.isArray(nodeSeries) && nodeSeries.length > 0) {
+                allNodeSeries.push({
+                    nodeIp,
+                    data: nodeSeries
+                });
+            }
+        });
+
+        // If no nodes have this time series data, show a message
+        if (allNodeSeries.length === 0) {
+            return (
+                <div style={{ textAlign: "center", padding: "20px", height: "200px" }}>
+                    No time series data available
+                </div>
+            );
+        }
+
+        // Create a merged timeline of all timestamps from all nodes
+        const allTimestamps = new Set();
+        allNodeSeries.forEach(nodeSeries => {
+            nodeSeries.data.forEach(point => {
+                allTimestamps.add(point.timestamp);
+            });
+        });
+        
+        // Sort timestamps chronologically
+        const sortedTimestamps = Array.from(allTimestamps).sort();
+        
+        // Create the aggregated time series
+        const aggregatedSeries = [];
+        sortedTimestamps.forEach(timestamp => {
+            // Find data points from all nodes for this timestamp
+            const values = [];
+            
+            allNodeSeries.forEach(nodeSeries => {
+                const point = nodeSeries.data.find(p => p.timestamp === timestamp);
+                if (point) {
+                    values.push(point.value);
+                }
+            });
+            
+            // Skip if no values for this timestamp
+            if (values.length === 0) {
+                return;
+            }
+            
+            // Calculate the appropriate aggregate value based on metric type
+            let value = 0;
+            
+            // CPU usage and utilization metrics should be averaged
+            if (metric === "cpu usage" || metric.includes("util")) {
+                value = values.reduce((sum, val) => sum + val, 0) / values.length;
+            }
+            // Memory, network, and io metrics that represent capacity should be summed
+            else if (
+                (category === "memory" && (metric.includes("memstore") || metric.includes("memory"))) ||
+                (category === "network" && metric.includes("bytes")) ||
+                (metric.includes("write size") || metric.includes("log total size")) ||
+                (metric.includes("count"))
+            ) {
+                value = values.reduce((sum, val) => sum + val, 0);
+            }
+            // For latency/delay metrics, use the average
+            else if (metric.includes("time") || metric.includes("delay")) {
+                value = values.reduce((sum, val) => sum + val, 0) / values.length;
+            }
+            // For other metrics, use the sum by default
+            else {
+                value = values.reduce((sum, val) => sum + val, 0);
+            }
+            
+            aggregatedSeries.push({
+                timestamp,
+                value
+            });
+        });
+
+        // Sort the aggregated series by timestamp
+        aggregatedSeries.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+        // If we ended up with no data points, show a message
+        if (aggregatedSeries.length === 0) {
+            return (
+                <div style={{ textAlign: "center", padding: "20px", height: "200px" }}>
+                    No aggregated data available
+                </div>
+            );
+        }
+
+        const suffix = getMetricSuffix(category, metric);
+
+        return (
+            <div
+                style={{
+                    width: "100%",
+                    height: 200,
+                    marginBottom: 16,
+                    position: "relative",
+                }}
+            >
+                <ResponsiveContainer>
+                    <LineChart
+                        data={aggregatedSeries}
+                        margin={{ left: 5, right: 30, top: 10, bottom: 25 }}
+                        animationDuration={300}
+                        animationBegin={0}
+                    >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis
+                            dataKey="timestamp"
+                            tickFormatter={(ts) => new Date(ts).toLocaleTimeString()}
+                        />
+                        <YAxis
+                            width={85}
+                            tickFormatter={(value) =>
+                                formatValue(category, metric, value)
+                            }
+                            domain={[0, "auto"]}
+                            label={{
+                                value: `(${suffix})`,
+                                position: "bottom",
+                                offset: 15,
+                                style: {
+                                    textAnchor: "middle",
+                                    fontSize: 12,
+                                    fill: "#666",
+                                },
+                            }}
+                            tick={{
+                                fontSize: 12,
+                                fill: "#666",
+                            }}
+                        />
+                        <Tooltip
+                            formatter={(value) => [
+                                `${formatValue(category, metric, value)} ${suffix}`,
+                                metric,
+                            ]}
+                            labelFormatter={(ts) => new Date(ts).toLocaleString()}
+                        />
+                        <Line
+                            type="monotone"
+                            dataKey="value"
+                            name={metric}
+                            stroke="#8884d8"
+                            dot={false}
+                        />
+                    </LineChart>
+                </ResponsiveContainer>
+            </div>
+        );
+    };
+
     const renderMetricsCard = (title, metrics = {}, nodeIp, category) => {
         console.debug(`Rendering metrics card ${title} for ${nodeIp}/${category}`);
         const selectedMetric = selectedMetrics[category];
@@ -962,6 +1222,60 @@ const MetricsPanel = () => {
         );
     };
 
+    const renderClusterMetrics = () => {
+        const clusterMetrics = computeClusterMetrics();
+        if (!clusterMetrics) {
+            return (
+                <Card title="Cluster Metrics" style={{ marginBottom: 16 }}>
+                    <div style={{ textAlign: "center", padding: "20px" }}>
+                        No cluster metrics available
+                    </div>
+                </Card>
+            );
+        }
+
+        return (
+            <Card title="Cluster Metrics" style={{ marginBottom: 16 }}>
+                <Row gutter={[16, 16]}>
+                    {Object.keys(clusterMetrics.cpu).length > 0 && (
+                        <Col span={12}>
+                            {renderMetricsCard("CPU Usage", clusterMetrics.cpu, "cluster", "cpu")}
+                        </Col>
+                    )}
+
+                    {Object.keys(clusterMetrics.memory).length > 0 && (
+                        <Col span={12}>
+                            {renderMetricsCard("Memory Usage", clusterMetrics.memory, "cluster", "memory")}
+                        </Col>
+                    )}
+
+                    {Object.keys(clusterMetrics.io).length > 0 && (
+                        <Col span={12}>
+                            {renderMetricsCard("Disk I/O", clusterMetrics.io, "cluster", "io")}
+                        </Col>
+                    )}
+
+                    {Object.keys(clusterMetrics.network).length > 0 && (
+                        <Col span={12}>
+                            {renderMetricsCard("Network", clusterMetrics.network, "cluster", "network")}
+                        </Col>
+                    )}
+
+                    {Object.keys(clusterMetrics.transactions).length > 0 && (
+                        <Col span={12}>
+                            {renderMetricsCard(
+                                "Transactions",
+                                clusterMetrics.transactions,
+                                "cluster",
+                                "transactions"
+                            )}
+                        </Col>
+                    )}
+                </Row>
+            </Card>
+        );
+    };
+
     const renderNodeMetrics = (nodeIp, nodeData = {}) => {
         console.debug(`Rendering node metrics for ${nodeIp}`);
 
@@ -981,45 +1295,71 @@ const MetricsPanel = () => {
 
         // Use the timestamp to help prevent unnecessary re-renders
         const nodeKey = `node-${nodeIp}-${metricPoint?.timestamp || Date.now()}`;
+        const isExpanded = expandedNodes[nodeIp] || false;
+
+        const extraProps = {
+            extra: (
+                <Button 
+                    type="text" 
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        toggleNodeExpansion(nodeIp);
+                    }}
+                >
+                    {isExpanded ? 'Collapse' : 'Expand'}
+                </Button>
+            )
+        };
 
         return (
-            <Card title={`Node: ${nodeIp}`} key={nodeKey} style={{ marginBottom: 16 }}>
-                <Row gutter={[16, 16]}>
-                    {Object.keys(cpu).length > 0 && (
-                        <Col span={12}>
-                            {renderMetricsCard("CPU Usage", cpu, nodeIp, "cpu")}
-                        </Col>
-                    )}
+            <Card 
+                title={`Node: ${nodeIp}`} 
+                key={nodeKey} 
+                style={{ marginBottom: 16 }}
+                {...extraProps}
+            >
+                {isExpanded ? (
+                    <Row gutter={[16, 16]}>
+                        {Object.keys(cpu).length > 0 && (
+                            <Col span={12}>
+                                {renderMetricsCard("CPU Usage", cpu, nodeIp, "cpu")}
+                            </Col>
+                        )}
 
-                    {Object.keys(memory).length > 0 && (
-                        <Col span={12}>
-                            {renderMetricsCard("Memory Usage", memory, nodeIp, "memory")}
-                        </Col>
-                    )}
+                        {Object.keys(memory).length > 0 && (
+                            <Col span={12}>
+                                {renderMetricsCard("Memory Usage", memory, nodeIp, "memory")}
+                            </Col>
+                        )}
 
-                    {Object.keys(io).length > 0 && (
-                        <Col span={12}>
-                            {renderMetricsCard("Disk I/O", io, nodeIp, "io")}
-                        </Col>
-                    )}
+                        {Object.keys(io).length > 0 && (
+                            <Col span={12}>
+                                {renderMetricsCard("Disk I/O", io, nodeIp, "io")}
+                            </Col>
+                        )}
 
-                    {Object.keys(network).length > 0 && (
-                        <Col span={12}>
-                            {renderMetricsCard("Network", network, nodeIp, "network")}
-                        </Col>
-                    )}
+                        {Object.keys(network).length > 0 && (
+                            <Col span={12}>
+                                {renderMetricsCard("Network", network, nodeIp, "network")}
+                            </Col>
+                        )}
 
-                    {Object.keys(transactions).length > 0 && (
-                        <Col span={12}>
-                            {renderMetricsCard(
-                                "Transactions",
-                                transactions,
-                                nodeIp,
-                                "transactions"
-                            )}
-                        </Col>
-                    )}
-                </Row>
+                        {Object.keys(transactions).length > 0 && (
+                            <Col span={12}>
+                                {renderMetricsCard(
+                                    "Transactions",
+                                    transactions,
+                                    nodeIp,
+                                    "transactions"
+                                )}
+                            </Col>
+                        )}
+                    </Row>
+                ) : (
+                    <div style={{ textAlign: "center", padding: "10px" }}>
+                        Click expand to view node metrics
+                    </div>
+                )}
             </Card>
         );
     };
@@ -1091,6 +1431,11 @@ const MetricsPanel = () => {
                                     : "N/A"}
                             </Col>
                         </Row>
+
+                        {/* New Cluster Metrics Panel */}
+                        {renderClusterMetrics()}
+
+                        {/* Existing Node Metrics Panels (now collapsible) */}
                         {metricPoint?.metrics &&
                             Object.entries(metricPoint.metrics).map(
                                 ([nodeIp, nodeData]) =>

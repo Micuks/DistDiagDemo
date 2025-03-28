@@ -31,6 +31,9 @@ export const fetchDetailedMetrics = async (nodeIp, category) => {
 
 // Optimized function to batch fetch detailed metrics for a node, only for the selected metrics
 export const fetchAllDetailedMetrics = async (nodeIp, selectedMetrics) => {
+    if (nodeIp === 'cluster') {
+        return {};
+    }
     try {
         const response = await axios.get(`${API_BASE_URL}/api/metrics/detailed/selected`, {
             params: { 

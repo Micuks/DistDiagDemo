@@ -21,9 +21,6 @@ class WorkloadMetrics(BaseModel):
     disk_usage: float
 
 class WorkloadOptions(BaseModel):
-    # Node selection
-    node: Optional[List[str]] = None
-    
     # Common options
     prepare_db: Optional[bool] = False
     reportInterval: Optional[int] = 10

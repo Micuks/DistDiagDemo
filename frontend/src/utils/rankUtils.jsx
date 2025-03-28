@@ -254,4 +254,22 @@ export const getRecommendedActions = (metrics) => {
   });
   
   return actions.length > 0 ? actions : ["No specific actions recommended at this time."];
+};
+
+// Helper function to get full node name
+export const getFullNodeName = (nodeId) => {
+  if (!nodeId) return '';
+  
+  // If the nodeId contains numbers only, add 'obcluster-' prefix
+  if (/^\d+$/.test(nodeId)) {
+    return `obcluster-${nodeId}`;
+  }
+  
+  // If the nodeId is already a full name, return it as is
+  if (nodeId.includes('obcluster-') || nodeId.includes('observer-')) {
+    return nodeId;
+  }
+  
+  // Default transformation - add 'obcluster-' prefix
+  return `obcluster-${nodeId}`;
 }; 

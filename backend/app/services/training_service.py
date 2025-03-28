@@ -691,15 +691,60 @@ class TrainingService:
         # Get current stats
         stats = await self.get_dataset_stats()
         
-        # Check if we need to collect more anomaly variations
+        # If there's an active collection, don't start a new one
+        if self.current_anomaly or self.is_collecting_normal:
+            logger.info("Collection already in progress, skipping auto-balance")
+            return {"success": False, "message": "Collection already in progress"}
+        
+        # Calculate how balanced each anomaly type is
+        anomaly_types = stats.get("anomaly_types", {})
+        total_anomalies = stats.get("anomaly", 0)
+        total_samples = stats.get("total_samples", 0)
+        
+        # First check if we need more normal samples compared to anomalies
+        normal_ratio = stats.get("normal_ratio", 0)
+        anomaly_ratio = stats.get("anomaly_ratio", 0)
+        
+        # If normal samples are significantly underrepresented, collect normal data
+        if normal_ratio < 0.3 and anomaly_ratio > 0.7 and not self.is_collecting_normal:
+            logger.info(f"Normal samples underrepresented (ratio: {normal_ratio:.2f}), starting normal collection")
+            await self.start_normal_collection()
+            return {"success": True, "message": "Started normal data collection for balancing"}
+        
+        # Check if any anomaly type is underrepresented
+        if anomaly_types:
+            # Calculate the target count for each type (roughly equal distribution)
+            min_target = max(10, total_anomalies / (len(self.experiment_types) * 2))  # At least 10 samples per type
+            
+            # Find underrepresented types
+            underrepresented = []
+            for anomaly_type in self.experiment_types:
+                count = anomaly_types.get(anomaly_type, 0)
+                if count < min_target:
+                    underrepresented.append((anomaly_type, count))
+            
+            # Sort by count (most underrepresented first)
+            underrepresented.sort(key=lambda x: x[1])
+            
+            if underrepresented:
+                # Pick the most underrepresented type
+                anomaly_type, count = underrepresented[0]
+                logger.info(f"Collecting data for underrepresented anomaly type: {anomaly_type} (count: {count}, target: {min_target})")
+                
+                # Auto-select node (None means system will choose)
+                await self.start_collection(anomaly_type, None)
+                return {"success": True, "message": f"Started collection for underrepresented anomaly type: {anomaly_type}"}
+        
+        # If no underrepresented types, check if we need to collect variations for existing types
         for anomaly_type in self.experiment_types:
             # Check if this type has enough groups collected
-            if self.anomaly_groups[anomaly_type] < self.target_groups_per_type:
+            if anomaly_type in anomaly_types and self.anomaly_groups.get(anomaly_type, 0) < self.target_groups_per_type:
                 logger.info(f"Collecting variation {self.anomaly_groups[anomaly_type]+1} for {anomaly_type}")
                 await self.start_collection(anomaly_type, None)  # Let the system choose the node
-                return
+                return {"success": True, "message": f"Started collecting variation for {anomaly_type}"}
         
-        logger.info("All required anomaly variations have been collected")
+        logger.info("All required anomaly variations have been collected, dataset is balanced")
+        return {"success": True, "message": "Dataset is already well-balanced"}
 
     def get_training_data(self) -> tuple:
         """Get training data from all cases"""

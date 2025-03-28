@@ -42,8 +42,6 @@ const ExecutionSummary = ({
         switch (type) {
             case "cpu_stress":
                 return "CPU Stress";
-            case "io_bottleneck":
-                return "I/O Bottleneck";
             case "network_bottleneck":
                 return "Network Bottleneck";
             case "cache_bottleneck":
@@ -86,6 +84,33 @@ const ExecutionSummary = ({
 
     // Get active workload for displaying in anomaly-only mode
     const activeWorkload = skipWorkload && activeWorkloads.length > 0 ? activeWorkloads[0] : null;
+
+    // Format option label for better readability
+    const formatOptionLabel = (key) => {
+        // Convert camelCase to Title Case with spaces
+        return key
+            .replace(/([A-Z])/g, " $1")
+            .replace(/^./, (str) => str.toUpperCase())
+            .trim();
+    };
+
+    // Format option value for display
+    const formatOptionValue = (key, value) => {
+        // Handle special cases
+        if (key === 'reportInterval') {
+            return `${value} seconds`;
+        } else if (key === 'warmupTime') {
+            return `${value} seconds`;
+        } else if (key === 'runningTime') {
+            return `${value} minutes`;
+        } else if (key === 'randType') {
+            return value.charAt(0).toUpperCase() + value.slice(1);
+        } else if (typeof value === 'boolean') {
+            return value ? 'Yes' : 'No';
+        } else {
+            return value;
+        }
+    };
 
     return (
         <Space direction="vertical" style={{ width: "100%" }} size="large">
@@ -156,65 +181,42 @@ const ExecutionSummary = ({
                                 <Descriptions.Item label="Threads">
                                     {workloadConfig?.threads}
                                 </Descriptions.Item>
-                                <Descriptions.Item label="Prepare Database">
-                                    {workloadConfig?.prepareDatabase ? "Yes" : "No"}
-                                </Descriptions.Item>
-                                {workloadConfig?.options &&
-                                    Object.entries(workloadConfig.options)
-                                        .filter(([key]) => key !== 'node')
-                                        .map(([key, value]) => (
-                                            <Descriptions.Item
-                                                key={key}
-                                                label={key.replace(/([A-Z])/g, " $1").trim()}
-                                            >
-                                                {value}
-                                            </Descriptions.Item>
-                                        ))}
-                                <Descriptions.Item label="Target Node">
-                                    <Tag color="green">{workloadConfig?.options?.node?.join(", ")}</Tag>
-                                </Descriptions.Item>
+                                
+                                {/* Advanced Options Section */}
+                                {workloadConfig?.options && (
+                                    <Descriptions.Item label="Advanced Options" span={3}>
+                                        <Descriptions size="small" bordered column={1}>
+                                            {Object.entries(workloadConfig.options)
+                                                .filter(([key]) => key !== 'node')
+                                                .map(([key, value]) => (
+                                                    <Descriptions.Item
+                                                        key={key}
+                                                        label={formatOptionLabel(key)}
+                                                    >
+                                                        {formatOptionValue(key, value)}
+                                                    </Descriptions.Item>
+                                                ))}
+                                        </Descriptions>
+                                    </Descriptions.Item>
+                                )}
                             </Descriptions>
                         )
                     )}
 
                     <Descriptions title="Anomaly Configuration" bordered>
                         {anomalyConfig?.anomalies?.length > 0 ? (
-                            anomalyConfig.anomalies.map((anomaly, index) => (
-                                <React.Fragment key={anomaly.id}>
-                                    <Descriptions.Item
-                                        label={`Anomaly ${index + 1} Type`}
-                                    >
-                                        <Tag color="red">
-                                            {getAnomalyTypeName(anomaly.type)}
+                            <>
+                                <Descriptions.Item label="Anomaly Types" span={3}>
+                                    {anomalyConfig.anomalies.map((a) => (
+                                        <Tag color="red" key={a.id}>
+                                            {getAnomalyTypeName(a.type)} on {a.node.join(", ")}
                                         </Tag>
-                                    </Descriptions.Item>
-                                    <Descriptions.Item
-                                        label={`Anomaly ${index + 1} Node`}
-                                    >
-                                        <Tag color="orange">
-                                            {anomaly.node.join(", ")}
-                                        </Tag>
-                                    </Descriptions.Item>
-                                    <Descriptions.Item
-                                        label={`Anomaly ${index + 1} Severity`}
-                                    >
-                                        <Tag
-                                            color={
-                                                anomaly.severity === "high"
-                                                    ? "red"
-                                                    : anomaly.severity === "medium"
-                                                    ? "orange"
-                                                    : "green"
-                                            }
-                                        >
-                                            {anomaly.severity.toUpperCase()}
-                                        </Tag>
-                                    </Descriptions.Item>
-                                </React.Fragment>
-                            ))
+                                    ))}
+                                </Descriptions.Item>
+                            </>
                         ) : (
-                            <Descriptions.Item label="Scenario">
-                                <Tag color="green">Normal Execution (No Anomalies)</Tag>
+                            <Descriptions.Item label="Anomalies" span={3}>
+                                <Text type="secondary">None</Text>
                             </Descriptions.Item>
                         )}
                     </Descriptions>

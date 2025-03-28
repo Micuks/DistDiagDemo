@@ -30,17 +30,17 @@ const ControlPanel = () => {
     // Check for active workloads when component mounts
     useEffect(() => {
         localStorage.removeItem('onExecutionDashboard');
-        const checkActiveTasks = async () => {
+        const checkActiveTasks = async() => {
             try {
                 // Use the new task API to check for active tasks
                 const activeTasks = await workloadService.getActiveTasks();
                 console.log("Active tasks: ", activeTasks);
                 const activeWorkloads = await workloadService.getActiveWorkloads();
                 console.log("Active workloads: ", activeWorkloads);
-                
+
                 // Set active workloads
                 setActiveWorkloads(activeWorkloads);
-                
+
                 // If there are active tasks, show the dashboard
                 if (activeTasks.length > 0) {
                     setShowDashboard(true);
@@ -49,7 +49,7 @@ const ControlPanel = () => {
                 console.error('Failed to check active tasks:', error);
             }
         };
-        
+
         checkActiveTasks();
     }, []);
 
@@ -57,12 +57,12 @@ const ControlPanel = () => {
         setTaskName(name);
     };
 
-    const handleExecute = async () => {
+    const handleExecute = async() => {
         // Check if we have anomalies configured
-        const hasAnomalies = anomalyConfig && 
-                            anomalyConfig.anomalies && 
-                            anomalyConfig.anomalies.length > 0;
-        
+        const hasAnomalies = anomalyConfig &&
+            anomalyConfig.anomalies &&
+            anomalyConfig.anomalies.length > 0;
+
         // Check if we're running in anomaly-only mode (with existing workloads)
         const isAnomalyOnlyMode = skipWorkload && activeWorkloads.length > 0;
 
@@ -83,7 +83,7 @@ const ControlPanel = () => {
             const sameTypeWorkloads = activeWorkloads.filter(
                 workload => workload.type === workloadConfig.type && workload.status === 'running'
             );
-            
+
             if (sameTypeWorkloads.length > 0) {
                 // If a workload of same type is running, ask if user wants to just add anomalies
                 const activeWorkloadId = sameTypeWorkloads[0].id;
@@ -101,15 +101,9 @@ const ControlPanel = () => {
         setIsExecuting(true);
         try {
             let workloadResponse = null;
-            
+
             // Start the workload if we're not in anomaly-only mode
             if (!isAnomalyOnlyMode) {
-                // First prepare the database if needed
-                if (workloadConfig.prepareDatabase) {
-                    await workloadService.prepareDatabase(workloadConfig.type);
-                    message.success('Database prepared successfully');
-                }
-
                 // Start the workload
                 workloadResponse = await workloadService.startWorkload({
                     type: workloadConfig.type,
@@ -117,14 +111,14 @@ const ControlPanel = () => {
                     options: workloadConfig.options,
                     task_name: taskName.trim()
                 });
-                
+
                 message.success('Workload started successfully');
             } else {
                 // In anomaly-only mode, create a task with only anomalies
                 // Use the selected workload's ID
                 const activeWorkloadId = activeWorkloads[0].id;
                 const activeWorkloadType = activeWorkloads[0].type;
-                
+
                 // Create a task without starting a new workload
                 workloadResponse = await workloadService.createTask({
                     type: activeWorkloadType,
@@ -132,7 +126,7 @@ const ControlPanel = () => {
                     workload_id: activeWorkloadId,
                     anomalies: anomalyConfig.anomalies
                 });
-                
+
                 message.success('Task created successfully with existing workload');
             }
 
@@ -148,11 +142,11 @@ const ControlPanel = () => {
 
             // Refresh anomaly data
             await refetchAnomalies();
-            
+
             // Update active workloads
             const updatedWorkloads = await workloadService.getActiveWorkloads();
             setActiveWorkloads(updatedWorkloads);
-            
+
             // Mark as executed to show dashboard
             setIsExecuted(true);
             setShowDashboard(true);
@@ -195,39 +189,37 @@ const ControlPanel = () => {
                 </Paragraph>
                 <Row gutter={[16, 16]}>
                     <Col span={8}>
-                        <Button 
-                            type="primary" 
+                        <Button type="primary"
                             icon={<ApiOutlined />}
                             onClick={() => navigate('/training')}
-                            block
-                        >
+                            block>
                             Collect Training Data
                         </Button>
-                        <Text type="secondary" style={{ display: 'block', marginTop: '8px' }}>
-                            Gather data to train machine learning models for anomaly detection
+                        <Text type="secondary"
+                            style={{ display: 'block', marginTop: '8px' }}>
+                            Gather data to train machine learning models
+                            for anomaly detection
                         </Text>
                     </Col>
                     <Col span={8}>
-                        <Button 
-                            icon={<LineChartOutlined />}
+                        <Button icon={<LineChartOutlined />}
                             onClick={() => navigate('/metrics')}
-                            block
-                        >
+                            block>
                             View System Metrics
                         </Button>
-                        <Text type="secondary" style={{ display: 'block', marginTop: '8px' }}>
+                        <Text type="secondary"
+                            style={{ display: 'block', marginTop: '8px' }}>
                             Monitor real-time system performance metrics
                         </Text>
                     </Col>
                     <Col span={8}>
-                        <Button 
-                            icon={<ExperimentOutlined />}
+                        <Button icon={<ExperimentOutlined />}
                             onClick={() => navigate('/ranks')}
-                            block
-                        >
+                            block>
                             View RCA Results
                         </Button>
-                        <Text type="secondary" style={{ display: 'block', marginTop: '8px' }}>
+                        <Text type="secondary"
+                            style={{ display: 'block', marginTop: '8px' }}>
                             Review root cause analysis from different models
                         </Text>
                     </Col>
@@ -236,36 +228,30 @@ const ControlPanel = () => {
         );
     };
 
-    const steps = [
-        {
+    const steps = [{
             title: 'Configure Workload',
             description: 'Select and configure database workload',
             content: (
                 <>
-                    <Alert
-                        message="Step 1: Configure your workload"
+                    <Alert message="Step 1: Configure your workload"
                         description={
                             activeWorkloads.length > 0 ? (
                                 <Space direction="vertical">
                                     <Text>There are active workloads running. You can either configure a new workload or add anomalies to an existing workload.</Text>
-                                    <Button 
-                                        type={skipWorkload ? "primary" : "default"}
-                                        onClick={toggleWorkloadSkip}
-                                    >
+                                    <Button type={skipWorkload ? "primary" : "default"}
+                                        onClick={toggleWorkloadSkip}>
                                         {skipWorkload ? "Configure New Workload" : "Use Existing Workload"}
                                     </Button>
                                 </Space>
                             ) : (
-                                "Select the type of database workload you want to run, number of threads, and the target node(s)."
+                                "Select the type of database workload you want to run, number of threads."
                             )
                         }
                         type="info"
-                        showIcon
-                        style={{ marginBottom: 16 }}
-                    />
+                        showIcon style={{ marginBottom: 16 }}
+                    /> 
                     {!skipWorkload && (
-                        <WorkloadConfig
-                            onConfigChange={setWorkloadConfig}
+                        <WorkloadConfig onConfigChange={setWorkloadConfig}
                             initialConfig={workloadConfig}
                         />
                     )}
@@ -293,19 +279,15 @@ const ControlPanel = () => {
             description: 'Select and configure anomalies to inject (optional)',
             content: (
                 <>
-                    <Alert
-                        message="Step 2: Configure anomalies (Optional)"
+                    <Alert message="Step 2: Configure anomalies (Optional)"
                         description={
-                            skipWorkload ? 
-                            "Select the types of anomalies you want to inject into the existing workload." :
-                            "Select the types of anomalies you want to inject into the system. This is optional - you can run a normal workload without anomalies."
+                            skipWorkload ?
+                            "Select the types of anomalies you want to inject into the existing workload." : "Select the types of anomalies you want to inject into the system. This is optional - you can run a normal workload without anomalies."
                         }
                         type="info"
-                        showIcon
-                        style={{ marginBottom: 16 }}
+                        showIcon style={{ marginBottom: 16 }}
                     />
-                    <AnomalyConfig
-                        onConfigChange={setAnomalyConfig}
+                    <AnomalyConfig onConfigChange={setAnomalyConfig}
                         initialConfig={anomalyConfig}
                     />
                 </>
@@ -317,15 +299,12 @@ const ControlPanel = () => {
             description: 'Review configuration and start execution',
             content: (
                 <>
-                    <Alert
-                        message="Step 3: Review and execute"
+                    <Alert message="Step 3: Review and execute"
                         description="Review your configuration settings and provide a name for this task. Click 'Execute' to start the workload."
                         type="info"
-                        showIcon
-                        style={{ marginBottom: 16 }}
+                        showIcon style={{ marginBottom: 16 }}
                     />
-                    <ExecutionSummary
-                        workloadConfig={skipWorkload ? null : workloadConfig}
+                    <ExecutionSummary workloadConfig={skipWorkload ? null : workloadConfig}
                         anomalyConfig={anomalyConfig}
                         onExecute={handleExecute}
                         isExecuting={isExecuting}
@@ -343,8 +322,7 @@ const ControlPanel = () => {
     if (showDashboard) {
         return (
             <>
-                <ExecutionDashboard 
-                    workloadConfig={workloadConfig}
+                <ExecutionDashboard workloadConfig={workloadConfig}
                     anomalyConfig={anomalyConfig}
                     onReset={handleReset}
                     onNewExecution={handleNewExecution}
@@ -356,13 +334,17 @@ const ControlPanel = () => {
 
     return (
         <Card>
-            <Space direction="vertical" style={{ width: '100%' }} size="large">
-                <Row gutter={[16, 16]} align="middle">
+            <Space direction="vertical"
+                style={{ width: '100%' }}
+                size="large">
+                <Row gutter={[16, 16]}
+                    align="middle">
                     <Col>
                         <ControlOutlined style={{ fontSize: 32, marginRight: 8 }} />
                     </Col>
                     <Col>
-                        <Title level={3} style={{ margin: 0 }}>Control Panel</Title>
+                        <Title level={3}
+                            style={{ margin: 0 }}>Control Panel</Title>
                         <Text type="secondary">
                             Configure and execute workload and anomaly scenarios
                         </Text>
@@ -371,33 +353,32 @@ const ControlPanel = () => {
 
                 <Divider />
 
-                <Alert
-                    message="Workflow Guide"
+                <Alert message="Workflow Guide"
                     description={
                         <Text>
                             First you'll configure a workload and optional anomalies, then execute them to either collect 
-                            training data, monitor system metrics, or analyze root causes with different models.
+                            training data,
+                            monitor system metrics,
+                            or analyze root causes with different models.
                         </Text>
                     }
                     type="success"
-                    showIcon
-                    style={{ marginBottom: 16 }}
+                    showIcon style={{ marginBottom: 16 }}
                 />
 
-                <Steps
-                    current={currentStep}
-                    items={steps.map((step, index) => ({
-                        title: step.title,
-                        description: step.description,
-                        icon: step.icon
-                    }))}
+                <Steps current={currentStep}
+                    items={
+                        steps.map((step, index) => ({
+                            title: step.title,
+                            description: step.description,
+                            icon: step.icon
+                        }))
+                    }
                     onChange={setCurrentStep}
                     style={{ marginBottom: 24 }}
                 />
 
-                <Card>
-                    {steps[currentStep].content}
-                </Card>
+                <Card>{steps[currentStep].content}</Card>
 
                 <Space style={{ marginTop: 24, justifyContent: 'flex-end' }}>
                     {currentStep > 0 && (
@@ -406,11 +387,9 @@ const ControlPanel = () => {
                         </Button>
                     )}
                     {currentStep < steps.length - 1 && (
-                        <Button
-                            type="primary"
+                        <Button type="primary"
                             onClick={() => setCurrentStep(currentStep + 1)}
-                            disabled={!workloadConfig && currentStep === 0 && !skipWorkload}
-                        >
+                            disabled={!workloadConfig && currentStep === 0 && !skipWorkload}>
                             {currentStep === 0 ? "Configure Anomalies →" : "Review Configuration →"}
                         </Button>
                     )}

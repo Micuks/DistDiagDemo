@@ -268,6 +268,12 @@ class AnomalyService {
         );
     }
 
+    async getCompoundAnomalies() {
+        return this._retryableRequest(() =>
+            this.client.get('/api/anomaly/compound')
+        );
+    }
+
     async getCollectionStatus() {
         return this._retryableRequest(() =>
             this.client.get('/api/anomaly/collection-status')
@@ -453,11 +459,6 @@ class AnomalyService {
                 key: 'cpu_stress',
                 name: 'CPU Stress',
                 description: 'Simulate high CPU usage'
-            },
-            {
-                key: 'io_bottleneck',
-                name: 'I/O Bottleneck',
-                description: 'Simulate slow disk I/O operations'
             },
             {
                 key: 'network_bottleneck',

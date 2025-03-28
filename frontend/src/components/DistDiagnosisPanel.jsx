@@ -12,7 +12,8 @@ import {
   Empty,
   Radio,
   Switch,
-  List
+  List,
+  Tooltip
 } from "antd";
 import {
   BarChart,
@@ -24,7 +25,7 @@ import {
   ResponsiveContainer,
   LineChart,
   Line,
-  Tooltip
+  Tooltip as RechartsTooltip
 } from "recharts";
 import { getRankColor, getModelColor } from '../utils/rankUtils.jsx';
 
@@ -158,21 +159,41 @@ const DistDiagnosisPanel = ({
           </Col>
           
           <Col xs={24} lg={12}>
-            <Card title="Anomaly Distribution by Type" className="chart-card">
+            <Card title="Anomaly Distribution by Type" className="chart-card" bordered={true} style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.1)' }}>
               <ResponsiveContainer width="100%" height={350}>
-                <BarChart data={getAnomalyDistribution()}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="type" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
+                <BarChart data={getAnomalyDistribution()} barSize={30} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="type" 
+                    tick={{ fill: '#333', fontWeight: 'bold' }} 
+                    tickFormatter={(value) => value.replace(/_/g, ' ')}
+                  />
+                  <YAxis 
+                    label={{ value: 'Count', angle: -90, position: 'insideLeft', offset: -5 }}
+                    tickCount={5}
+                  />
+                  <Tooltip 
+                    formatter={(value, name, props) => [`${value} anomalies`, name]}
+                    labelFormatter={(value) => `Type: ${value.replace(/_/g, ' ')}`}
+                    cursor={{ fill: 'rgba(0, 0, 0, 0.05)' }}
+                    contentStyle={{ border: '1px solid #ccc', borderRadius: '4px', padding: '10px' }}
+                  />
+                  <Legend verticalAlign="top" wrapperStyle={{ paddingBottom: '15px' }} />
                   
                   {selectedModels.map((model, index) => (
                     comparisonData[model] && !comparisonData[model].error && (
                       <Bar
                         key={model}
                         dataKey={model}
+                        name={model.split('_')[0]}
                         fill={getModelColor(model, index)}
+                        radius={[4, 4, 0, 0]}
+                        animationDuration={1000}
+                        label={{ 
+                          position: 'top', 
+                          fill: '#666',
+                          fontSize: 10,
+                          formatter: (value) => value > 0 ? value : ''
+                        }}
                       />
                     )
                   ))}
@@ -184,27 +205,37 @@ const DistDiagnosisPanel = ({
         
         <Row gutter={16} style={{ marginTop: 16 }}>
           <Col span={24}>
-            <Card title="Anomaly Timeline" className="chart-card">
-              <div style={{ marginBottom: 16 }}>
+            <Card title="Anomaly Timeline" className="chart-card" bordered={true} style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.1)' }}>
+              <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center' }}>
                 <Switch 
                   checkedChildren="Raw Data" 
                   unCheckedChildren="Processed" 
                   onChange={value => setShowRawData(value)} 
                   style={{ marginRight: 16 }}
                 />
+                <Tooltip title="Switch between raw metric data and processed anomaly data">
+                  <InfoCircleOutlined style={{ marginRight: 16 }} />
+                </Tooltip>
                 <Radio.Group 
                   value={timelineView} 
                   onChange={e => setTimelineView(e.target.value)}
                   buttonStyle="solid"
+                  style={{ marginRight: 'auto' }}
                 >
-                  <Radio.Button value="anomalies">Anomalies</Radio.Button>
-                  <Radio.Button value="trends">Trends</Radio.Button>
-                  <Radio.Button value="features">Features</Radio.Button>
+                  <Tooltip title="Shows the number of detected anomalies over time">
+                    <Radio.Button value="anomalies">Anomalies</Radio.Button>
+                  </Tooltip>
+                  <Tooltip title="Shows the trend direction of anomalies (increasing or decreasing)">
+                    <Radio.Button value="trends">Trends</Radio.Button>
+                  </Tooltip>
+                  <Tooltip title="Shows the importance of key metrics related to the anomalies">
+                    <Radio.Button value="features">Features</Radio.Button>
+                  </Tooltip>
                 </Radio.Group>
               </div>
-              <ResponsiveContainer width="100%" height={250}>
-                <LineChart data={getTimelineData()}>
-                  <CartesianGrid strokeDasharray="3 3" />
+              <ResponsiveContainer width="100%" height={280}>
+                <LineChart data={getTimelineData()} margin={{ top: 5, right: 30, left: 20, bottom: 20 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis 
                     dataKey="timestamp" 
                     tickFormatter={timestamp => {
@@ -212,16 +243,21 @@ const DistDiagnosisPanel = ({
                       return date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
                     }}
                     label={{ value: 'Time', position: 'insideBottomRight', offset: -5 }}
+                    stroke="#333"
                   />
                   <YAxis 
                     label={{ 
                       value: timelineView === 'anomalies' ? 'Anomaly Count' : 
                             timelineView === 'trends' ? 'Trend Direction' : 'Feature Importance',
                       angle: -90, 
-                      position: 'insideLeft' 
+                      position: 'insideLeft',
+                      offset: -10
                     }}
+                    stroke="#333"
+                    tickLine={true}
+                    axisLine={true}
                   />
-                  <Tooltip 
+                  <RechartsTooltip 
                     labelFormatter={timestamp => {
                       const date = new Date(timestamp);
                       return date.toLocaleString([], {
@@ -242,8 +278,14 @@ const DistDiagnosisPanel = ({
                       }
                       return [value, name];
                     }}
+                    contentStyle={{ 
+                      border: '1px solid #ccc', 
+                      borderRadius: '4px', 
+                      padding: '10px',
+                      backgroundColor: 'rgba(255, 255, 255, 0.9)'
+                    }}
                   />
-                  <Legend />
+                  <Legend verticalAlign="top" wrapperStyle={{ paddingBottom: '8px' }} />
                   
                   {selectedModels.map((model, index) => {
                     if (!comparisonData[model] || comparisonData[model].error) {
@@ -265,26 +307,19 @@ const DistDiagnosisPanel = ({
                         key={dataKey}
                         type="monotone"
                         dataKey={dataKey}
-                        name={timelineView === 'features' ? `${model} (${dataKey.split('_')[1]})` : model}
+                        name={timelineView === 'features' ? `${model} (${dataKey.split('_')[1]})` : model.split('_')[0]}
                         stroke={getModelColor(model, index)}
                         strokeWidth={2}
-                        dot={{ r: 4 }}
-                        activeDot={{ r: 8 }}
+                        dot={{ r: 4, strokeWidth: 1, fill: 'white' }}
+                        activeDot={{ r: 6, stroke: '#666', strokeWidth: 1 }}
                         isAnimationActive={true}
-                        animationDuration={500}
+                        animationDuration={800}
+                        animationEasing="ease-in-out"
                       />
                     );
                   })}
                 </LineChart>
               </ResponsiveContainer>
-            </Card>
-          </Col>
-        </Row>
-        
-        <Row gutter={16} style={{ marginTop: 16 }}>
-          <Col span={24}>
-            <Card title="Node Performance Heatmap" className="chart-card">
-              {renderNodeHeatmap()}
             </Card>
           </Col>
         </Row>

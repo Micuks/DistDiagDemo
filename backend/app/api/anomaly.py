@@ -342,6 +342,56 @@ async def get_anomaly_ranks(response: Response):
             }
         )
 
+@router.get("/compound")
+@cache(expire=5)
+async def get_compound_anomalies():
+    """Get comprehensive anomaly diagnosis including compound anomalies"""
+    try:
+        # Get detailed metrics with time series data
+        metrics = metrics_service.get_detailed_metrics()
+        if not metrics:
+            return JSONResponse(
+                content={
+                    "anomalies": [],
+                    "compound_anomalies": {},
+                    "propagation_graph": {}
+                },
+                headers={
+                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Credentials": "true"
+                }
+            )
+            
+        # Get full diagnosis results including compound anomalies
+        diagnosis_result = diagnosis_service.diagnose(metrics)
+        
+        # Create a more simplified response structure
+        response_data = {
+            "anomalies": diagnosis_result.get("anomalies", []),
+            "compound_anomalies": diagnosis_result.get("compound_anomalies", {}),
+            "propagation_graph": diagnosis_result.get("propagation_graph", {}),
+            "node_names": diagnosis_result.get("node_names", [])
+        }
+        
+        return JSONResponse(
+            content=response_data,
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get compound anomalies: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+
 @router.post("/train")
 async def train_model():
     """Train the anomaly detection model."""

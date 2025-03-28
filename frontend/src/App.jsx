@@ -19,6 +19,7 @@ import {
   QuestionCircleOutlined,
   RocketOutlined,
   ArrowRightOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import {
   BrowserRouter as Router,
@@ -127,15 +128,6 @@ const Navigation = () => {
       ),
     },
     {
-      key: "/training",
-      icon: <ApiOutlined style={{ color: "#fff" }} />,
-      label: (
-        <Tooltip title="Train models (optional)">
-          <span style={{ color: "#fff" }}>Model Training</span>
-        </Tooltip>
-      ),
-    },
-    {
       key: "/metrics",
       icon: <LineChartOutlined style={{ color: "#fff" }} />,
       label: (
@@ -158,11 +150,29 @@ const Navigation = () => {
       ),
     },
     {
+      key: "/training",
+      icon: <ApiOutlined style={{ color: "#fff" }} />,
+      label: (
+        <Tooltip title="Train models (optional)">
+          <span style={{ color: "#fff" }}>Model Training</span>
+        </Tooltip>
+      ),
+    },
+    {
       key: "workflow",
       icon: <QuestionCircleOutlined style={{ color: "#fff" }} />,
       label: (
         <Tooltip title="View workflow guide">
           <span style={{ color: "#fff" }}>Workflow Guide</span>
+        </Tooltip>
+      ),
+    },
+    {
+      key: "/admin",
+      icon: <SettingOutlined style={{ color: "#fff" }} />,
+      label: (
+        <Tooltip title="Admin settings">
+          <span style={{ color: "#fff" }}>Admin</span>
         </Tooltip>
       ),
     },

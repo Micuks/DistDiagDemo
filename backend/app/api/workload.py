@@ -34,18 +34,9 @@ async def prepare_database(request: WorkloadRequest):
         logger.exception("Error during database preparation")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/nodes", response_model=List[str])
-async def get_available_nodes():
-    """Get list of available nodes for running workloads"""
-    try:
-        nodes = await k8s_service.get_available_nodes()
-        return nodes
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.post("/start", response_model=WorkloadResponse)
 async def start_workload(config: WorkloadRequest):
-    """Start a new workload with custom configuration"""
+    """Start a new workload with custom configuration using obproxy connection"""
     try:
         logger.info(f"Received start workload request: type={config.type}, threads={config.threads}, task_name={config.task_name}")
         logger.info(f"Received options: {config.options.dict() if config.options else {}}")

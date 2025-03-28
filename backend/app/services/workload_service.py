@@ -565,46 +565,17 @@ class WorkloadService:
             else:
                 logger.warning("No task_name provided, skipping task creation")
             
-            # Check if specific nodes are requested
-            target_nodes = options.get('node', []) if options else []
-            if not isinstance(target_nodes, list):
-                target_nodes = [target_nodes]  # Convert to list if it's a single string
-            
-            # If no specific nodes are selected, use the default connection
-            if not target_nodes:
-                logger.info("No specific nodes selected, using default database connection")
-                return self._start_workload_on_node(
-                    workload_type, 
-                    num_threads, 
-                    options, 
-                    task, 
-                    workload_id,
-                    self.db_host, 
-                    self.db_port
-                )
-            
-            # Start workload on each selected node
-            success = False
-            logger.info(f"Node_port_mapping: {self.node_port_mapping}")
-            for node in target_nodes:
-                node_port = self.node_port_mapping.get(node)
-                if not node_port:
-                    logger.warning(f"Unknown node: {node}, not found in mapping. Available nodes: {list(self.node_port_mapping.keys())}")
-                    continue
-                
-                logger.info(f"Starting workload on node {node} with port {node_port}")
-                node_success = self._start_workload_on_node(
-                    workload_type, 
-                    num_threads, 
-                    options, 
-                    task, 
-                    f"{workload_id}_{node}",  # Add node to ID for uniqueness
-                    self.db_host,  # Host remains the same (all in K8s)
-                    node_port
-                )
-                
-                # If at least one node succeeds, consider it a success
-                success = success or node_success
+            # Always use the default database connection parameters from __init__
+            logger.info("Using default database connection from obproxy")
+            success = self._start_workload_on_node(
+                workload_type, 
+                num_threads, 
+                options, 
+                task, 
+                workload_id,
+                self.db_host, 
+                self.db_port
+            )
             
             if success and task:
                 self.update_task_status(task.id, WorkloadStatus.RUNNING)

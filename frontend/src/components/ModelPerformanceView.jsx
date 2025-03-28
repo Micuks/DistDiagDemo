@@ -136,7 +136,7 @@ const ModelPerformanceView = ({ modelName }) => {
                             }
                             value={performance.training_time}
                             precision={2}
-                            suffix="seconds"
+                            suffix="minutes"
                             valueStyle={{ color: '#1890ff', fontSize: 22 }}
                         />
                     </Card>

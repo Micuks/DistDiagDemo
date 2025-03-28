@@ -149,12 +149,6 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
       )
     },
     {
-      title: 'Target Node',
-      dataIndex: 'workload_config',
-      key: 'target_node',
-      render: (config) => config?.options?.target_node || 'All Nodes'
-    },
-    {
       title: 'Threads',
       dataIndex: 'workload_config',
       key: 'threads',
@@ -814,7 +808,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
             <Card 
               title={
                 <Space>
-                  <Title level={5}>Anomaly Status</Title>
+                  <Title level={5}>Active Anomalies</Title>
                   {(anomalyLoading && !isRefreshing) && <Spin size="small" />}
                 </Space>
               }
