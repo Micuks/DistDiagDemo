@@ -7,3 +7,5 @@ obdiag_*/
 tmp/
 **/data/training/*
 models/
+data/*.bak/
+data/*.bak.*/

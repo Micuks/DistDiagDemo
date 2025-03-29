@@ -25,7 +25,7 @@ const RanksPanel = () => {
   const [chartType, setChartType] = useState("radar");
   const [showConfidenceIntervals, setShowConfidenceIntervals] = useState(true);
   const [sortMethod, setSortMethod] = useState("confidence");
-  const [thresholdValue, setThresholdValue] = useState(0.0);
+  const [thresholdValue, setThresholdValue] = useState(0.1);
   const [metricsFluctuations, setMetricsFluctuations] = useState({});
   const [hasFluctuations, setHasFluctuations] = useState(false);
   const [lastAnalysisTime, setLastAnalysisTime] = useState(0);
@@ -109,8 +109,7 @@ const RanksPanel = () => {
           }));
           
           // Use threshold value from UI
-          // Convert threshold from percentage to decimal if needed
-          const thresholdDecimal = thresholdValue > 1 ? thresholdValue / 100 : thresholdValue;
+          const thresholdDecimal = thresholdValue;
           console.log(`Fetching model diagnosis for ${model} with threshold ${thresholdDecimal}`);
           const response = await anomalyService.getModelDiagnosis(model, thresholdDecimal);
           console.log(`Response for model ${model}:`, response);

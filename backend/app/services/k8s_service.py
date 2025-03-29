@@ -12,6 +12,7 @@ from async_lru import alru_cache
 import json
 import pymysql
 import threading
+import copy
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
 
@@ -53,18 +54,17 @@ class K8sService:
         self._last_cache_update = None
         self._last_request_time = 0  # This will force a refresh on next request
         self.collection_duration = 180  # Collection duration in seconds
-        self.experiment_types = ["cpu_stress", "io_bottleneck", "network_bottleneck", "cache_bottleneck", "too_many_indexes"]
         self.available_nodes = []
+        # Define supported experiment types
+        self.experiment_types = ["cpu_stress", "io_bottleneck", "network_bottleneck", "cache_bottleneck"]
         try:
-            self.available_nodes = loop.run_until_complete(self._fetch_available_nodes())
+            running_loop = asyncio.get_running_loop()
+            # If a running loop exists, schedule an asynchronous update
+            asyncio.create_task(self._update_available_nodes())
         except RuntimeError:
-            # If there's no running event loop
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                self.available_nodes = new_loop.run_until_complete(self._fetch_available_nodes())
-            finally:
-                new_loop.close()
+            # No running loop, so block synchronously
+            loop = asyncio.get_event_loop()
+            self.available_nodes = loop.run_until_complete(self._fetch_available_nodes())
         except Exception as e:
             logger.error(f"Error getting available nodes: {e}")
             self.available_nodes = []
@@ -98,26 +98,29 @@ class K8sService:
         # Add severity variations for experiments
         self.severity_variations = {
             "cpu_stress": [
-                {"workers": 16, "load": 50},
-                {"workers": 24, "load": 75},
-                {"workers": 32, "load": 100}
+                {"workers": 32, "load": 50},
+                {"workers": 48, "load": 75},
+                {"workers": 64, "load": 100}
             ],
             "io_bottleneck": [
-                {"intensity": "low", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=64k count=5000 oflag=dsync & sleep %s"},
-                {"intensity": "medium", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file2 bs=64k count=5000 oflag=dsync & sleep %s"},
-                {"intensity": "high", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file2 bs=1M count=1024 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file3 bs=64k count=10000 conv=fsync & sleep %s"}
+                {"intensity": "low", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=2048 conv=fdatasync & sleep %s"},
+                {"intensity": "medium", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=2048 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file2 bs=1M count=2048 conv=fdatasync & sleep %s"},
+                {"intensity": "high", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=2048 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file2 bs=1M count=2048 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file3 bs=1M count=2048 conv=fdatasync & sleep %s"}
             ],
             "network_bottleneck": [
-                {"latency": "1000ms", "correlation": "75"},
-                {"latency": "2000ms", "correlation": "85"},
+                {"latency": "1000ms", "correlation": "85"},
+                {"latency": "2000ms", "correlation": "95"},
                 {"latency": "3000ms", "correlation": "100"}
             ],
             "cache_bottleneck": [
-                {"workers": 4, "size": "1GB"},
-                {"workers": 6, "size": "1.5GB"},
-                {"workers": 8, "size": "2GB"}
+                {"workers": 8, "size": "2GB"},
+                {"workers": 12, "size": "3GB"},
+                {"workers": 16, "size": "4GB"}
             ]
         }
+
+        # Build pod IP to name mapping synchronously
+        self.ip_to_name_map = self._build_ip_to_name_mapping()
 
     def _should_update_cache(self) -> bool:
         """Check if cache needs to be updated"""
@@ -299,10 +302,11 @@ class K8sService:
             
             # Special handling for cache bottleneck
             elif anomaly_type == "cache_bottleneck":
-                # Restore default memstore_limit_percentage
-                await self._update_ob_parameter({
-                    "memstore_limit_percentage": "0"  # Restore default value 0
-                })
+                # Restore default memstore_limit_percentage for all zones
+                for zone in self.ob_zones:
+                    await self._update_ob_parameter_for_zone({
+                        "memstore_limit_percentage": "0"  # Restore default value 0
+                    }, zone)
                 
                 # Since we now create an actual Kubernetes resource for cache_bottleneck,
                 # we need to delete it like other experiment types
@@ -373,45 +377,6 @@ class K8sService:
                 
                 return deleted_experiments
             
-            # Special handling for too_many_indexes
-            elif anomaly_type == "too_many_indexes":
-                # Generate a unique experiment name for tracking
-                experiment_name = f"ob-too-many-indexes-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                
-                # Read SQL commands from template
-                template = self._get_experiment_template(anomaly_type)
-                sql_commands = template["spec"].get("sqlCommands", [])
-                
-                # Execute SQL commands directly
-                await self._execute_sql_commands(sql_commands)
-                
-                # If no specific target nodes were provided, use a default
-                if not target_nodes:
-                    target_nodes = ["obcluster"]
-                
-                # Create tracking records for each target node
-                for node in target_nodes:
-                    node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
-                    
-                    # Track the experiment with SQL commands included
-                    self.active_anomalies[node_experiment_name] = {
-                        "start_time": datetime.now().isoformat(),
-                        "status": "active",
-                        "type": anomaly_type,
-                        "name": node_experiment_name,
-                        "target": "obcluster",
-                        "node": node,
-                        "sql_commands": sql_commands
-                    }
-                    
-                    logger.info(f"Created {anomaly_type} experiment {node_experiment_name} for node {node}")
-                
-                # Invalidate cache
-                self.invalidate_cache()
-                self._last_cache_update = 0
-                
-                return
-
             # For other types, proceed with chaos mesh experiment deletion
             plural = self._get_experiment_plural(anomaly_type)
             deleted_experiments = []
@@ -534,9 +499,6 @@ class K8sService:
         try:
             # Always force update if _last_cache_update is 0
             if self._last_cache_update == 0 or self._should_update_cache():
-                # Check for any untracked IO bottleneck processes first
-                await self._check_for_untracked_io_bottlenecks()
-                
                 # Sync with Kubernetes to get current active experiments
                 experiment_types = self.experiment_types
                 current_experiments = []
@@ -560,29 +522,34 @@ class K8sService:
                         logger.debug(f"Found {len(experiments.get('items', []))} {exp_type} experiments in Kubernetes")
                         
                         for exp in experiments.get('items', []):
-                            # Get the phase, default to empty string if not found
-                            phase = exp.get('status', {}).get('phase', '').lower()
-                            # logger.debug(f"Experiment {exp['metadata']['name']} has phase: '{phase}'")
-                            
-                            # Be more flexible with phase detection - consider any experiment without a failed/deleted status as active
-                            if phase and phase not in ['failed', 'finished', 'deleted', 'completed', 'terminating']:
-                                name = exp['metadata']['name']
-                                found_experiment_names.add(name)  # Add to set of found experiments
-                                
-                                # Use existing data if available, otherwise create new
-                                if name in self.active_anomalies:
-                                    current_experiments.append(self.active_anomalies[name])
-                                else:
-                                    start_time = exp['metadata'].get('creationTimestamp', datetime.now().isoformat())
-                                    target = exp['spec']['selector']['labelSelectors'].get('ref-obcluster', 'unknown')
-                                    current_experiments.append({
-                                        "name": name,
-                                        "type": exp_type,
-                                        "start_time": start_time,
-                                        "status": "active",
-                                        "target": target,
-                                        "node": target
-                                    })
+                            # Extract phase from status; if not available, use desiredPhase from experiment field.
+                            phase = exp.get('status', {}).get('phase')
+                            if phase is None:
+                                phase = exp.get('status', {}).get('experiment', {}).get('desiredPhase', '')
+                            phase_str = str(phase).lower() if phase else ""
+
+                            # Skip experiments that indicate completion or failure
+                            if phase_str in ['failed', 'finished', 'deleted', 'completed', 'terminating', 'stop']:
+                                continue
+
+                            name = exp['metadata']['name']
+                            found_experiment_names.add(name)  # Add to set of found experiments
+
+                            # Use existing data if available, otherwise create new
+                            if name in self.active_anomalies:
+                                current_experiments.append(self.active_anomalies[name])
+                            else:
+                                start_time = exp['metadata'].get('creationTimestamp', datetime.now().isoformat())
+                                target_label = exp['spec']['selector']['labelSelectors'].get('ref-obcluster', 'unknown')
+                                target_pods = exp['spec']['selector']['pods'].get(self.namespace, [])
+                                current_experiments.append({
+                                    "name": name,
+                                    "type": exp_type,
+                                    "start_time": start_time,
+                                    "status": "active",
+                                    "target": target_label,
+                                    "node": target_pods
+                                })
                     except ApiException as e:
                         if e.status != 404:  # Ignore 404 Not Found errors
                             logger.error(f"Error listing {exp_type} experiments: {str(e)}")
@@ -629,7 +596,7 @@ class K8sService:
                             # Standard verification through Kubernetes API for other anomaly types
                             plural = self._get_experiment_plural(anomaly_type)
                             try:
-                                await asyncio.to_thread(
+                                response = await asyncio.to_thread(
                                     self.custom_api.get_namespaced_custom_object,
                                     group="chaos-mesh.org",
                                     version="v1alpha1",
@@ -637,25 +604,26 @@ class K8sService:
                                     plural=plural,
                                     name=name
                                 )
-                                # If we get here, the anomaly still exists
-                                new_active_anomalies[name] = anomaly
-                                logger.info(f"Verified {name} still exists in Kubernetes")
-                            except ApiException as e:
-                                if e.status == 404:
-                                    # Anomaly doesn't exist anymore
-                                    logger.info(f"Anomaly {name} no longer exists in Kubernetes")
-                                    continue
+                                phase = response.get('status', {}).get('phase')
+                                if phase is None:
+                                    phase = response.get('status', {}).get('experiment', {}).get('desiredPhase', '')
+                                phase_str = str(phase).lower() if phase else ""
+                                if phase_str in ['failed', 'finished', 'deleted', 'completed', 'terminating', 'stop']:
+                                    logger.info(f"Anomaly {name} is marked as {phase_str} and will be removed from tracking")
                                 else:
-                                    # Some other error, assume it exists
+                                    new_active_anomalies[name] = anomaly
+                                    logger.info(f"Verified {name} still exists in Kubernetes")
+                            except ApiException as e:
+                                if e.status == 404:  # Not found, good - it's gone
+                                    logger.info(f"Anomaly {name} no longer exists in Kubernetes")
+                                else:
                                     new_active_anomalies[name] = anomaly
                                     logger.warning(f"Error verifying {name}, assuming it exists: {str(e)}")
                         except Exception as e:
                             logger.error(f"Error verifying anomaly {name}: {str(e)}")
                 
                 # Replace active_anomalies with the current state
-                if new_active_anomalies or not self.active_anomalies:
-                    # Only update if we found something or we had nothing before
-                    self.active_anomalies = new_active_anomalies
+                self.active_anomalies = new_active_anomalies
                 
                 logger.info(f"Active anomalies: {list(self.active_anomalies.keys())}")
                 
@@ -669,70 +637,7 @@ class K8sService:
             # If anything fails, return the locally tracked anomalies as a fallback
             return list(self.active_anomalies.values())
 
-    async def _check_for_untracked_io_bottlenecks(self):
-        """Check if there are any IO bottleneck processes running that aren't in our tracking"""
-        try:
-            # Look for any dd processes with io_stress in their command line
-            import subprocess
-            
-            # Use ps command to find IO stress processes
-            cmd = "ps aux | grep '[d]d if=/dev/urandom of=/tmp/io_stress' || true"
-            process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, stderr = process.communicate()
-            output = stdout.decode('utf-8')
-            
-            if output.strip():
-                logger.info(f"Found running IO bottleneck processes: {output.strip()}")
-                
-                # Check each line to see if it matches our expected pattern
-                for line in output.strip().split('\n'):
-                    if 'dd if=/dev/urandom of=/tmp/io_stress' in line:
-                        # Get the PID
-                        parts = line.split()
-                        if len(parts) > 1:
-                            pid = int(parts[1])
-                            
-                            # Check if we're already tracking this process
-                            already_tracked = False
-                            for name, anomaly in self.active_anomalies.items():
-                                if (anomaly.get('type') == 'io_bottleneck' and 
-                                    anomaly.get('process_id') == pid):
-                                    already_tracked = True
-                                    break
-                            
-                            if not already_tracked:
-                                # This is an untracked IO bottleneck process - add it to our tracking
-                                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                                experiment_name = f"ob-io-bottleneck-{timestamp}-recovered"
-                                
-                                # Try to determine which node this is for based on the command
-                                node = None
-                                for part in line.split():
-                                    if part.startswith('obcluster-') and '-zone' in part:
-                                        node = part
-                                        break
-                                
-                                if not node:
-                                    node = "unknown"
-                                    
-                                # Add to our tracking
-                                self.active_anomalies[experiment_name] = {
-                                    "start_time": (datetime.now() - timedelta(seconds=10)).isoformat(),  # Assume it just started
-                                    "status": "active",
-                                    "type": "io_bottleneck",
-                                    "name": experiment_name,
-                                    "target": "obcluster",
-                                    "node": node,
-                                    "process_id": pid,
-                                    "expected_duration": self.collection_duration,
-                                    "recovered": True  # Mark as recovered
-                                }
-                                
-                                logger.info(f"Recovered untracked IO bottleneck process with PID {pid} as {experiment_name}")
-        except Exception as e:
-            logger.error(f"Error checking for untracked IO bottlenecks: {str(e)}")
-
-    def _get_experiment_template(self, anomaly_type: str) -> Dict[str, Any]:
+    def _get_experiment_template(self, anomaly_type: str, severity: Optional[str] = None) -> Dict[str, Any]:
         """Get the chaos experiment template with varying severity"""
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         experiment_name = f"ob-{anomaly_type.replace('_', '-')}-{timestamp}"
@@ -745,17 +650,24 @@ class K8sService:
                 "namespace": self.namespace
             },
             "spec": {
-                "mode": "all",
+                "mode": "one",
                 "selector": {
                     "namespaces": [self.namespace],
-                    "labelSelectors": {"ref-obcluster": "obcluster"}
+                    "labelSelectors": {"ref-obcluster": "obcluster"},
+                    "pods": {self.namespace: []}
                 }
             }
         }
 
-        # Get severity variation based on previous experiments
-        severity_index = len(self.active_anomalies) % len(self.severity_variations.get(anomaly_type, [{"default": "default"}]))
-        severity = self.severity_variations.get(anomaly_type, [{}])[severity_index]
+        # Select severity variation based on provided severity or fallback
+        if severity is not None:
+            severity_lower = severity.lower()
+            severity_map = {"low": 0, "medium": 1, "high": 2}
+            index = severity_map.get(severity_lower, 1)
+        else:
+            index = len(self.active_anomalies) % len(self.severity_variations.get(anomaly_type, [{"default": "default"}]))
+
+        severity_config = self.severity_variations.get(anomaly_type, [{}])[index]
 
         # Experiment configurations with varying severity
         experiments = {
@@ -764,8 +676,8 @@ class K8sService:
                 "spec": {
                     "stressors": {
                         "cpu": {
-                            "workers": severity.get("workers", 32),
-                            "load": severity.get("load", 100)
+                            "workers": severity_config.get("workers", 32),
+                            "load": severity_config.get("load", 100)
                         }
                     },
                     "duration": f"{self.collection_duration}s"
@@ -779,7 +691,7 @@ class K8sService:
                             "command": [
                                 "/bin/bash",
                                 "-c",
-                                severity.get("command", "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & sleep %s") % self.collection_duration
+                                severity_config.get("command", "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=1024 conv=fdatasync & sleep %s") % self.collection_duration
                             ]
                         }
                     },
@@ -791,8 +703,8 @@ class K8sService:
                 "spec": {
                     "action": "delay",
                     "delay": {
-                        "latency": severity.get("latency", "2000ms"),
-                        "correlation": severity.get("correlation", "100"),
+                        "latency": severity_config.get("latency", "2000ms"),
+                        "correlation": severity_config.get("correlation", "100"),
                         "jitter": "0ms"
                     },
                     "target": {
@@ -800,7 +712,7 @@ class K8sService:
                             "namespaces": [self.namespace],
                             "labelSelectors": {"ref-obcluster": "obcluster"}
                         },
-                        "mode": "all"
+                        "mode": "one"
                     },
                     "direction": "both",
                     "duration": f"{self.collection_duration}s"
@@ -811,8 +723,8 @@ class K8sService:
                 "spec": {
                     "stressors": {
                         "memory": {
-                            "workers": severity.get("workers", 8),
-                            "size": severity.get("size", "2GB")
+                            "workers": severity_config.get("workers", 8),
+                            "size": severity_config.get("size", "2GB")
                         }
                     },
                     "duration": f"{self.collection_duration}s"
@@ -914,7 +826,7 @@ class K8sService:
                     "namespace": self.namespace
                 },
                 "spec": {
-                    "mode": "all",
+                    "mode": "one",
                     "selector": {
                         "namespaces": [self.namespace],
                         "labelSelectors": {"ref-obcluster": "obcluster"}
@@ -955,13 +867,32 @@ class K8sService:
         elif normalized_type == "cache_bottleneck":
             return "stresschaos"
         elif normalized_type == "too_many_indexes":
-            # Not actually used since we don't create a real Chaos Mesh resource for this
             return "none"
         else:
             raise ValueError(f"Unsupported anomaly type: {anomaly_type}")
 
+    async def _update_ob_parameter_for_zone(self, config_changes: Dict[str, Any], zone: str) -> None:
+        """Update OceanBase configuration parameters for a specific zone using SQL"""
+        try:
+            conn = pymysql.connect(**self.ob_config)
+            with conn.cursor() as cursor:
+                for param, value in config_changes.items():
+                    # Convert parameter name to OceanBase format
+                    ob_param = param.lower()
+                    sql = f"ALTER SYSTEM SET {ob_param} = {value} ZONE={zone}"
+                    logger.info(f"Executing SQL: {sql}")
+                    cursor.execute(sql)
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"Updated OceanBase configuration for zone {zone}: {config_changes}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update OceanBase configuration for zone {zone}: {str(e)}")
+            raise
+
     async def _update_ob_parameter(self, config_changes: Dict[str, Any]) -> None:
-        """Update OceanBase configuration parameters using SQL"""
+        """Update OceanBase configuration parameters using SQL for all zones"""
         try:
             conn = pymysql.connect(**self.ob_config)
             with conn.cursor() as cursor:
@@ -1018,7 +949,7 @@ class K8sService:
             logger.error(f"Failed to execute SQL commands: {str(e)}")
             raise
 
-    async def apply_chaos_experiment(self, anomaly_type: str, target_node: Optional[Union[List[str], str]] = None):
+    async def apply_chaos_experiment(self, anomaly_type: str, target_node: Optional[Union[List[str], str]] = None, severity: str = "medium"):
         """Apply a chaos mesh experiment based on the anomaly type with optimized retries"""
         try:
             # Normalize target_node to a list if it's a string
@@ -1031,23 +962,43 @@ class K8sService:
                 
             # Special handling for cache bottleneck
             if anomaly_type == "cache_bottleneck":
-                # Update memstore_limit_percentage
-                await self._update_ob_parameter({
-                    "memstore_limit_percentage": "20"  # Reduce from default 0
-                })
+                severity_map = {"low": 0, "medium": 1, "high": 2}
+                index = severity_map.get(severity.lower(), 1)
+                severity_config = self.severity_variations.get(anomaly_type, [{}])[index]
+                
+                memory_workers = severity_config.get("workers", 8)
+                if memory_workers <= 4:  # Lite severity
+                    memstore_limit = "9"
+                elif memory_workers <= 6:  # Medium severity
+                    memstore_limit = "6"
+                else:  # Severe, must be > 0.01 else database will crash
+                    memstore_limit = "3"
+                
+                target_zones = set()
+                for node in target_nodes:
+                    node_parts = node.split('-')
+                    for i, part in enumerate(node_parts):
+                        if part.startswith('zone') and i > 0:
+                            target_zones.add(part)
+                if not target_zones:
+                    target_zones = self.ob_zones
+                for zone in target_zones:
+                    await self._update_ob_parameter_for_zone({"memstore_limit_percentage": memstore_limit}, zone)
+                
                 # Create a tracking experiment with an actual chaos mesh resource
                 experiment = {
                     "apiVersion": "chaos-mesh.org/v1alpha1",
                     "kind": "StressChaos",
                     "metadata": {
-                        "name": f"ob-cache-stress-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        "name": f"ob-cache-bottleneck-{datetime.now().strftime('%Y%m%d%H%M%S')}",
                         "namespace": self.namespace
                     },
                     "spec": {
-                        "mode": "all",
+                        "mode": "one",
                         "selector": {
                             "namespaces": [self.namespace],
-                            "labelSelectors": {"ref-obcluster": "obcluster"}
+                            "labelSelectors": {"ref-obcluster": "obcluster"},
+                            "pods": {self.namespace: target_nodes if target_nodes else []}
                         },
                         "stressors": {
                             "memory": {
@@ -1061,6 +1012,9 @@ class K8sService:
             
             # Special handling for io_bottleneck - direct execution for more control
             elif anomaly_type == "io_bottleneck":
+                severity_map = {"low": 0, "medium": 1, "high": 2}
+                index = severity_map.get(severity.lower(), 1)
+                severity_config = self.severity_variations.get(anomaly_type, [{}])[index]
                 # Generate a unique experiment name for tracking
                 experiment_name = f"ob-io-bottleneck-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 
@@ -1073,10 +1027,11 @@ class K8sService:
                         "namespace": self.namespace
                     },
                     "spec": {
-                        "mode": "all",
+                        "mode": "one",
                         "selector": {
                             "namespaces": [self.namespace],
-                            "labelSelectors": {"ref-obcluster": "obcluster"}
+                            "labelSelectors": {"ref-obcluster": "obcluster"},
+                            "pods": {self.namespace: target_nodes if target_nodes else []}
                         },
                         "stressors": {
                             "memory": {
@@ -1108,34 +1063,10 @@ class K8sService:
                     
                     try:
                         logger.info(f"Running IO stress command on node {node}")
+                        io_command = severity_config.get("command") % self.collection_duration
                         
-                        # Reliable IO stress command using multiple processes in /tmp directory
-                        # This improves the effectiveness of the anomaly by:
-                        # 1. Using multiple dd processes to increase I/O pressure in a writable area
-                        # 2. Adding CPU stress component to simulate busy system with IO contention
-                        # 3. Using fsync to ensure data hits the disk
-                        # 4. Making sure the command runs for the intended duration with proper cleanup
-                        io_command = (
-                            "mkdir -p /tmp/io_stress && "
-                            # Create multiple large files with different block sizes and sync options
-                            "dd if=/dev/urandom of=/tmp/io_stress/file1 bs=8M count=2000 conv=fsync & "
-                            "dd if=/dev/urandom of=/tmp/io_stress/file2 bs=4M count=3000 conv=fsync & "
-                            "dd if=/dev/urandom of=/tmp/io_stress/file3 bs=16M count=1000 & "
-                            # Add a CPU stress component to make IO issues more pronounced
-                            "for i in {1..4}; do yes > /dev/null & done; "
-                            # Sleep for the specified duration
-                            f"sleep {self.collection_duration}; "
-                            # Cleanup processes and files on completion
-                            "for pid in $(pgrep -f 'dd if=/dev/urandom'); do kill -9 $pid 2>/dev/null; done; "
-                            "for pid in $(pgrep -f 'yes > /dev/null'); do kill -9 $pid 2>/dev/null; done; "
-                            "rm -rf /tmp/io_stress/*"
-                        )
-                        
-                        # Execute dd command directly on the pod with proper cleanup
                         kubectl_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c '{io_command}' > /dev/null 2>&1 &"
                         logger.info(f"Executing kubectl command: {kubectl_cmd}")
-                        
-                        # Use subprocess instead of os.system for better process management
                         import subprocess
                         process = subprocess.Popen(kubectl_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         
@@ -1149,34 +1080,25 @@ class K8sService:
                             "node": node,
                             "command": io_command,
                             "process_id": process.pid,
-                            "expected_duration": self.collection_duration  # Store expected duration for verification
+                            "expected_duration": self.collection_duration
                         }
                         
                         logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
                     except Exception as e:
                         logger.error(f"Error running IO stress on node {node}: {str(e)}")
             
-            # Special handling for too_many_indexes
-            elif anomaly_type == "too_many_indexes":
-                # Generate a unique experiment name for tracking
+                # The following block for too_many_indexes remains unchanged
                 experiment_name = f"ob-too-many-indexes-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                
-                # Read SQL commands from template
                 template = self._get_experiment_template(anomaly_type)
                 sql_commands = template["spec"].get("sqlCommands", [])
                 
-                # Execute SQL commands directly
                 await self._execute_sql_commands(sql_commands)
                 
-                # If no specific target nodes were provided, use a default
                 if not target_nodes:
                     target_nodes = ["obcluster"]
                 
-                # Create tracking records for each target node
                 for node in target_nodes:
                     node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
-                    
-                    # Track the experiment with SQL commands included
                     self.active_anomalies[node_experiment_name] = {
                         "start_time": datetime.now().isoformat(),
                         "status": "active",
@@ -1186,68 +1108,54 @@ class K8sService:
                         "node": node,
                         "sql_commands": sql_commands
                     }
-                    
                     logger.info(f"Created {anomaly_type} experiment {node_experiment_name} for node {node}")
                 
-                # Invalidate cache
                 self.invalidate_cache()
                 self._last_cache_update = 0
                 
                 return
             else:
-                experiment = self._get_experiment_template(anomaly_type)
-
-            experiment_name = experiment["metadata"]["name"]
+                experiment = self._get_experiment_template(anomaly_type, severity)
             
-            # Track the active anomaly
+            experiment_name = experiment["metadata"]["name"]
             target = experiment["spec"]["selector"]["labelSelectors"].get("ref-obcluster", "obcluster")
             
-            # If no specific target nodes were provided, use the default target
             if not target_nodes:
                 target_nodes = [target]
-            
-            # Create an experiment for each target node
+
             for node in target_nodes:
-                # Make a copy of the experiment definition for this node
-                node_experiment = experiment.copy()
+                node_experiment = copy.deepcopy(experiment)
                 node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
                 node_experiment["metadata"]["name"] = node_experiment_name
+                node_experiment["spec"]["mode"] = "one"
+                node_experiment["spec"]["selector"]["pods"] = {self.namespace: [node]}
                 
-                # Update selector to target specific pod if needed
-                if anomaly_type not in ["too_many_indexes", "io_bottleneck"]:  # Skip for special cases
-                    # Adjust selector to target the specific pod
-                    if "pod-selector" not in node_experiment["spec"]["selector"]:
-                        node_experiment["spec"]["selector"]["podNames"] = [node]
+                try:
+                    # Create experiment with retry logic
+                    max_retries = 5
+                    retry_delay = 2
+                    for attempt in range(max_retries):
+                        try:
+                            await asyncio.to_thread(
+                                self.custom_api.create_namespaced_custom_object,
+                                group="chaos-mesh.org",
+                                version="v1alpha1",
+                                namespace=self.namespace,
+                                plural=self._get_experiment_plural(anomaly_type),
+                                body=node_experiment
+                            )
+                            break
+                        except ApiException as e:
+                            if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
+                                logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
+                                await asyncio.sleep(retry_delay)
+                                retry_delay *= 2
+                                continue
+                            raise e
+                except Exception as e:
+                    logger.error(f"Error creating experiment for {node}: {str(e)}")
                 
-                # Only create chaos mesh experiment for non-special cases or special cases that need it
-                if anomaly_type not in ["too_many_indexes"]:
-                    if anomaly_type != "io_bottleneck" or not target_nodes:  # Only create for io_bottleneck if no target nodes
-                        # Create experiment with retry logic
-                        max_retries = 5
-                        retry_delay = 2
-                        
-                        for attempt in range(max_retries):
-                            try:
-                                await asyncio.to_thread(
-                                    self.custom_api.create_namespaced_custom_object,
-                                    group="chaos-mesh.org",
-                                    version="v1alpha1",
-                                    namespace=self.namespace,
-                                    plural=self._get_experiment_plural(anomaly_type),
-                                    body=node_experiment
-                                )
-                                break
-                            except ApiException as e:
-                                if attempt < max_retries - 1 and ("AlreadyExists" in str(e) or "is being deleted" in str(e)):
-                                    logger.info(f"Experiment creation failed, retrying in {retry_delay} seconds...")
-                                    await asyncio.sleep(retry_delay)
-                                    retry_delay *= 2
-                                    continue
-                                raise e
-                
-                # Skip tracking for io_bottleneck since we already track it above
                 if anomaly_type != "io_bottleneck" or not target_nodes:
-                    # Track this specific anomaly
                     self.active_anomalies[node_experiment_name] = {
                         "start_time": datetime.now().isoformat(),
                         "status": "active",
@@ -1256,10 +1164,8 @@ class K8sService:
                         "target": target,
                         "node": node
                     }
-                    
                     logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
             
-            # Invalidate cache
             self.invalidate_cache()
             self._last_cache_update = 0
             
@@ -1279,13 +1185,6 @@ class K8sService:
     def _initialize_active_anomalies(self):
         """Initialize active anomalies from Kubernetes"""
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            # Use synchronous methods to avoid async in _initialize_active_anomalies
-            # We'll schedule the initial cache refresh to happen soon after startup
             threading.Thread(target=self._initialize_active_anomalies_sync).start()
         except Exception as e:
             logger.error(f"Error setting up anomaly state initialization: {e}")
@@ -1429,6 +1328,52 @@ class K8sService:
         except Exception as e:
             logger.error(f"Error verifying experiment existence: {str(e)}")
             return False
+
+    async def _update_available_nodes(self):
+        """Asynchronously update available_nodes from Kubernetes."""
+        nodes = await self._fetch_available_nodes()
+        self.available_nodes = nodes
+
+    async def get_pod_ip_to_name_mapping(self) -> Dict[str, str]:
+        """Get mapping of pod IPs to pod names"""
+        try:
+            pods = await asyncio.to_thread(
+                self.core_api.list_namespaced_pod,
+                namespace=self.namespace,
+                label_selector="ref-obcluster"
+            )
+            ip_to_name = {}
+            for pod in pods.items:
+                if pod.status.pod_ip and pod.metadata.name.startswith("obcluster-"):
+                    ip_to_name[pod.status.pod_ip] = pod.metadata.name
+            logger.info(f"Got pod IP to name mapping: {ip_to_name}")
+            return ip_to_name
+        except ApiException as e:
+            logger.error(f"Error getting pod IP to name mapping: {str(e)}")
+            return {}
+
+    def _build_ip_to_name_mapping(self) -> Dict[str, str]:
+        """Build pod IP to name mapping synchronously using Kubernetes API."""
+        mapping = {}
+        try:
+            from kubernetes import config, client
+            import os
+            if os.getenv('KUBERNETES_SERVICE_HOST'):
+                config.load_incluster_config()
+            else:
+                config.load_kube_config()
+            core_api = client.CoreV1Api()
+            namespace = os.getenv('OCEANBASE_NAMESPACE', 'oceanbase')
+            pods = core_api.list_namespaced_pod(namespace=namespace, label_selector="ref-obcluster")
+            for pod in pods.items:
+                pod_ip = pod.status.pod_ip
+                pod_name = pod.metadata.name
+                if pod_ip and pod_name.startswith("obcluster-"):
+                    mapping[pod_ip] = pod_name
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error building pod IP to name mapping: {e}")
+        return mapping
 
 # Create singleton k8s service object
 k8s_service = K8sService()

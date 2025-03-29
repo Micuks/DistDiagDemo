@@ -39,8 +39,9 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
   // Create array of links
   const links = [];
   nodes.forEach(source => {
-    if (propagationGraph[source]) {
-      propagationGraph[source].forEach(target => {
+    const targets = propagationGraph[source];
+    if (Array.isArray(targets)) {
+      targets.forEach(target => {
         links.push({
           source,
           target: target.target,

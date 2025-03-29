@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, Table, Typography, Tag, Spin, Empty, Alert, Tabs, Collapse } from 'antd';
 import { WarningOutlined, CheckCircleOutlined, SyncOutlined } from '@ant-design/icons';
 import { anomalyService } from '../services/anomalyService';
+import { FiAlertTriangle } from 'react-icons/fi';
 
 const { Title, Text } = Typography;
 const { TabPane } = Tabs;
@@ -55,7 +56,6 @@ const CompoundAnomalyDisplay = () => {
                 return 'geekblue';
             case 'cache_bottleneck':
                 return 'purple';
-            case 'too_many_indexes':
                 return 'orange';
             default:
                 return 'default';
@@ -71,8 +71,33 @@ const CompoundAnomalyDisplay = () => {
                 return 'Network Bottleneck';
             case 'cache_bottleneck':
                 return 'Cache Bottleneck';
-            case 'too_many_indexes':
                 return 'Too Many Indexes';
+            default:
+                return type;
+        }
+    };
+
+    const getAnomalyIcon = (type) => {
+        switch (type) {
+            case 'cpu_stress':
+                return <DesktopOutlined />;
+            case 'network_bottleneck':
+                return <WifiOutlined />;
+            case 'cache_bottleneck':
+                return <DatabaseOutlined />;
+            default:
+                return <ExclamationCircleOutlined />;
+        }
+    };
+
+    const getAnomalyLabel = (type) => {
+        switch (type) {
+            case 'cpu_stress':
+                return 'CPU Stress';
+            case 'network_bottleneck':
+                return 'Network Bottleneck';
+            case 'cache_bottleneck':
+                return 'Cache Bottleneck';
             default:
                 return type;
         }

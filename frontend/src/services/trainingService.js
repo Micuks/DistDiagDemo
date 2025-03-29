@@ -129,6 +129,12 @@ class TrainingService {
             5  // More retries for this critical endpoint
         );
     }
+
+    async getProcessStatus() {
+        return this._retryableRequest(() => 
+            this.client.get('/api/training/process-status')
+        );
+    }
 }
 
 export const trainingService = new TrainingService(); 

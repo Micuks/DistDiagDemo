@@ -69,7 +69,8 @@ export const getCompoundAnomalyDescription = (anomalies) => {
         allRelatedMetrics.push({
           ...metric,
           anomaly_type: anomaly.type,
-          score: anomaly.score
+          score: anomaly.score,
+          positive_prob_score: anomaly.positive_prob_score,
         });
       });
     }

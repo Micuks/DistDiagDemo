@@ -172,6 +172,33 @@ const ModelTrainingPanel = () => {
     const fetchStatus = async () => {
       try {
         const status = await trainingService.getCollectionStatus();
+        
+        // Add additional validation to detect potential stale state
+        if (status.is_collecting_normal || status.is_collecting_anomaly) {
+          // Check last update time if provided by backend
+          if (status.last_update_time) {
+            const lastUpdateTime = new Date(status.last_update_time);
+            const currentTime = new Date();
+            const timeDifferenceMs = currentTime - lastUpdateTime;
+            
+            // If last update was more than 5 minutes ago, we might have a stale state
+            if (timeDifferenceMs > 5 * 60 * 1000) {
+              console.warn("Detected potentially stale collection state, last update:", lastUpdateTime);
+              
+              // Force refresh collection status by calling process-status endpoint
+              const processStatus = await trainingService.getProcessStatus();
+              if (!processStatus.anomaly_collection_in_progress && !processStatus.normal_collection_in_progress) {
+                console.info("Process status indicates no active collection, resetting local state");
+                setCollectionStatus({
+                  isCollecting: false,
+                  currentType: null,
+                });
+                return;
+              }
+            }
+          }
+        }
+        
         setCollectionStatus({
           isCollecting: status.is_collecting_normal || status.is_collecting_anomaly || false,
           currentType: status.current_type || null,
@@ -349,11 +376,31 @@ const ModelTrainingPanel = () => {
         }
       }
 
+      // After toggling, give backend a moment to update its state
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Perform a double-check to ensure we get the latest status
       const newStatus = await trainingService.getCollectionStatus();
-      setCollectionStatus({
-        isCollecting: newStatus.is_collecting_normal || newStatus.is_collecting_anomaly || false,
-        currentType: newStatus.current_type || null,
-      });
+      
+      // Verify with process status endpoint as well
+      const processStatus = await trainingService.getProcessStatus();
+      
+      // Use process status as source of truth for collection state
+      const isReallyCollecting = processStatus.anomaly_collection_in_progress || processStatus.normal_collection_in_progress;
+      
+      // If there's a mismatch, use the process status
+      if ((newStatus.is_collecting_normal || newStatus.is_collecting_anomaly) !== isReallyCollecting) {
+        console.warn("Collection status mismatch detected, using process status endpoint as source of truth");
+        setCollectionStatus({
+          isCollecting: isReallyCollecting,
+          currentType: isReallyCollecting ? newStatus.current_type : null,
+        });
+      } else {
+        setCollectionStatus({
+          isCollecting: newStatus.is_collecting_normal || newStatus.is_collecting_anomaly || false,
+          currentType: newStatus.current_type || null,
+        });
+      }
     } catch (error) {
       message.error("Failed to toggle data collection");
       console.error(error);

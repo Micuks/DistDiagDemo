@@ -98,11 +98,10 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
             name="type"
             rules={[{ required: true, message: "Select anomaly type" }]}
           >
-            <Select style={{ width: 300 }} placeholder="Select type">
+            <Select style={{ width: 300 }} placeholder="Select anomaly type">
               <Option value="cpu_stress">CPU Stress</Option>
               <Option value="network_bottleneck">Network Bottleneck</Option>
               <Option value="cache_bottleneck">Cache Bottleneck</Option>
-              <Option value="too_many_indexes">Too Many Indexes</Option>
             </Select>
           </Form.Item>
 

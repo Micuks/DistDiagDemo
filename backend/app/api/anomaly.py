@@ -249,37 +249,28 @@ async def clear_anomaly(request: AnomalyRequest):
         logger.error(f"Failed to clear anomaly: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/active", response_model=List[ActiveAnomalyResponse])
-@cache(expire=3)  # Add short 3-second cache to prevent too many requests hammering the endpoint
+@router.get("/active", response_model=ActiveAnomalyResponse)
+@cache(expire=3)
 async def get_active_anomalies():
     """Get list of active anomalies in the OceanBase cluster"""
     try:
         logger.info("Requesting active anomalies...")
-        
-        # Try to get active anomalies from k8s_service
         try:
-            # Clear the cache before fetching to ensure fresh data
             k8s_service.invalidate_cache()
             k8s_service._last_cache_update = 0
-            
-            # Get active anomalies
             active_anomalies = await k8s_service.get_active_anomalies()
             logger.info(f"Retrieved {len(active_anomalies)} active anomalies from K8s service")
         except AttributeError as e:
             logger.warning(f"AttributeError in get_active_anomalies: {str(e)}, using fallback...")
-            # If the method is missing, use the directly stored anomalies
             active_anomalies = list(k8s_service.active_anomalies.values())
             logger.info(f"Retrieved {len(active_anomalies)} active anomalies from fallback")
         except Exception as e:
             logger.error(f"Exception in get_active_anomalies: {str(e)}, using fallback...")
-            # If any other error occurs, use the directly stored anomalies
             active_anomalies = list(k8s_service.active_anomalies.values())
             logger.info(f"Retrieved {len(active_anomalies)} active anomalies from fallback")
-        
-        # Log the active anomalies for debugging
         logger.info(f"Active anomalies to return: {json.dumps(active_anomalies)}")
-        
-        response = jsonable_encoder(active_anomalies)
+
+        response = jsonable_encoder({"anomalies": active_anomalies})
         return JSONResponse(
             content=response,
             headers={
@@ -292,9 +283,8 @@ async def get_active_anomalies():
         )
     except Exception as e:
         logger.error(f"Failed to get active anomalies: {str(e)}")
-        # Return empty list instead of error in case of failure
         return JSONResponse(
-            content=[],
+            content={"anomalies": []},
             headers={
                 "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true",
@@ -357,7 +347,7 @@ async def get_compound_anomalies():
                     "propagation_graph": {}
                 },
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                    "Access-Control-Allow-Origin": "*",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -365,18 +355,80 @@ async def get_compound_anomalies():
         # Get full diagnosis results including compound anomalies
         diagnosis_result = diagnosis_service.diagnose(metrics)
         
+        # Check if the result contains compound anomalies
+        has_compound_anomalies = False
+        compound_anomalies = diagnosis_result.get("compound_anomalies", {})
+        if compound_anomalies and len(compound_anomalies) > 0:
+            has_compound_anomalies = True
+            
+            # For each node with compound anomalies, sort by overall impact
+            for node, anomalies in compound_anomalies.items():
+                # Calculate combined impact score
+                combined_score = sum(a['score'] for a in anomalies)
+                
+                # Add combined details to each compound anomaly
+                for anomaly in anomalies:
+                    # Calculate contribution percentage
+                    anomaly['contribution'] = (anomaly['score'] / combined_score) * 100.0 if combined_score > 0 else 0.0
+                
+                # Add total score to facilitate sorting
+                compound_anomalies[node] = {
+                    'anomalies': anomalies,
+                    'total_score': combined_score,
+                    'anomaly_count': len(anomalies)
+                }
+            
+            # Sort compound anomalies by severity
+            sorted_compound = {
+                k: v for k, v in sorted(
+                    compound_anomalies.items(),
+                    key=lambda item: item[1]['total_score'],
+                    reverse=True
+                )
+            }
+            diagnosis_result["compound_anomalies"] = sorted_compound
+        
+        # Expand propagation graph with compound anomaly information
+        if has_compound_anomalies and "propagation_graph" in diagnosis_result:
+            propagation_graph = diagnosis_result["propagation_graph"]
+            
+            # Mark nodes with compound anomalies in the graph
+            for node in propagation_graph:
+                if node in compound_anomalies:
+                    propagation_graph[node]["has_compound_anomaly"] = True
+                    propagation_graph[node]["compound_score"] = compound_anomalies[node]["total_score"]
+                    propagation_graph[node]["anomaly_count"] = compound_anomalies[node]["anomaly_count"]
+                else:
+                    propagation_graph[node]["has_compound_anomaly"] = False
+            
+            # Update the graph with compound anomaly connections
+            for src_node in propagation_graph:
+                for dst_node in propagation_graph.get(src_node, {}):
+                    if isinstance(propagation_graph[src_node][dst_node], (int, float)):
+                        # This is a correlation value, convert to object
+                        corr_value = propagation_graph[src_node][dst_node]
+                        propagation_graph[src_node][dst_node] = {
+                            "correlation": corr_value,
+                            "compound_path": (
+                                src_node in compound_anomalies and 
+                                dst_node in compound_anomalies
+                            )
+                        }
+        
         # Create a more simplified response structure
         response_data = {
             "anomalies": diagnosis_result.get("anomalies", []),
             "compound_anomalies": diagnosis_result.get("compound_anomalies", {}),
             "propagation_graph": diagnosis_result.get("propagation_graph", {}),
-            "node_names": diagnosis_result.get("node_names", [])
+            "node_names": diagnosis_result.get("node_names", []),
+            "has_compound_anomalies": has_compound_anomalies,
+            "timestamp": datetime.now().isoformat()
         }
         
         return JSONResponse(
             content=response_data,
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -387,7 +439,7 @@ async def get_compound_anomalies():
             status_code=500,
             content={"error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
+                "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -540,4 +592,51 @@ async def anomaly_stream():
             "Cache-Control": "no-cache",
             "Connection": "keep-alive"
         }
-    ) 
+    )
+
+@router.post("/stop-all")
+async def stop_all_anomalies():
+    """Stop all active anomalies in the cluster"""
+    try:
+        logger.info("Stopping all active anomalies")
+        
+        # Clear all caches first
+        await clear_caches()
+        
+        # Get active anomalies before deletion for verification
+        active_anomalies = await k8s_service.get_active_anomalies()
+        active_count = len(active_anomalies)
+        logger.info(f"Found {active_count} active anomalies before deletion")
+        
+        # Delete all active experiments
+        deleted_experiments = await k8s_service.delete_all_chaos_experiments()
+        logger.info(f"Deleted {len(deleted_experiments) if deleted_experiments else 0} experiments")
+        
+        # Clear caches again to ensure latest state
+        await clear_caches()
+        
+        # Verify deletion
+        remaining_anomalies = await k8s_service.get_active_anomalies()
+        if remaining_anomalies:
+            logger.warning(f"Still have {len(remaining_anomalies)} anomalies after deletion attempt")
+            
+            # Try one more time for each remaining anomaly
+            for anomaly in remaining_anomalies:
+                try:
+                    anomaly_type = anomaly.get('type')
+                    name = anomaly.get('name')
+                    if anomaly_type and name:
+                        logger.info(f"Attempting to delete remaining anomaly: {name}")
+                        await k8s_service.delete_chaos_experiment(anomaly_type, name)
+                except Exception as e:
+                    logger.error(f"Failed to delete remaining anomaly: {str(e)}")
+        
+        return {
+            "status": "success", 
+            "message": f"Stopped all anomalies ({active_count} total)",
+            "deleted_count": active_count,
+            "deleted": deleted_experiments
+        }
+    except Exception as e:
+        logger.error(f"Failed to stop all anomalies: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 

@@ -116,7 +116,7 @@ const DistDiagnosisPanel = ({
                         }
                         description={
                           <div>
-                            <p>Score: {Math.round(item.score * 1000) / 1000}</p>
+                            <p>Score: {Math.round(item.positive_prob_score * 1000) / 1000}</p>
                             <p>{item.description}</p>
                             {item.related_metrics && item.related_metrics.length > 0 && (
                               <Tooltip title={

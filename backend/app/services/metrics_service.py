@@ -129,7 +129,6 @@ class MetricsService:
                 'memstore limit',
                 'memory usage',
                 'observer memory hold size',
-                'memory usage',
             ],
             'io': [
                 'palf write io count to disk',
@@ -172,7 +171,6 @@ class MetricsService:
                 'request queue time',
                 'trans user trans count',
                 'commit log replay count',
-                'sql update count',
                 'sql delete count',
                 'sql other count',
                 'ps prepare count',
@@ -184,10 +182,9 @@ class MetricsService:
                 'DB time',
                 'local trans total used time',
                 'distributed trans total used time',
-                'sql select count',
                 'sql local count',
                 'sql remote count',
-                'sql distributed count',
+                'sql distributed count'
             ]
         }
         
@@ -298,19 +295,14 @@ class MetricsService:
                     
                     # If metrics were collected and should be sent, send to training service
                     if metrics and training_loop and should_send_to_training:
-                        logger.info(f"Sending metrics to training service: {len(metrics)} nodes of data")
+                        logger.info(f"Dispatching metrics to training service: {len(metrics)} nodes of data (non-blocking)")
                         future = asyncio.run_coroutine_threadsafe(
                             training_service.add_metrics(metrics), 
                             training_loop
                         )
-                        # Wait for the future to complete
-                        try:
-                            future.result(timeout=10)  # 10 second timeout
-                            logger.info(f"Successfully sent metrics to training service: {len(metrics)} nodes")
-                        except Exception as e:
-                            logger.error(f"Failed to send metrics to training service: {e}")
+                        future.add_done_callback(lambda fut: logger.info(f"Successfully sent metrics to training service: {len(metrics)} nodes") if fut.exception() is None else logger.error(f"Failed to send metrics to training service: {fut.exception()}"))
                     elif metrics and not should_send_to_training:
-                        logger.info(f"Not sending metrics to training service due to configuration or workload state: send_to_training={self.send_to_training}, check_workload_active={self.check_workload_active}, workload_active={self.workload_active}")
+                        logger.debug(f"Not sending metrics to training service due to configuration or workload state: send_to_training={self.send_to_training}, check_workload_active={self.check_workload_active}, workload_active={self.workload_active}")
                     elif not metrics:
                         logger.debug("No metrics collected to send to training service")
                     
@@ -420,6 +412,29 @@ class MetricsService:
                     if missing_metrics:
                         logger.warning(f"Missing essential metrics for node {node_ip}: {missing_metrics}")
                     
+                    # Add empty placeholders for missing metrics to ensure consistent structure
+                    for category in node_metrics:
+                        expected_metrics = [m for m, c in self.metric_to_category.items() if c == category]
+                        for metric in expected_metrics:
+                            if metric not in metrics_found:
+                                # Add placeholder with zero value for missing metrics
+                                node_metrics[category][metric] = 0.0
+                                
+                                # Add to history with zero values for consistency
+                                if node_ip not in self.metrics_history:
+                                    self.metrics_history[node_ip] = {}
+                                if category not in self.metrics_history[node_ip]:
+                                    self.metrics_history[node_ip][category] = {}
+                                if metric not in self.metrics_history[node_ip][category]:
+                                    self.metrics_history[node_ip][category][metric] = []
+                                    
+                                history = self.metrics_history[node_ip][category][metric]
+                                history.append({"timestamp": timestamp, "value": 0.0})
+                                
+                                # Keep only last MAX_HISTORY_POINTS
+                                if len(history) > self.MAX_HISTORY_POINTS:
+                                    self.metrics_history[node_ip][category][metric] = history[-self.MAX_HISTORY_POINTS:]
+                    
                     current_metrics[node_ip] = node_metrics
                 
                 conn.close()
@@ -439,10 +454,91 @@ class MetricsService:
         else:
             logger.debug(f"Successfully collected metrics from nodes: {list(current_metrics.keys())}")
         
+        # Add correlation metrics between nodes for compound anomaly detection
+        # Calculate node relationships based on metric correlations
+        if len(current_metrics) > 1:
+            node_correlations = self._calculate_node_correlations(current_metrics)
+            
+            # Store node correlations in metrics for use in compound anomaly detection
+            for node_ip in current_metrics:
+                if 'node_relationships' not in current_metrics[node_ip]:
+                    current_metrics[node_ip]['node_relationships'] = {}
+                current_metrics[node_ip]['node_relationships'] = node_correlations.get(node_ip, {})
+        
         self.metrics = current_metrics
         self.timestamp = timestamp
         
         return current_metrics
+
+    def _calculate_node_correlations(self, metrics: Dict[str, Dict]) -> Dict[str, Dict]:
+        """
+        Calculate correlations between nodes based on their metrics.
+        This helps identify compound anomalies that affect multiple nodes.
+        """
+        node_ips = list(metrics.keys())
+        correlations = {node: {} for node in node_ips}
+        
+        # For each pair of nodes
+        for i in range(len(node_ips)):
+            for j in range(i+1, len(node_ips)):
+                node1 = node_ips[i]
+                node2 = node_ips[j]
+                
+                # Calculate correlations for each metric category
+                category_correlations = {}
+                
+                for category in ['cpu', 'memory', 'io', 'network', 'transactions']:
+                    node1_metrics = metrics[node1].get(category, {})
+                    node2_metrics = metrics[node2].get(category, {})
+                    
+                    # Get intersection of metrics that both nodes have
+                    common_metrics = set(node1_metrics.keys()) & set(node2_metrics.keys())
+                    
+                    if common_metrics:
+                        # Calculate correlation for this category
+                        total_corr = 0.0
+                        count = 0
+                        
+                        for metric in common_metrics:
+                            val1 = node1_metrics[metric]
+                            val2 = node2_metrics[metric]
+                            
+                            # Simple correlation measure - ratio of smaller to larger value
+                            # A value of 1.0 means identical metrics, 0.0 means completely different
+                            if val1 == 0 and val2 == 0:
+                                # Both zero means perfect correlation for this metric
+                                metric_corr = 1.0
+                            elif val1 == 0 or val2 == 0:
+                                # One zero means no correlation
+                                metric_corr = 0.0
+                            else:
+                                # Compute ratio (smaller / larger)
+                                metric_corr = min(val1, val2) / max(val1, val2)
+                                
+                            total_corr += metric_corr
+                            count += 1
+                            
+                        # Average correlation for this category
+                        category_correlations[category] = total_corr / count if count > 0 else 0.0
+                    else:
+                        # No common metrics in this category
+                        category_correlations[category] = 0.0
+                
+                # Overall correlation is average of category correlations
+                overall_corr = sum(category_correlations.values()) / len(category_correlations)
+                
+                # Store correlations bidirectionally
+                correlations[node1][node2] = {
+                    'overall': overall_corr,
+                    'categories': category_correlations
+                }
+                
+                correlations[node2][node1] = {
+                    'overall': overall_corr,
+                    'categories': category_correlations
+                }
+                
+        return correlations
 
     async def _collect_sql_metrics(self):
         """Legacy method that calls _collect_sql_metrics_only but doesn't return the metrics."""
@@ -745,7 +841,7 @@ class MetricsService:
             latest = 0.0
             
             for line in lines[skip_first_n:]:
-                if not line.strip() or line.startswith(("#", "Time", "MAX", "MEAN", "MIN")):
+                if not line.strip() or line.startswith(("#", "Time", "MAX", "MEAN", "MIN", "categories")):
                     continue
                     
                 parts = line.split()
@@ -783,28 +879,17 @@ class MetricsService:
                 processed_metrics[node_ip][category] = {}
                 
                 for metric_name, history in self.metrics_history[node_ip][category].items():
+                    # Ensure history is a list; if not, wrap it as a one-element list.
+                    if not isinstance(history, list):
+                        history = [{"timestamp": self.timestamp if self.timestamp else "", "value": history}]
+                    
                     if len(history) < MIN_HISTORY:
-                        # Not enough data points, skip fluctuation analysis
                         processed_metrics[node_ip][category][metric_name] = history
                         continue
-                    
-                    # Skip delta calculation for metrics that are already processed as counters
-                    clean_name = metric_name.strip().lower()
-                    is_counter = clean_name in self._counter_metrics
-                    
-                    # Get current and historical values
-                    current_entry = history[-1]
-                    historical_entries = history[-HISTORY_WINDOW:-1]  # Exclude current value
-                    
-                    if not historical_entries:
-                        processed_metrics[node_ip][category][metric_name] = history
-                        continue
-                    
-                    # Calculate statistics with numerical stability
                     try:
-                        values = [h['value'] for h in historical_entries]
+                        values = [h['value'] for h in history[-HISTORY_WINDOW:-1]]  # Use all but the last point.
                         mean = sum(values) / len(values)
-                        # Calculate variance with better numerical stability
+                        # Calculate variance in a numerically stable way
                         squared_diff_sum = sum((x - mean) ** 2 for x in values)
                         std_dev = (squared_diff_sum / len(values)) ** 0.5 if len(values) > 1 else 0
                     except Exception as e:
@@ -812,44 +897,29 @@ class MetricsService:
                         processed_metrics[node_ip][category][metric_name] = history
                         continue
                     
-                    # Handle edge cases and numerical stability
-                    current_value = current_entry['value']
-                    if abs(std_dev) < 1e-9:  # Effectively zero variance
+                    current_value = history[-1]['value']
+                    if abs(std_dev) < 1e-9:
                         z_score = 0.0
                         pct_change = 0.0
                     else:
-                        # Calculate relative standard deviation as a percentage of the mean
                         rel_std_dev = std_dev / abs(mean) if abs(mean) > 1e-9 else 0
-                        
-                        # If the standard deviation is extremely small relative to the mean,
-                        # this indicates values changing at an extremely consistent rate
-                        if rel_std_dev < 1e-4:  # Less than 0.01% variation
-                            # For large monotonically increasing counters, reduce z-score significance
+                        if rel_std_dev < 1e-4:
                             is_monotonic = all(history[i]['value'] <= history[i+1]['value'] for i in range(len(history)-2, len(history)-min(5, len(history)-1), -1))
-                            if is_monotonic and mean > 1e6:  # Large counter values
-                                z_score = min((current_value - mean) / std_dev, 1.0)  # Cap z-score at 1.0
+                            if is_monotonic and mean > 1e6:
+                                z_score = min((current_value - mean) / std_dev, 1.0)
                             else:
                                 z_score = (current_value - mean) / std_dev
                         else:
                             z_score = (current_value - mean) / std_dev
-                            
-                        # Use relative threshold for mean comparison
                         pct_change = (current_value - mean) / mean if abs(mean) > 1e-9 else 0.0
                     
-                    # Add fluctuation data to the entry
                     processed_history = history.copy()
                     processed_history[-1] = {
-                        **current_entry,
+                        **history[-1],
                         'z_score': round(z_score, 2),
                         'pct_change': round(pct_change, 4),
-                        'has_fluctuation': abs(z_score) >= FLUCTUATION_Z_SCORE and (
-                            # Either significant percentage change
-                            abs(pct_change) > 0.001 or  
-                            # Or significant absolute change
-                            (abs(current_value - mean) > max(1.0, mean * 0.01))
-                        )
+                        'has_fluctuation': abs(z_score) >= FLUCTUATION_Z_SCORE and (abs(pct_change) > 0.001 or (abs(current_value - mean) > max(1.0, mean * 0.01)))
                     }
-                    
                     processed_metrics[node_ip][category][metric_name] = processed_history
         
         last_metric_point = {}
@@ -859,81 +929,13 @@ class MetricsService:
                 last_metric_point[node_ip][category] = {}
                 for metric_name in processed_metrics[node_ip][category]:
                     last_metric_point[node_ip][category][metric_name] = processed_metrics[node_ip][category][metric_name][-1]
-
+        
         return {
             "metrics": last_metric_point,
             "timestamp": self.timestamp
         }
 
     @timed_lru_cache(seconds=30, maxsize=1)
-    def get_system_metrics(self) -> Dict:
-        """Get aggregated system-wide metrics."""
-        try:
-            metrics = {
-                'cpu_usage': 0.0,
-                'memory_usage': 0.0,
-                'disk_usage': 0.0,
-                'network_io': 0.0,
-                'transactions': 0.0
-            }
-            
-            if not self.metrics:
-                return metrics
-                
-            node_count = len(self.metrics)
-            if node_count == 0:
-                return metrics
-                
-            for node_address, node_data in self.metrics.items():
-                # CPU usage from active CPU time and total time
-                cpu_metrics = node_data.get('cpu', {})
-                active_time = cpu_metrics.get('active cpu time', 0)
-                total_time = cpu_metrics.get('cpu_total_time', 1)  # Avoid div by zero
-                metrics['cpu_usage'] += (active_time / total_time) * 100 if total_time > 0 else 0
-                
-                # Memory usage percentage
-                mem_metrics = node_data.get('memory', {})
-                used = mem_metrics.get('total_memstore_used', 0)
-                limit = mem_metrics.get('memstore_limit', 1)  # Avoid div by zero
-                metrics['memory_usage'] += (used / limit) * 100 if limit > 0 else 0
-                
-                # IO operations per second
-                io_metrics = node_data.get('io', {})
-                metrics['disk_usage'] += (
-                    io_metrics.get('io_read_count', 0) +
-                    io_metrics.get('io_write_count', 0)
-                )
-                
-                # Network bytes per second
-                net_metrics = node_data.get('network', {})
-                metrics['network_io'] += (
-                    net_metrics.get('rpc packet in bytes', 0) +
-                    net_metrics.get('rpc packet out bytes', 0) +
-                    net_metrics.get('mysql packet in bytes', 0) +
-                    net_metrics.get('mysql packet out bytes', 0)
-                )
-                
-                # Transaction rate
-                trans_metrics = node_data.get('transactions', {})
-                metrics['transactions'] += trans_metrics.get('trans commit count', 0)
-            
-            # Average across nodes
-            for key in metrics:
-                metrics[key] = round(metrics[key] / node_count, 2)
-                
-            return metrics
-            
-        except Exception as e:
-            logger.error(f"Error calculating system metrics: {e}")
-            return {
-                'cpu_usage': 0.0,
-                'memory_usage': 0.0,
-                'disk_usage': 0.0,
-                'network_io': 0.0,
-                'transactions': 0.0
-            }
-
-    @timed_lru_cache(seconds=30, maxsize=100)
     def get_detailed_metrics(self, node_address: str = None, category: str = None) -> Dict[str, Any]:
         """Get detailed time series metrics for specific node and/or category."""
         if not self.metrics_history:
@@ -953,8 +955,17 @@ class MetricsService:
                 node: node_metrics.get(category, {})
                 for node, node_metrics in self.metrics_history.items()
             }
+        
+        # Add node relationship data to metrics when returning all metrics
+        result = self.metrics_history.copy()
+        
+        # If we have current metrics with node_relationships, include them
+        if self.metrics:
+            for node in result:
+                if node in self.metrics and 'node_relationships' in self.metrics[node]:
+                    result[node]['node_relationships'] = self.metrics[node]['node_relationships']
             
-        return self.metrics_history
+        return result
         
     def _dict_to_hashable(self, d):
         """Convert a dictionary to a hashable tuple of (key, value) pairs sorted by key."""

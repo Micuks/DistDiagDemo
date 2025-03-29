@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+
         {
             "name": "FastAPI Debug",
             "type": "debugpy",
@@ -15,6 +16,17 @@
             "jinja": true,
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}/backend"
+        },
+        {
+            "name": "Test Model Split",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "tests.test_model_split",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "TRAINING_TEST_MODE": "true"
             },
             "cwd": "${workspaceFolder}/backend"
         }

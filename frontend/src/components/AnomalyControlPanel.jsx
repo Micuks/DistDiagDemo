@@ -66,11 +66,10 @@ const AnomalyControlPanel = () => {
         }
     }, [groupedAnomalies, activeAnomalies, isLoading, tableLoading]);
 
-    const anomalyOptions = [
+    const anomalyTypes = [
         { id: 'cpu_stress', name: 'CPU Stress' },
         { id: 'network_bottleneck', name: 'Network Bottleneck' },
-        { id: 'cache_bottleneck', name: 'Cache Bottleneck' },
-        { id: 'too_many_indexes', name: 'Too Many Indexes' }
+        { id: 'cache_bottleneck', name: 'Cache Bottleneck' }
     ];
 
     const columns = [
@@ -79,7 +78,7 @@ const AnomalyControlPanel = () => {
             dataIndex: 'type',
             key: 'type',
             render: (type) => {
-                const option = anomalyOptions.find(opt => opt.id === type);
+                const option = anomalyTypes.find(opt => opt.id === type);
                 return option ? option.name : type;
             }
         },
@@ -245,7 +244,7 @@ const AnomalyControlPanel = () => {
                     <Card title="Anomaly Control">
                         <Space direction="vertical" style={{ width: '100%' }}>
                             <Space wrap>
-                                {anomalyOptions.map(option => (
+                                {anomalyTypes.map(option => (
                                     <Button
                                         key={option.id}
                                         type={isAnomalyActive(option.id) ? 'primary' : 'default'}

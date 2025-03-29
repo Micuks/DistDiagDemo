@@ -1,17 +1,19 @@
+import glob
 import os
 import json
 import time
 import logging
 import threading
 import asyncio
+import traceback
 import ijson
 from datetime import datetime
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Dict, List, Any, Optional
 import numpy as np
-
+from app.services.diagnosis_service import diagnosis_service
 from async_lru import alru_cache
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ class TrainingService:
     _request_lock = asyncio.Lock()
     _last_request_time = 0
     _cache_task = None
+    _test_mode = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -114,8 +117,12 @@ class TrainingService:
             
         self._initialized = True
         
-        # Start background cache maintenance
-        self._cache_task = asyncio.create_task(self._maintain_cache())
+        # Start background cache maintenance task only if not in test mode
+        self._test_mode = os.environ.get("TRAINING_TEST_MODE", "false").lower() == "true"
+        if not self._test_mode:
+            self._cache_task = self._event_loop.create_task(self._maintain_cache())
+        else:
+            self._cache_task = None
 
     def _log_existing_data(self):
         """Log information about existing training data"""
@@ -191,9 +198,14 @@ class TrainingService:
             await asyncio.sleep(self.collection_duration)
             if self.current_case:  # Only stop if still collecting
                 logger.info(f"Auto-stopping collection after {self.collection_duration} seconds")
+                # Use await here to ensure full completion of the stop operation
                 await self.stop_collection(save_post_data=True)
+                # Log completion for debugging
+                logger.info("Auto-stop collection completed successfully")
         except Exception as e:
             logger.error(f"Error in auto-stop collection: {str(e)}")
+            # Ensure state is cleaned up even on error
+            await self._clear_collection_state()
 
     async def _clear_collection_state(self):
         """Clear all collection state variables"""
@@ -372,7 +384,17 @@ class TrainingService:
         """Add metrics to current collection"""
         async with self._lock:
             logger.info(f"Received metrics - State: is_collecting_normal={self.is_collecting_normal}, current_case={self.current_case}")
-            
+            if self.is_collecting_normal:
+                from app.services.k8s_service import k8s_service
+                active_anomalies = await k8s_service.get_active_anomalies()
+                if active_anomalies:
+                    logger.info("Active anomalies detected during normal collection; switching to anomaly collection")
+                    await self.stop_normal_collection()
+                    active_exp = active_anomalies[0]
+                    parts = active_exp.split('-')
+                    anomaly_type = f"{parts[1]}_{parts[2]}" if len(parts) >= 3 else (parts[1] if len(parts) > 1 else active_exp)
+                    await self.start_collection(anomaly_type, None)
+                    return
             # Debug information about received metrics 
             node_count = len(metrics) if metrics else 0
             if node_count > 0:
@@ -380,12 +402,12 @@ class TrainingService:
                 sample_categories = list(metrics[sample_node].keys())
                 logger.debug(f"Received metrics for {node_count} nodes. Sample node: {sample_node}")
                 logger.debug(f"Sample node has these metric categories: {sample_categories}")
-                
+            
             if not self.current_case:
                 logger.warning("No active case - metrics will not be collected")
                 logger.info(f"Collection state: is_collecting_normal={self.is_collecting_normal}, collection_start_time={self.collection_start_time}")
                 return
-                
+            
             if not self.collection_start_time:
                 logger.warning("No collection start time - metrics will not be collected")
                 return
@@ -393,7 +415,7 @@ class TrainingService:
             logger.info(f"Processing metrics for case: {self.current_case}")
             logger.info(f"Collection mode: {'normal' if self.is_collecting_normal else 'anomaly'}")
             logger.info(f"Number of nodes in metrics: {len(metrics)}")
-
+            
             # Process metrics based on collection phase
             processed_metrics = self._process_raw_metrics(metrics)
             logger.info(f"Processed {len(processed_metrics)} metrics from raw data")
@@ -406,106 +428,29 @@ class TrainingService:
                 logger.info(f"Added {len(processed_metrics)} metrics to anomaly buffer, total size: {len(self.metrics_buffer)}")
         
     def _process_raw_metrics(self, metrics: Dict[str, Any]) -> List[Dict]:
-        """Process raw metrics into a list of timestamped metrics"""
+        """Process raw SQL-based metrics snapshot data into a list containing one entry per node."""
         processed_metrics = []
         
-        logger.info(f"Processing raw metrics for {len(metrics)} nodes")
+        # Use the current time as the snapshot timestamp for all nodes
+        snapshot_timestamp = datetime.now().isoformat()
+        logger.info(f"Processing raw SQL-based metrics for {len(metrics)} nodes")
         logger.info(f"Sample node IPs: {list(metrics.keys())[:3]}")
         
         for node_ip, node_data in metrics.items():
-            # Log sample of node data structure 
             logger.info(f"Node {node_ip} has {len(node_data)} metric categories: {list(node_data.keys())}")
+            entry = {
+                "timestamp": snapshot_timestamp,
+                "node": node_ip,
+                "metrics": {}
+            }
             
-            # Handle different metric formats
-            timestamps = set()
-            
-            # Extract timestamps from all metric categories
+            # For each metric category, since SQL-based collection returns a snapshot,
+            # simply copy the scalar metric values into the processed entry.
             for category, category_data in node_data.items():
-                if isinstance(category_data, dict):
-                    # For dictionary metrics, collect all timestamps
-                    if 'util' in category_data:  # CPU telegraf format
-                        timestamps.update(category_data['util'].keys())
-                        logger.debug(f"CPU format found for {category}, timestamps: {list(category_data['util'].keys())[:3]}")
-                    elif 'aggregated' in category_data:  # IO format
-                        logger.debug(f"IO format found for {category}, keys: {list(category_data['aggregated'].keys())}")
-                        for metric in category_data['aggregated'].values():
-                            timestamps.update(metric.keys())
-                    else:  # Other dictionary metrics
-                        for metric_name, metric in category_data.items():
-                            logger.debug(f"Processing metric {category}.{metric_name}, type: {type(metric)}")
-                            if isinstance(metric, dict):
-                                timestamps.update(metric.keys())
+                entry["metrics"][category] = category_data
             
-            # If no timestamps found (e.g., all scalar values), use 'latest'
-            if not timestamps:
-                logger.warning(f"No timestamps found for node {node_ip}, using 'latest'")
-                timestamps = {'latest'}
-            
-            logger.info(f"Node {node_ip} has {len(timestamps)} unique timestamps")
-            
-            # Remove 'latest' if it's not the only timestamp
-            if len(timestamps) > 1 and 'latest' in timestamps:
-                timestamps.remove('latest')
-            
-            # Convert to sorted list
-            timestamps = sorted(timestamps)
-            
-            # Process each timestamp
-            timestamp_count = 0
-            for timestamp in timestamps:
-                try:
-                    filtered_metrics = {
-                        "timestamp": timestamp,
-                        "node": node_ip,
-                        "metrics": {}
-                    }
-                    
-                    metrics_count = 0
-                    
-                    # Process each metric category
-                    for category, category_data in node_data.items():
-                        filtered_metrics["metrics"][category] = {}
-                        
-                        if isinstance(category_data, dict):
-                            # Handle different formats based on category structure
-                            if 'util' in category_data:  # CPU telegraf format
-                                if timestamp in category_data['util']:
-                                    filtered_metrics["metrics"][category]['util'] = category_data['util'][timestamp]
-                                    metrics_count += 1
-                            elif 'aggregated' in category_data:  # IO format
-                                filtered_metrics["metrics"][category]['aggregated'] = {}
-                                for io_metric, values in category_data['aggregated'].items():
-                                    if timestamp in values:
-                                        filtered_metrics["metrics"][category]['aggregated'][io_metric] = values[timestamp]
-                                        metrics_count += 1
-                            else:  # Other dictionary metrics
-                                for metric_name, metric_data in category_data.items():
-                                    if isinstance(metric_data, dict) and timestamp in metric_data:
-                                        filtered_metrics["metrics"][category][metric_name] = metric_data[timestamp]
-                                        metrics_count += 1
-                                    elif not isinstance(metric_data, dict):
-                                        # For scalar values, always include them
-                                        filtered_metrics["metrics"][category][metric_name] = metric_data
-                                        metrics_count += 1
-                        else:
-                            # Scalar category value
-                            filtered_metrics["metrics"][category] = category_data
-                            metrics_count += 1
-                    
-                    # Only add if we have at least one metric
-                    if metrics_count > 0:
-                        processed_metrics.append(filtered_metrics)
-                        timestamp_count += 1
-                        
-                        # Debug log for the first few processed entries
-                        if len(processed_metrics) <= 3:
-                            logger.debug(f"Processed metrics for node {node_ip}, timestamp {timestamp}, containing {metrics_count} metrics")
-                    else:
-                        logger.warning(f"No metrics found for timestamp {timestamp} on node {node_ip}")
-                except Exception as e:
-                    logger.error(f"Error processing metrics for timestamp {timestamp} on node {node_ip}: {str(e)}")
-            
-            logger.info(f"Processed {timestamp_count} timestamps for node {node_ip}")
+            processed_metrics.append(entry)
+            logger.info(f"Processed metrics for node {node_ip} at {snapshot_timestamp}")
         
         logger.info(f"Processed a total of {len(processed_metrics)} metric entries across all nodes")
         return processed_metrics
@@ -685,263 +630,287 @@ class TrainingService:
             return False
 
     async def auto_balance_dataset(self):
-        """Automatically balance the dataset by collecting required data"""
         logger.info("Starting auto-balance process")
-        
-        # Get current stats
-        stats = await self.get_dataset_stats()
-        
+        from app.services.k8s_service import k8s_service
+        active_anomalies = await k8s_service.get_active_anomalies()
+        if active_anomalies:
+            if self.is_collecting_normal:
+                logger.info("Active anomalies detected while normal collection in progress; stopping normal collection.")
+                await self.stop_normal_collection()
+            if not self.current_anomaly:
+                active_exp = active_anomalies[0]
+                parts = active_exp.split('-')
+                anomaly_type = f"{parts[1]}_{parts[2]}" if len(parts) >= 3 else (parts[1] if len(parts) > 1 else active_exp)
+                logger.info(f"Active anomaly {active_exp} detected; starting anomaly collection for type: {anomaly_type}")
+                await self.start_collection(anomaly_type, None)
+                return {"success": True, "message": f"Started anomaly collection for active anomaly type: {anomaly_type}"}
+
         # If there's an active collection, don't start a new one
         if self.current_anomaly or self.is_collecting_normal:
             logger.info("Collection already in progress, skipping auto-balance")
             return {"success": False, "message": "Collection already in progress"}
         
         # Calculate how balanced each anomaly type is
+        stats = await self.get_dataset_stats()
         anomaly_types = stats.get("anomaly_types", {})
         total_anomalies = stats.get("anomaly", 0)
         total_samples = stats.get("total_samples", 0)
-        
+
         # First check if we need more normal samples compared to anomalies
         normal_ratio = stats.get("normal_ratio", 0)
         anomaly_ratio = stats.get("anomaly_ratio", 0)
-        
+
         # If normal samples are significantly underrepresented, collect normal data
         if normal_ratio < 0.3 and anomaly_ratio > 0.7 and not self.is_collecting_normal:
             logger.info(f"Normal samples underrepresented (ratio: {normal_ratio:.2f}), starting normal collection")
             await self.start_normal_collection()
             return {"success": True, "message": "Started normal data collection for balancing"}
-        
+
         # Check if any anomaly type is underrepresented
         if anomaly_types:
             # Calculate the target count for each type (roughly equal distribution)
             min_target = max(10, total_anomalies / (len(self.experiment_types) * 2))  # At least 10 samples per type
-            
+
             # Find underrepresented types
             underrepresented = []
             for anomaly_type in self.experiment_types:
                 count = anomaly_types.get(anomaly_type, 0)
                 if count < min_target:
                     underrepresented.append((anomaly_type, count))
-            
+
             # Sort by count (most underrepresented first)
             underrepresented.sort(key=lambda x: x[1])
-            
+
             if underrepresented:
                 # Pick the most underrepresented type
                 anomaly_type, count = underrepresented[0]
                 logger.info(f"Collecting data for underrepresented anomaly type: {anomaly_type} (count: {count}, target: {min_target})")
-                
+
                 # Auto-select node (None means system will choose)
                 await self.start_collection(anomaly_type, None)
                 return {"success": True, "message": f"Started collection for underrepresented anomaly type: {anomaly_type}"}
-        
+
         # If no underrepresented types, check if we need to collect variations for existing types
         for anomaly_type in self.experiment_types:
             # Check if this type has enough groups collected
-            if anomaly_type in anomaly_types and self.anomaly_groups.get(anomaly_type, 0) < self.target_groups_per_type:
+            if anomaly_types and self.anomaly_groups.get(anomaly_type, 0) < self.target_groups_per_type:
                 logger.info(f"Collecting variation {self.anomaly_groups[anomaly_type]+1} for {anomaly_type}")
                 await self.start_collection(anomaly_type, None)  # Let the system choose the node
                 return {"success": True, "message": f"Started collecting variation for {anomaly_type}"}
-        
-        logger.info("All required anomaly variations have been collected, dataset is balanced")
+
+        logger.info("All required anomaly variations have been collected, dataset is already well-balanced")
         return {"success": True, "message": "Dataset is already well-balanced"}
 
     def get_training_data(self) -> tuple:
-        """Get training data from all cases"""
-        logger.info("Loading training data from all cases...")
-        X = []
-        y = []
-        
-        # Get list of all case directories first
-        case_dirs = []
-        for case_dir in os.listdir(self.data_dir):
-            case_path = os.path.join(self.data_dir, case_dir)
-            if os.path.isdir(case_path):
-                label_file = os.path.join(case_path, "label.json")
-                metrics_file = os.path.join(case_path, "metrics.json")
-                if os.path.exists(label_file) and os.path.exists(metrics_file):
-                    case_dirs.append((case_dir, case_path))
-        
-        total_cases = len(case_dirs)
-        logger.info(f"Found {total_cases} valid case directories")
-        
-        # Use ThreadPoolExecutor for parallel processing
-        import time
-        
-        start_time = time.time()
-        processed_cases = 0
-        total_samples = 0
-        
-        # Define a function to process a single case
-        def process_case(case_info):
-            case_dir, case_path = case_info
-            case_X = []
-            case_y = []
-            
-            try:
-                # Load label file
-                with open(os.path.join(case_path, "label.json")) as f:
-                    label_data = json.load(f)
-                
-                # Process metrics data
-                with open(os.path.join(case_path, "metrics.json")) as f:
-                    metrics_data = json.load(f)
-                    
-                features = self._process_metrics(metrics_data)
-                if features is not None:
-                    case_X.extend(features)
-                    # Create labels for each feature
-                    for _ in range(len(features)):
-                        case_y.append(self._create_label_vector(label_data))
-                    
-                    return {
-                        'case_dir': case_dir,
-                        'X': case_X, 
-                        'y': case_y, 
-                        'count': len(features),
-                        'type': label_data.get('type', 'unknown')
-                    }
-            except Exception as e:
-                logger.error(f"Error processing case {case_dir}: {str(e)}")
-                return None
-        
-        # Process cases in parallel with a maximum of 4 worker threads
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            # Submit all processing tasks
-            future_to_case = {executor.submit(process_case, case_info): case_info for case_info in case_dirs}
-            
-            # Process results as they complete
-            for future in future_to_case:
-                result = future.result()
-                if result:
-                    X.extend(result['X'])
-                    y.extend(result['y'])
-                    processed_cases += 1
-                    total_samples += result['count']
-                    
-                    # Log progress periodically
-                    if processed_cases % 10 == 0 or processed_cases == total_cases:
-                        elapsed = time.time() - start_time
-                        logger.info(f"Processed {processed_cases}/{total_cases} cases ({processed_cases/total_cases*100:.1f}%) in {elapsed:.1f}s - {total_samples} samples")
-                    
-                    logger.info(f"Processed {result['count']} samples from {result['case_dir']} ({result['type']})")
-        
-        if not X or not y:
-            logger.warning("No valid training data found")
-            return [], []
-        
-        # Convert to numpy arrays
-        X_array = np.array(X)
-        y_array = np.array(y)
-        
-        # Log final stats
-        elapsed = time.time() - start_time
-        logger.info(f"Completed processing {total_samples} samples from {processed_cases} cases in {elapsed:.1f}s ({total_samples/elapsed:.1f} samples/s)")
-        logger.info(f"Training data shapes - X: {X_array.shape}, y: {y_array.shape}")
-        
-        # Balance classes if needed
-        logger.info("Balancing dataset classes...")
-        
-        # Identify normal vs anomaly samples
-        # A sample is an anomaly if any of its label values is 1
-        is_anomaly = y_array.any(axis=1)
-        normal_indices = np.where(~is_anomaly)[0]
-        anomaly_indices = np.where(is_anomaly)[0]
-        
-        logger.info(f"Dataset composition before balancing: {len(normal_indices)} normal, " 
-                   f"{len(anomaly_indices)} anomaly samples")
-        
-        # If there are too many normal samples compared to anomalies, subsample them
-        if len(normal_indices) > len(anomaly_indices):
-            # Randomly select a subset of normal samples equal to the number of anomaly samples
-            np.random.shuffle(normal_indices)
-            selected_normal_indices = normal_indices[:len(anomaly_indices)]
-            
-            # Combine selected normal samples with all anomaly samples
-            balanced_indices = np.concatenate([selected_normal_indices, anomaly_indices])
-            np.random.shuffle(balanced_indices)  # Shuffle to mix normal and anomaly samples
-            
-            X_array = X_array[balanced_indices]
-            y_array = y_array[balanced_indices]
-            
-            logger.info(f"Balanced dataset: {len(X_array)} total samples "
-                       f"({len(selected_normal_indices)} normal, {len(anomaly_indices)} anomaly)")
-        
-        return X_array, y_array
-
-    def _process_metrics(self, metrics_data: List[Dict]) -> List[np.ndarray]:
-        """Process raw metrics into feature vectors using time window processing from diagnosis service"""
-        if not metrics_data:
-            logger.warning("No metrics data to process")
-            return None
-            
+        """Process all collected datasets into 2D training format (samples × features)"""
         try:
-            # Get reference to diagnosis service
-            from app.services.diagnosis_service import diagnosis_service
+            # Scan all case directories
+            case_directories = []
+            for dataset_dir in glob.glob(os.path.join(self.data_dir, "case_*")):
+                if os.path.isdir(dataset_dir):
+                    case_directories.append(dataset_dir)
             
-            # Extract features from metrics using diagnosis service's processor
-            features = []
+            logger.info(f"Found {len(case_directories)} case directories for training")
+            if not case_directories:
+                return np.array([]), np.array([])
             
-            # Process metrics in chunks to avoid memory issues with large datasets
-            chunk_size = 100  # Process 100 metrics at a time
-            for i in range(0, len(metrics_data), chunk_size):
-                chunk = metrics_data[i:i+chunk_size]
-                chunk_features = []
-                
-                for entry in chunk:
-                    try:
-                        # Make sure 'metrics' key exists
-                        if 'metrics' not in entry:
-                            logger.warning(f"Missing 'metrics' key in entry: {entry.keys()}")
-                            continue
-                            
-                        # Process metrics using diagnosis service's time window processing
-                        feature_vector = diagnosis_service.diagnosis._process_metrics(entry["metrics"])
-                        if feature_vector is not None:
-                            chunk_features.append(feature_vector)
-                    except Exception as e:
-                        logger.error(f"Error processing metrics entry: {str(e)}")
-                        import traceback
-                        logger.debug(f"Traceback: {traceback.format_exc()}")
-                        continue
-                
-                # Add chunk features to main features list
-                features.extend(chunk_features)
-                
-                # Log progress for large datasets
-                if len(metrics_data) > chunk_size and i % (chunk_size * 10) == 0:
-                    logger.debug(f"Processed {i}/{len(metrics_data)} metrics entries ({i/len(metrics_data)*100:.1f}%)")
+            # Process all cases in parallel for better performance
+            with ThreadPoolExecutor() as executor:
+                results = list(executor.map(self._process_case, case_directories))
             
-            logger.info(f"Successfully processed {len(features)} feature vectors from {len(metrics_data)} metrics entries")
-            return features
+            # Filter out empty or failed results
+            valid_results = [r for r in results if r is not None and r[0] is not None and r[1] is not None]
+            if not valid_results:
+                logger.warning("No valid training data could be processed")
+                return np.array([]), np.array([])
+            
+            # Stack all samples into 2D arrays
+            X_all = []
+            y_all = []
+            
+            for X_case, y_case in valid_results:
+                X_all.append(X_case)
+                y_all.append(y_case)
+            
+            if not X_all:
+                logger.warning("No samples to stack")
+                return np.array([]), np.array([])
+            
+            # Stack all samples into 2D arrays
+            X_array = np.vstack(X_all)
+            y_array = np.vstack(y_all)
+            
+            # Handle NaN and infinite values
+            if np.any(np.isnan(X_array)) or np.any(np.isinf(X_array)):
+                logger.warning("Replacing NaN/infinite values in features with zeros")
+                X_array = np.nan_to_num(X_array, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            if np.any(np.isnan(y_array)) or np.any(np.isinf(y_array)):
+                logger.warning("Replacing NaN/infinite values in labels with zeros")
+                y_array = np.nan_to_num(y_array, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            logger.info(f"Final training data shapes: X={X_array.shape}, y={y_array.shape}")
+            return X_array, y_array
+                
         except Exception as e:
-            logger.error(f"Error in _process_metrics: {str(e)}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Error processing training data: {str(e)}")
+            logger.debug(traceback.format_exc())
+            return np.array([]), np.array([])
+    
+    def _process_case(self, case_dir: str) -> tuple:
+        """Process a single case directory into 2D features and labels (samples × features)"""
+        try:
+            if(self._test_mode):
+                # Ensure there's a running event loop in the current thread
+                import asyncio
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+            case_name = os.path.basename(case_dir)
+            possible_timestamp = case_name.split('_')[-1]
+            if not self._is_valid_timestamp(possible_timestamp):
+                logger.warning(f"Invalid timestamp in case {case_name}: {possible_timestamp}. Skipping this case.")
+                return None
+            
+            # Get label data
+            label_file = os.path.join(case_dir, "label.json")
+            if not os.path.exists(label_file):
+                logger.warning(f"Label file missing for case {case_name}")
+                return None
+                
+            with open(label_file, 'r') as f:
+                label_data = json.load(f)
+            
+            # Get metrics data
+            metrics_file = os.path.join(case_dir, "metrics.json")
+            if not os.path.exists(metrics_file):
+                logger.warning(f"Metrics file missing for case {case_name}")
+                return None
+            
+            # Read metrics with error handling
+            try:
+                with open(metrics_file, 'r') as f:
+                    metrics_data = json.load(f)
+                
+                # Validate metrics data format
+                if not isinstance(metrics_data, list):
+                    logger.warning(f"Invalid metrics data format in {case_name}: {type(metrics_data)}")
+                    return None
+                
+                # Handle empty metrics data
+                if len(metrics_data) == 0:
+                    logger.warning(f"Empty metrics data in {case_name}")
+                    return None
+                    
+            except json.JSONDecodeError:
+                logger.error(f"JSON decode error in metrics file for {case_name}")
+                return None
+            
+            # Get IP to pod name mapping from k8s_service
+            from app.services.k8s_service import k8s_service
+            ip_to_name = k8s_service.ip_to_name_map
+            
+            # Helper function to find matching node
+            def find_matching_node(target_node, available_nodes):
+                # Direct match
+                if target_node in available_nodes:
+                    return target_node
+                
+                # Check if any available node is an IP and maps to target_node
+                for node in available_nodes:
+                    # If node is an IP, check its pod name mapping
+                    pod_name = ip_to_name.get(node)
+                    if pod_name and (pod_name == target_node or target_node in pod_name or pod_name in target_node):
+                        logger.info(f"Matched IP {node} to pod name {pod_name}")
+                        return node
+                    
+                    # Try direct substring matching as fallback
+                    if target_node in node or node in target_node:
+                        return node
+                
+                return None
+
+            # Process each metrics entry into 2D arrays
+            X_samples = []  # Will hold all feature vectors
+            y_samples = []  # Will hold all labels
+            
+            # Get target node for anomaly
+            target_node = label_data.get("node")
+            
+            # Process each metrics entry
+            for entry in metrics_data:
+                if not isinstance(entry, dict):
+                    continue
+                    
+                timestamp = entry.get('timestamp')
+                node = entry.get('node')
+                metrics = entry.get('metrics')
+                
+                if not (timestamp and node and metrics):
+                    continue
+                
+                # Process metrics for this time point
+                processed_metrics = diagnosis_service._process_metrics({'node': node, 'metrics': metrics})
+                if processed_metrics is None:
+                    continue
+                
+                # Determine if this node should be labeled as anomalous
+                is_anomalous = False
+                if target_node:
+                    matched_node = find_matching_node(target_node, [node])
+                    if matched_node:
+                        is_anomalous = True
+                
+                # Create label vector - zeros for normal nodes, anomaly type for anomalous node
+                if is_anomalous:
+                    label_vector = self._create_label_vector(label_data)
+                else:
+                    label_vector = np.zeros(len(self._get_anomaly_types()))
+                
+                # Add to samples
+                X_samples.append(processed_metrics)
+                y_samples.append(label_vector)
+            
+            if not X_samples:
+                logger.warning(f"No valid samples extracted from case {case_name}")
+                return None
+            
+            X_array = np.array(X_samples)
+            y_array = np.array(y_samples)
+            
+            logger.info(f"Processed case {case_name}: {len(X_samples)} samples, X shape: {X_array.shape}, y shape: {y_array.shape}")
+            return X_array, y_array
+            
+        except Exception as e:
+            logger.error(f"Error processing case {os.path.basename(case_dir)}: {str(e)}")
+            logger.debug(traceback.format_exc())
             return None
+            
+    def _get_anomaly_types(self):
+        """Get list of supported anomaly types"""
+        return [
+            "cpu_stress",
+            "network_bottleneck",
+            "cache_bottleneck",
+        ]
 
     def _create_label_vector(self, label_data: Dict) -> np.ndarray:
-        """Create a label vector for the anomaly type"""
-        # Define the mapping of anomaly types to indices
-        # Map both short and full names of anomaly types
+        """Create label vector for anomaly data"""
+        # Define indices for different anomaly types
         anomaly_types = {
-            'cpu': 0,
-            'cpu_stress': 0,
-            'io': 1,
-            'io_bottleneck': 1,
-            'network': 2,
-            'network_bottleneck': 2,
-            'cache': 3,
-            'cache_bottleneck': 3,
-            'indexes': 4,
-            'too_many_indexes': 4,
+            "cpu_stress": 0,
+            "network_bottleneck": 1,
+            "cache_bottleneck": 2,
         }
         
-        label_vector = np.zeros(5)  # 5 basic types: cpu, io, network, cache, indexes
+        # Initialize label vector with zeros (multi-hot encoding)
+        label_vector = np.zeros(len(anomaly_types))
         
         # Handle compound anomalies
         if label_data.get("type") == "compound" and "subtypes" in label_data:
-            # Set multiple bits for compound anomalies
             for subtype in label_data["subtypes"]:
                 if subtype in anomaly_types:
                     label_vector[anomaly_types[subtype]] = 1
@@ -957,7 +926,8 @@ class TrainingService:
                 logger.debug(f"Created label vector for anomaly type {anomaly_type}: {label_vector}")
             else:
                 logger.warning(f"Unknown anomaly type: {anomaly_type}")
-                
+
+        logger.info(f"Final label vector for case with label data {label_data}: {label_vector}")
         return label_vector
 
     async def _maintain_cache(self):
@@ -1012,11 +982,17 @@ class TrainingService:
         def callback(fut):
             try:
                 fut.result()
+                logger.info("Collection stop completed successfully")
             except Exception as e:
                 logger.error(f"Stop collection failed: {str(e)}")
+                # Force clear state on error to prevent stuck state
+                asyncio.create_task(self._clear_collection_state())
 
         stop_task.add_done_callback(callback)
         logger.info("Initiated stop collection process")
+        
+        # Return the task so it can be awaited if needed
+        return stop_task
 
     async def start_compound_collection(self, anomaly_types: list, node: str = None):
         """
@@ -1092,6 +1068,101 @@ class TrainingService:
             
             # Schedule automatic stop after extended collection_duration
             asyncio.create_task(self._auto_stop_collection())
+
+    def test_training_data(self):
+        """Test function to diagnose training data issues and manually train the model"""
+        try:
+            # Import the diagnosis service
+            from app.services.diagnosis_service import diagnosis_service
+            
+            logger.info("Starting manual training data test")
+            
+            # Get training data
+            X, y = self.get_training_data()
+            
+            # Check if we have any data
+            if len(X) == 0 or len(y) == 0:
+                logger.error("No training data available")
+                return {
+                    "success": False,
+                    "error": "No training data available",
+                    "X_shape": (0, 0),
+                    "y_shape": (0, 0)
+                }
+            
+            # Log data shapes
+            logger.info(f"Training data shapes: X={X.shape}, y={y.shape}")
+            
+            # Check for NaN or infinity values
+            X_nan_count = np.isnan(X).sum()
+            X_inf_count = np.isinf(X).sum()
+            y_nan_count = np.isnan(y).sum()
+            y_inf_count = np.isinf(y).sum()
+            
+            logger.info(f"Data validation: X has {X_nan_count} NaN and {X_inf_count} infinite values")
+            logger.info(f"Data validation: y has {y_nan_count} NaN and {y_inf_count} infinite values")
+            
+            # Replace any NaN or infinite values
+            if X_nan_count > 0 or X_inf_count > 0:
+                logger.warning("Replacing NaN/infinite values in X with zeros")
+                X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            if y_nan_count > 0 or y_inf_count > 0:
+                logger.warning("Replacing NaN/infinite values in y with zeros")
+                y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # Verify diagnosis service is available
+            if diagnosis_service is None:
+                logger.error("Diagnosis service not available")
+                return {
+                    "success": False,
+                    "error": "Diagnosis service not available",
+                    "X_shape": X.shape,
+                    "y_shape": y.shape
+                }
+            
+            # Train the model
+            logger.info("Starting model training with validated data")
+            try:
+                result = diagnosis_service.train(X, y)
+                logger.info(f"Training completed successfully: {result.get('model_name', 'unnamed model')}")
+                return {
+                    "success": True,
+                    "result": result,
+                    "X_shape": X.shape,
+                    "y_shape": y.shape
+                }
+            except Exception as e:
+                logger.error(f"Error during model training: {str(e)}")
+                logger.error(traceback.format_exc())
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "X_shape": X.shape,
+                    "y_shape": y.shape
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in test_training_data: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    def _is_valid_timestamp(self, ts: str) -> bool:
+        from datetime import datetime
+        try:
+            # Try ISO format
+            datetime.fromisoformat(ts)
+            return True
+        except ValueError:
+            try:
+                # Try YYYYMMDDHHMMSS format
+                datetime.strptime(ts, "%Y%m%d%H%M%S")
+                return True
+            except ValueError:
+                return False
 
 # Create singleton instance
 training_service = TrainingService() 

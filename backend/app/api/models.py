@@ -429,8 +429,7 @@ def get_related_metrics_for_anomaly(metrics, node_name, anomaly_type):
             "cpu_stress": ["cpu"],
             "io_bottleneck": ["io"],
             "network_bottleneck": ["network"],
-            "cache_bottleneck": ["io", "memory"],
-            "too_many_indexes": ["memory", "io"]
+            "cache_bottleneck": ["io", "memory"]
         }
         
         # Get the relevant categories for this anomaly type

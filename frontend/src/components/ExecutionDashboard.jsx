@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Row, Col, Table, Button, Space, Typography, Statistic, Tag, Spin, Divider, message, Tabs } from 'antd';
-import { ReloadOutlined, StopOutlined, WarningOutlined, CheckCircleOutlined, LoadingOutlined, PlusOutlined } from '@ant-design/icons';
+import { Card, Row, Col, Table, Button, Space, Typography, Statistic, Tag, Spin, Divider, message, Tabs, Tooltip } from 'antd';
+import { ReloadOutlined, StopOutlined, WarningOutlined, CheckCircleOutlined, LoadingOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons';
 import { workloadService } from '../services/workloadService';
 import { anomalyService } from '../services/anomalyService';
 import { useAnomalyData } from '../hooks/useAnomalyData';
+import axios from 'axios';
 
 const { Title, Text } = Typography;
 const { TabPane } = Tabs;
@@ -22,6 +23,8 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [groupedAnomalies, setGroupedAnomalies] = useState([]);
+  const [resetCollectionLoading, setResetCollectionLoading] = useState(false);
+  const [cleanupTasksLoading, setCleanupTasksLoading] = useState(false);
 
   // Set flag for execution dashboard in localStorage
   useEffect(() => {
@@ -485,12 +488,42 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
   const handleStopTask = async (taskId) => {
     try {
       setWorkloadStopLoading(taskId);
+      
+      // First, get the task details to find its workload and anomalies
+      const taskDetails = await workloadService.getTask(taskId);
+      
+      // Stop the task itself
       await workloadService.stopTask(taskId);
-      message.success('Task stopped successfully');
+      
+      // If the task has a workload ID, stop that workload too
+      if (taskDetails.workload_id) {
+        try {
+          await workloadService.stopWorkload(taskDetails.workload_id);
+        } catch (workloadError) {
+          console.error(`Failed to stop workload ${taskDetails.workload_id}:`, workloadError);
+        }
+      }
+      
+      // Stop any anomalies associated with this task
+      if (taskDetails.anomalies && taskDetails.anomalies.length > 0) {
+        for (const anomaly of taskDetails.anomalies) {
+          try {
+            // Handle both string and object anomaly formats
+            const anomalyType = typeof anomaly === 'object' ? anomaly.type : anomaly;
+            const anomalyName = typeof anomaly === 'object' ? anomaly.name : null;
+            
+            await anomalyService.stopAnomaly(anomalyType, anomalyName);
+          } catch (anomalyError) {
+            console.error(`Failed to stop anomaly:`, anomalyError);
+          }
+        }
+      }
+      
+      message.success('Task and associated workloads/anomalies stopped successfully');
       
       // Refresh data
       setIsRefreshing(true);
-      await Promise.all([fetchTasks(), fetchActiveWorkloads()]);
+      await Promise.all([fetchTasks(), fetchActiveWorkloads(), refetchAnomalies()]);
       setIsRefreshing(false);
     } catch (error) {
       console.error('Failed to stop task:', error);
@@ -607,7 +640,6 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     try {
       setWorkloadStopLoading('all');
       await workloadService.stopAllWorkloads();
-      
       message.success('All workloads stopped');
       setIsRefreshing(true);
       await Promise.all([fetchTasks(), fetchActiveWorkloads()]);
@@ -615,6 +647,25 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     } catch (error) {
       console.error('Failed to stop all workloads:', error);
       message.error(`Failed to stop all workloads: ${error.message}`);
+    } finally {
+      setWorkloadStopLoading(false);
+    }
+  };
+
+  const handleStopAllTasks = async () => {
+    try {
+      setWorkloadStopLoading('all');
+      await Promise.all([
+        workloadService.stopAllWorkloads(),
+        anomalyService.stopAllAnomalies()
+      ]);
+      message.success('All tasks, workloads and anomalies stopped');
+      setIsRefreshing(true);
+      await Promise.all([fetchTasks(), fetchActiveWorkloads(), refetchAnomalies()]);
+      setIsRefreshing(false);
+    } catch (error) {
+      console.error('Failed to stop all tasks:', error);
+      message.error(`Failed to stop all tasks: ${error.message}`);
     } finally {
       setWorkloadStopLoading(false);
     }
@@ -667,6 +718,48 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
   
   // Get active tasks by filtering tasks with running status
   const activeTasks = tasks.filter(task => task.status === 'running');
+
+  // Add function to handle training collection reset
+  const handleResetCollectionState = async () => {
+    try {
+      setResetCollectionLoading(true);
+      
+      const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      await axios.post(`${API_BASE_URL}/api/training/force-reset`);
+      
+      message.success('Collection state reset successfully');
+      
+      // Refresh data after reset
+      handleRefreshData();
+    } catch (error) {
+      console.error('Error resetting collection state:', error);
+      message.error(`Failed to reset collection state: ${error.response?.data?.detail || error.message}`);
+    } finally {
+      setResetCollectionLoading(false);
+    }
+  };
+
+  // Add function to clean up old tasks
+  const handleCleanupOldTasks = async () => {
+    try {
+      setCleanupTasksLoading(true);
+      const result = await workloadService.cleanupOldTasks();
+      
+      if (result.removed_count > 0) {
+        message.success(`Cleaned up ${result.removed_count} old tasks`);
+      } else {
+        message.info('No old tasks to clean up');
+      }
+      
+      // Refresh data after cleanup
+      handleRefreshData();
+    } catch (error) {
+      console.error('Error cleaning up old tasks:', error);
+      message.error(`Failed to clean up old tasks: ${error.message}`);
+    } finally {
+      setCleanupTasksLoading(false);
+    }
+  };
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="large">
@@ -749,7 +842,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
                   type="primary" 
                   danger 
                   icon={<StopOutlined />}
-                  onClick={handleStopAllWorkloads}
+                  onClick={handleStopAllTasks}
                   disabled={activeTasks.length === 0}
                   loading={workloadStopLoading === 'all'}
                 >

@@ -199,5 +199,15 @@ export const workloadService = {
             console.error('Error stopping task:', error);
             throw new Error('Failed to stop task: ' + (error.response ?.data ?.detail || error.message));
         }
+    },
+
+    async cleanupOldTasks() {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/api/workload/tasks/cleanup`);
+            return response.data;
+        } catch (error) {
+            console.error('Error cleaning up old tasks:', error);
+            throw new Error('Failed to clean up old tasks: ' + (error.response?.data?.detail || error.message));
+        }
     }
 };

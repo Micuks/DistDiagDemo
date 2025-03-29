@@ -227,9 +227,9 @@ const RanksPanelControls = ({
                   <Slider
                     min={0}
                     max={100}
-                    value={thresholdValue}
+                    value={thresholdValue * 100}
                     onChange={handleThresholdChange}
-                    tooltip={{ formatter: value => `${value}%` }}
+                    tooltip={{ formatter: value => `${value/100}` }}
                   />
                 </Col>
                 

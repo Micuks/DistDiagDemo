@@ -164,7 +164,17 @@ class AnomalyService {
     async stopAllAnomalies() {
         console.log('Stopping all anomalies...');
         try {
-            // Get active anomalies first
+            // First try using the dedicated endpoint
+            try {
+                const response = await this.client.post('/api/anomaly/stop-all');
+                console.log('Used dedicated endpoint to stop all anomalies:', response.data);
+                return response.data;
+            } catch (endpointError) {
+                console.warn('Failed to use dedicated endpoint to stop anomalies, falling back to individual stops:', endpointError);
+                // If the new endpoint fails, fall back to stopping each anomaly individually
+            }
+            
+            // Fallback: Get active anomalies and stop them one by one
             const activeAnomalies = await this.getActiveAnomalies();
             console.log('Active anomalies to stop:', activeAnomalies);
             
@@ -200,9 +210,6 @@ class AnomalyService {
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
             
-            // Wait a moment for backend to process all deletions
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            
             // Final verification - check if any anomalies are still active
             const remainingAnomalies = await this.getActiveAnomalies();
             if (remainingAnomalies && remainingAnomalies.length > 0) {
@@ -218,20 +225,6 @@ class AnomalyService {
                     }
                 }
             }
-            
-            // One final check with force cache refresh
-            const finalCheck = await this._retryableRequest(() => 
-                this.client.get('/api/anomaly/active', {
-                    headers: {
-                        'Cache-Control': 'no-cache, no-store, must-revalidate',
-                        'Pragma': 'no-cache',
-                        'Expires': '0'
-                    },
-                    params: { _: Date.now() } // Add timestamp to bypass cache
-                })
-            );
-            
-            console.log('Final anomaly check after stopAll:', finalCheck);
             
             return {
                 status: "success", 
@@ -443,16 +436,6 @@ class AnomalyService {
         }
     }
 
-    async stopAllAnomalies() {
-        try {
-            const response = await this.client.post('/api/anomaly/stop-all');
-            return response.data;
-        } catch (error) {
-            console.error('Error stopping all anomalies:', error);
-            throw new Error('Failed to stop all anomalies: ' + (error.response?.data?.detail || error.message));
-        }
-    }
-
     getAnomalyTypes() {
         return [
             {
@@ -469,11 +452,6 @@ class AnomalyService {
                 key: 'memory_leak',
                 name: 'Memory Leak',
                 description: 'Simulate gradual memory consumption'
-            },
-            {
-                key: 'too_many_indexes',
-                name: 'Too Many Indexes',
-                description: 'Create unnecessary database indexes'
             },
             {
                 key: 'cache_bottleneck',

@@ -173,6 +173,48 @@ class WorkloadService:
         logger.info(f"Found {len(active_tasks)} active tasks")
         return active_tasks
 
+    def cleanup_old_tasks(self, hours_threshold: int = 12) -> int:
+        """Remove stopped tasks older than the specified threshold (default 12 hours)
+        
+        Returns:
+            int: Number of tasks that were removed
+        """
+        current_time = datetime.utcnow()
+        removed_count = 0
+        
+        # Make a copy of keys since we'll be modifying the dictionary
+        task_ids = list(self.tasks.keys())
+        
+        for task_id in task_ids:
+            task = self.tasks[task_id]
+            
+            # Skip if task is still running
+            if task.status == WorkloadStatus.RUNNING:
+                continue
+                
+            # If task has end_time (it was properly stopped), check if it's old enough to remove
+            if task.end_time:
+                time_diff = current_time - task.end_time
+                hours_diff = time_diff.total_seconds() / 3600
+                
+                if hours_diff >= hours_threshold:
+                    del self.tasks[task_id]
+                    removed_count += 1
+                    logger.info(f"Removed old task {task_id} ({task.name}) - stopped {hours_diff:.1f} hours ago")
+            
+            # If task has no end_time but is marked as stopped, it might be in an inconsistent state
+            # In this case, we'll also remove it if it's old enough based on start_time
+            elif task.status in [WorkloadStatus.STOPPED, WorkloadStatus.ERROR]:
+                time_diff = current_time - task.start_time
+                hours_diff = time_diff.total_seconds() / 3600
+                
+                if hours_diff >= hours_threshold:
+                    del self.tasks[task_id]
+                    removed_count += 1
+                    logger.info(f"Removed inconsistent task {task_id} ({task.name}) - started {hours_diff:.1f} hours ago but never properly ended")
+        
+        return removed_count
+
     def _check_tables_exist(self, port: int = None) -> bool:
         """Check if sysbench tables already exist"""
         try:

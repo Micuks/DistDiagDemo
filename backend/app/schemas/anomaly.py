@@ -7,7 +7,6 @@ class AnomalyType(str, Enum):
     IO_BOTTLENECK = "io_bottleneck"
     NETWORK_BOTTLENECK = "network_bottleneck"
     MEMORY_LEAK = "memory_leak"
-    TOO_MANY_INDEXES = "too_many_indexes"
 
 class AnomalyStatus(str, Enum):
     RUNNING = "running"
@@ -25,7 +24,7 @@ class AnomalyRequest(BaseModel):
     type: str
     target_node: Optional[Union[List[str], str]] = None
     node: Optional[Union[List[str], str]] = None  # For backwards compatibility
-    severity: int = 5
+    severity: str = "medium"  # Expecting values: "low", "medium", "high"
     duration: Optional[int] = None
     collect_training_data: Optional[bool] = False
     save_post_data: Optional[bool] = True

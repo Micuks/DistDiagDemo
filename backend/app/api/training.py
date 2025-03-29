@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Optional
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import logging
 from app.services.training_service import training_service
@@ -11,8 +12,20 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi.applications import FastAPI
 from starlette.requests import Request
 from starlette.responses import Response
+import traceback
+from datetime import datetime
 
-logger = logging.getLogger(__name__)
+from backend.app.schemas.anomaly import AnomalyRequest
+
+# Import and initialize diagnosis service properly
+try:
+    from app.services.diagnosis_service import diagnosis_service
+    logger = logging.getLogger(__name__)
+    logger.info("Successfully imported DiagnosisService")
+except Exception as e:
+    logger = logging.getLogger(__name__)
+    logger.error(f"Error importing DiagnosisService: {str(e)}")
+    diagnosis_service = None
 
 router = APIRouter()
 
@@ -25,10 +38,12 @@ def _init_training_status(stats: Dict = {}):
     "stats": stats       # Training stats like accuracy, etc.
 } 
 
-# Add global variables for tracking training state
-_training_in_progress = False
-_training_lock = asyncio.Lock()
-_training_status = _init_training_status()
+# Global training state object
+TRAINING_STATE = {
+    "in_progress": False,
+    "status": _init_training_status(),
+    "finished_at": None
+}
 _training_executor = ThreadPoolExecutor(max_workers=1)  # Dedicated executor for training
 
 # Add global variables for tracking collection state
@@ -36,12 +51,8 @@ _normal_collection_in_progress = False
 _anomaly_collection_in_progress = False
 _collection_lock = asyncio.Lock()
 
-class AnomalyRequest(BaseModel):
-    type: str
-    node: Optional[str] = None
-    pre_collect: Optional[bool] = True
-    post_collect: Optional[bool] = True
-    experiment_name: Optional[str] = None
+# Add this after _training_executor initialization
+_status_sync_task = None
 
 class TrainingStopRequest(BaseModel):
     save_post_data: Optional[bool] = True
@@ -257,6 +268,10 @@ async def get_collection_status():
             is_normal = training_service.is_collecting_normal and not training_service.current_anomaly
             is_anomaly = training_service.current_anomaly is not None
             
+            # Add current timestamp and collection start time for frontend state verification
+            current_time = datetime.now().isoformat()
+            collection_start_time = training_service.collection_start_time
+            
             status = {
                 "is_collecting_normal": is_normal,
                 "is_collecting_anomaly": is_anomaly,
@@ -267,7 +282,16 @@ async def get_collection_status():
                 } if is_anomaly else None,
                 "collection_phase": "pre_anomaly" if is_anomaly and training_service.is_collecting_normal else
                                   "anomaly" if is_anomaly else
-                                  "normal" if is_normal else None
+                                  "normal" if is_normal else None,
+                "last_update_time": current_time,
+                "collection_start_time": collection_start_time,
+                "collection_duration": training_service.collection_duration if hasattr(training_service, "collection_duration") else 180,
+                "debug_info": {
+                    "metrics_buffer_size": len(training_service.metrics_buffer) if hasattr(training_service, "metrics_buffer") else 0,
+                    "normal_buffer_size": len(training_service.normal_state_buffer) if hasattr(training_service, "normal_state_buffer") else 0,
+                    "has_current_case": training_service.current_case is not None,
+                    "has_current_anomaly": training_service.current_anomaly is not None
+                }
             }
         
         return JSONResponse(
@@ -291,202 +315,168 @@ async def get_collection_status():
 @router.get("/training-status")
 async def get_training_status():
     """Get the current status of model training."""
-    async with _training_lock:
-        # Reset completed/failed status after a period of time
-        global _training_status
-        if (_training_status['stage'] == 'completed' or _training_status['stage'] == 'failed') and not _training_in_progress:
-            # Check if status has been in this state for a while (using a timestamp)
-            current_time = time.time()
-            if not hasattr(_training_status, 'completion_time'):
-                _training_status['completion_time'] = current_time
-            elif current_time - _training_status['completion_time'] > 60:  # Reset after 60 seconds
-                # Keep the stats but reset the stage to idle
-                stats = _training_status.get('stats', {})
-                _training_status = _init_training_status(stats=stats)
-                # Remove the timestamp
-                if hasattr(_training_status, 'completion_time'):
-                    delattr(_training_status, 'completion_time')
-                
-        return _training_status
+    global TRAINING_STATE
+    # If training finished more than 30 seconds ago, reset status to idle
+    if (not TRAINING_STATE["in_progress"]) and TRAINING_STATE["finished_at"]:
+        elapsed = (datetime.now() - TRAINING_STATE["finished_at"]).total_seconds()
+        if elapsed > 5:
+            TRAINING_STATE["status"] = _init_training_status()
+            TRAINING_STATE["finished_at"] = None
+    return TRAINING_STATE["status"]
 
 @router.post("/train")
 async def train_model():
     """Train the anomaly detection model using existing collected data."""
-    global _training_in_progress, _training_status
-    
-    # Check if training is already in progress
-    async with _training_lock:
-        if _training_in_progress:
-            logger.warning("Training already in progress, ignoring duplicate request")
-            return {
-                "status": "pending", 
-                "message": "Training is already in progress, please wait"
-            }
-        # Mark training as in progress
-        _training_in_progress = True
-        # Reset training status
-        _training_status = {
-            "stage": "preprocessing",
-            "progress": 0,
-            "message": "Preparing training data...",
-            "error": None,
-            "stats": {}
+    global TRAINING_STATE
+
+    if TRAINING_STATE["in_progress"]:
+        logger.warning("Training already in progress, ignoring duplicate request")
+        return {
+            "status": "pending",
+            "message": "Training is already in progress, please wait"
         }
-    
-    # Create a background task for the training process
+
+    TRAINING_STATE["in_progress"] = True
+    TRAINING_STATE["status"] = {
+        "stage": "preprocessing",
+        "progress": 0,
+        "message": "Preparing training data...",
+        "error": None,
+        "stats": {}
+    }
+
     asyncio.create_task(_run_training_in_background())
-    
-    # Return immediately, letting training continue in background
     return {
-        "status": "accepted", 
+        "status": "accepted",
         "message": "Training started in the background"
     }
 
+async def update_progress():
+    """Periodically update training progress"""
+    progress = 50
+    while True:
+        await asyncio.sleep(0.1)
+        if progress < 75:
+            progress += 1
+        TRAINING_STATE["status"].update({
+            "stage": "training",
+            "progress": progress,
+            "message": f"Training model... ({progress}%)"
+        })
+        logger.debug(f"Updated training progress to {progress}%")
+
 async def _run_training_in_background():
     """Run the model training process in a background task."""
-    global _training_in_progress, _training_status
-    
-    # Store original settings to restore later
-    original_workload_active = True
-    original_send_setting = True
-    
+    global TRAINING_STATE
     try:
         logger.info("Starting model training process with existing collected data")
-        
-        # Temporarily disable workload check to ensure training can proceed
+
         metrics_service.set_check_workload_active(False)
-        
-        # Temporarily disable sending metrics to training to avoid deadlocks
         original_send_setting = metrics_service.send_to_training
         metrics_service.toggle_send_to_training(False)
-        logger.info("Temporarily disabled sending metrics to training service during model training")
         
-        # Update status - data fetching
-        async with _training_lock:
-            _training_status.update({
-                "stage": "preprocessing",
-                "progress": 10,
-                "message": "Loading training data from disk..."
-            })
-        
-        # Get training data from disk (not from current metrics collection)
+        TRAINING_STATE["status"].update({
+            "stage": "preprocessing",
+            "progress": 10,
+            "message": "Loading training data from disk..."
+        })
+
         X, y = training_service.get_training_data()
         if len(X) == 0 or len(y) == 0:
             logger.error("No training data available in the dataset")
-            async with _training_lock:
-                _training_status.update({
-                    "stage": "failed",
-                    "message": "No training data available in the dataset",
-                    "error": "No training data available in the dataset",
-                    "progress": 0
-                })
-            return
-            
-        # Update status - preprocessing
-        async with _training_lock:
-            _training_status.update({
-                "stage": "preprocessing",
-                "progress": 30,
-                "message": f"Processing training data: {len(X)} samples..."
+            TRAINING_STATE["status"].update({
+                "stage": "failed",
+                "message": "No training data available in the dataset",
+                "error": "No training data available in the dataset",
+                "progress": 0
             })
-        
-        # Get access to diagnosis service
-        from app.services.diagnosis_service import DiagnosisService
-        diagnosis_service = DiagnosisService()
-        
-        # Set up a progress reporting task that runs in parallel with training
-        progress_task = None
-        try:
-            async def update_progress():
-                """Periodically update training progress to keep the API responsive"""
-                progress = 50
-                while True:
-                    await asyncio.sleep(5)  # Update every 5 seconds
-                    # Increment progress slightly each time (max 75%)
-                    if progress < 75:
-                        progress += 1
-                    async with _training_lock:
-                        _training_status.update({
-                            "stage": "training",
-                            "progress": progress,
-                            "message": f"Training model... ({progress}%)"
-                        })
-                    logger.debug(f"Updated training progress to {progress}%")
+            return
 
-            # Start progress reporting task
-            progress_task = asyncio.create_task(update_progress())
-            
-            # Update status - training
-            async with _training_lock:
-                _training_status.update({
-                    "stage": "training",
-                    "progress": 50,
-                    "message": "Training model..."
-                })
-            
-            # Run the CPU-intensive training in a dedicated thread pool to avoid blocking API requests
+        logger.info(f"Training data shapes: X={X.shape}, y={y.shape}")
+        if diagnosis_service is None:
+            logger.error("DiagnosisService not properly initialized")
+            TRAINING_STATE["status"].update({
+                "stage": "failed",
+                "message": "Model service not properly initialized",
+                "error": "DiagnosisService import failed",
+                "progress": 0
+            })
+            return
+
+        TRAINING_STATE["status"].update({
+            "stage": "preprocessing",
+            "progress": 30,
+            "message": f"Processing training data: {X.shape[0]} samples..."
+        })
+
+        progress_task = asyncio.create_task(update_progress())
+
+        TRAINING_STATE["status"].update({
+            "stage": "training",
+            "progress": 50,
+            "message": "Training model..."
+        })
+
+        try:
             result = await asyncio.get_event_loop().run_in_executor(
-                _training_executor,  # Use dedicated executor instead of default
+                _training_executor,
                 diagnosis_service.train, 
                 X, 
                 y
             )
-            logger.info(f"Model training completed successfully: {result['model_name']}")
+            if result is None or not isinstance(result, dict):
+                raise ValueError(f"Invalid result from model training: {result}")
+            logger.info(f"Model training completed successfully: {result.get('model_name', 'unnamed')}")
+            TRAINING_STATE["status"].update({
+                "stage": "completed",
+                "progress": 100,
+                "message": "Model training completed successfully",
+                "stats": result.get("metrics", {})
+            })
+        except Exception as e:
+            logger.error(f"Error during model training: {str(e)}")
+            raise ValueError(f"Model training failed: {str(e)}")
         finally:
-            # Cancel progress task if it exists
             if progress_task and not progress_task.done():
                 progress_task.cancel()
                 try:
                     await progress_task
                 except asyncio.CancelledError:
                     pass
-        
-        # Update status - evaluating
-        async with _training_lock:
-            _training_status.update({
-                "stage": "evaluating",
-                "progress": 80,
-                "message": "Evaluating model performance..."
-            })
-        
-        # Evaluate model if result contains evaluation metrics
+
+        TRAINING_STATE["finished_at"] = datetime.now()
+        TRAINING_STATE["status"].update({
+            "stage": "evaluating",
+            "progress": 80,
+            "message": "Evaluating model performance..."
+        })
+        # If there are evaluation metrics
         model_metrics = {}
         if 'metrics' in result:
             model_metrics = result['metrics']
-        
-        # Update status - completed
-        async with _training_lock:
-            _training_status.update({
-                "stage": "completed",
-                "progress": 100,
-                "message": "Model training completed successfully",
-                "stats": model_metrics
-            })
-            
+            logger.info(f"Model evaluation metrics: {model_metrics}")
+        TRAINING_STATE["status"].update({
+            "stage": "completed",
+            "progress": 100,
+            "message": "Model training completed successfully",
+            "stats": model_metrics
+        })
         logger.info("Training process completed successfully")
-        
     except Exception as e:
         logger.error(f"Failed to train model: {str(e)}")
-        # Update status - failed
-        async with _training_lock:
-            _training_status.update({
-                "stage": "failed",
-                "progress": 0,
-                "message": f"Training failed: {str(e)}",
-                "error": str(e)
-            })
+        logger.error(traceback.format_exc())
+        TRAINING_STATE["status"].update({
+            "stage": "failed",
+            "progress": 0,
+            "message": f"Training failed: {str(e)}",
+            "error": str(e)
+        })
+        TRAINING_STATE["finished_at"] = datetime.now()
     finally:
-        # Ensure workload check is restored even on error
         metrics_service.set_check_workload_active(True)
-        
-        # Ensure metrics-to-training setting is restored
         metrics_service.toggle_send_to_training(original_send_setting)
-        logger.info("Restored original metrics collection settings")
-        
-        # Always mark training as complete, even if there was an error
-        async with _training_lock:
-            _training_in_progress = False
-            logger.info("Training process marked as complete")
+        TRAINING_STATE["in_progress"] = False
+        logger.info("Training process marked as complete")
 
 @router.post("/reset")
 async def reset_training_state():
@@ -500,6 +490,43 @@ async def reset_training_state():
     except Exception as e:
         logger.error(f"Error resetting training state: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error resetting training state: {str(e)}")
+
+@router.post("/force-reset")
+async def force_reset_collection_state():
+    """Force reset the collection state flags in case of desynchronization between API and backend."""
+    global _anomaly_collection_in_progress, _normal_collection_in_progress
+    
+    try:
+        # Reset API flags
+        async with _collection_lock:
+            was_anomaly_collecting = _anomaly_collection_in_progress
+            was_normal_collecting = _normal_collection_in_progress
+            
+            _anomaly_collection_in_progress = False
+            _normal_collection_in_progress = False
+        
+        # Reset actual training service state
+        try:
+            await training_service.reset_state()
+            logger.info("Successfully reset training service state")
+        except Exception as e:
+            logger.error(f"Error resetting training service state: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "Collection state forcefully reset",
+            "previous_state": {
+                "anomaly_collection": was_anomaly_collecting,
+                "normal_collection": was_normal_collecting
+            },
+            "current_state": {
+                "anomaly_collection": False,
+                "normal_collection": False
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error performing force reset: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error performing force reset: {str(e)}")
 
 @router.post("/workload/active")
 async def set_workload_active(active: bool = True):
@@ -519,9 +546,9 @@ async def set_workload_active(active: bool = True):
 @router.get("/process-status")
 async def get_process_status():
     """Get the status of all training processes (training, anomaly collection, normal collection)"""
-    async with _collection_lock, _training_lock:
+    async with _collection_lock, _training_executor:
         return {
-            "training_in_progress": _training_in_progress,
+            "training_in_progress": TRAINING_STATE["in_progress"],
             "anomaly_collection_in_progress": _anomaly_collection_in_progress,
             "normal_collection_in_progress": _normal_collection_in_progress
         }
@@ -562,16 +589,28 @@ async def start_compound_collection(request: CompoundAnomalyRequest):
         _anomaly_collection_in_progress = True
     
     try:
+        # First ensure metrics collection is active
         metrics_service.toggle_send_to_training(True)
+        
+        # Start compound collection
         await training_service.start_compound_collection(
             anomaly_types=request.anomaly_types,
             node=request.node,
         )
+        
+        logger.info(f"Started compound anomaly collection with types: {request.anomaly_types}")
+        
+        # Inform user about longer collection period for compound anomalies
+        collection_duration = getattr(training_service, 'collection_duration', 180)
+        extended_duration = int(collection_duration * 1.5)  # 50% longer for compound anomalies
+        
         return {
             "status": "success",
             "message": f"Started compound anomaly collection with {len(request.anomaly_types)} anomaly types",
             "types": request.anomaly_types,
-            "node": request.node or "auto-selected"
+            "node": request.node or "auto-selected",
+            "expected_duration": extended_duration,
+            "note": "Collection period is extended by 50% for compound anomalies to ensure sufficient data"
         }
     except Exception as e:
         # Reset collection flag on error
@@ -580,14 +619,221 @@ async def start_compound_collection(request: CompoundAnomalyRequest):
         logger.error(f"Error starting compound anomaly collection: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error starting compound anomaly collection: {str(e)}")
 
-# Add a shutdown handler at the end of the file
+@router.post("/train_compound_model")
+async def train_compound_model():
+    """
+    Train a specialized model for detecting compound anomalies
+    
+    This endpoint will train a model specifically optimized for:
+    1. Identifying multiple simultaneous anomalies on the same node 
+    2. Understanding anomaly propagation across nodes
+    3. Determining the root cause in complex scenarios
+    """
+    try:
+        # Check if sufficient compound anomaly data exists
+        stats = await training_service.get_dataset_stats()
+        compound_cases = stats.get("compound", 0)
+        
+        if compound_cases < 5:  # Require at least 5 compound anomaly samples
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "message": f"Insufficient compound anomaly data. Found {compound_cases} cases but require at least 5. Use the /training/compound endpoint to collect more data."
+                }
+            )
+        
+        # Get training data specifically optimized for compound scenarios
+        X, y = await training_service.get_training_data()
+        
+        if len(X) == 0 or len(y) == 0:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "message": "Could not extract valid training data"
+                }
+            )
+            
+        # Train the model with the multi-node, multi-label dataset
+        result = diagnosis_service.train(X, y)
+        
+        # Add metadata about compound anomaly training
+        result["compound_optimized"] = True
+        result["compound_cases_used"] = compound_cases
+        
+        return JSONResponse(
+            content={
+                "status": "success",
+                "message": f"Successfully trained compound anomaly model with {len(X)} samples, including {compound_cases} compound cases",
+                "model": result
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error training compound model: {str(e)}")
+        traceback_str = traceback.format_exc()
+        logger.debug(f"Traceback: {traceback_str}")
+        
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"Failed to train compound anomaly model: {str(e)}"
+            }
+        )
+
+# Add this function before the routes
+async def _sync_collection_status():
+    """Periodically check the actual collection status and sync with API flags"""
+    global _anomaly_collection_in_progress, _normal_collection_in_progress
+    try:
+        while True:
+            # Check every 5 seconds
+            await asyncio.sleep(5)
+            
+            try:
+                # Check training service state and sync with our flags
+                async with training_service._lock:
+                    actual_normal_active = training_service.is_collecting_normal and not training_service.current_anomaly
+                    actual_anomaly_active = training_service.current_anomaly is not None
+                    
+                    # Sync API flags with actual state
+                    async with _collection_lock:
+                        if _anomaly_collection_in_progress != actual_anomaly_active:
+                            logger.warning(f"Fixing desynchronized anomaly collection state: API={_anomaly_collection_in_progress}, actual={actual_anomaly_active}")
+                            _anomaly_collection_in_progress = actual_anomaly_active
+                            
+                        if _normal_collection_in_progress != actual_normal_active:
+                            logger.warning(f"Fixing desynchronized normal collection state: API={_normal_collection_in_progress}, actual={actual_normal_active}")
+                            _normal_collection_in_progress = actual_normal_active
+                
+                # Additionally check collection status from debug info
+                collection_status = await training_service.get_collection_status()
+                if collection_status and isinstance(collection_status, dict):
+                    debug_info = collection_status.get("debug_info", {})
+                    has_current_anomaly = debug_info.get("has_current_anomaly", False)
+                    
+                    async with _collection_lock:
+                        if _anomaly_collection_in_progress and not has_current_anomaly:
+                            logger.warning(f"Collection flag inconsistency detected: flag={_anomaly_collection_in_progress}, actual={has_current_anomaly}")
+                            _anomaly_collection_in_progress = False
+            except Exception as e:
+                logger.error(f"Error in collection status sync: {str(e)}")
+                # Reset flags if error occurs during status check
+                async with _collection_lock:
+                    _anomaly_collection_in_progress = False
+                    _normal_collection_in_progress = False
+                    
+    except asyncio.CancelledError:
+        logger.debug("Collection status sync task cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"Error in collection status sync task: {str(e)}")
+
+# Add this function at the end of the file, right before setup_shutdown_handler
+def start_status_sync_task():
+    """Start the background task to sync collection status between API and service"""
+    global _status_sync_task
+    
+    if _status_sync_task is None or _status_sync_task.done():
+        _status_sync_task = asyncio.create_task(_sync_collection_status())
+        logger.info("Started collection status sync task")
+
+# Modify setup_shutdown_handler to include stopping the sync task
 def setup_shutdown_handler(app: FastAPI):
-    """Set up a shutdown handler to gracefully close the training executor."""
+    """Set up a shutdown handler to gracefully close resources."""
+    @app.on_event("startup")
+    async def startup_event():
+        logger.info("Starting training API and background tasks...")
+        start_status_sync_task()
+    
     @app.on_event("shutdown")
     async def shutdown_event():
-        logger.info("Shutting down training executor...")
+        global _status_sync_task
+        
+        logger.info("Shutting down training executor and tasks...")
         try:
+            # Cancel status sync task if running
+            if _status_sync_task and not _status_sync_task.done():
+                _status_sync_task.cancel()
+                try:
+                    await _status_sync_task
+                except asyncio.CancelledError:
+                    pass
+                
             _training_executor.shutdown(wait=False)
-            logger.info("Training executor shutdown complete")
+            logger.info("Training resources shutdown complete")
         except Exception as e:
-            logger.error(f"Error shutting down training executor: {str(e)}")
+            logger.error(f"Error shutting down training resources: {str(e)}")
+
+@router.post("/test-training")
+async def test_training_process():
+    """
+    Test the training process by manually loading training data and training the model.
+    This is a diagnostic endpoint to help identify and fix training issues.
+    """
+    try:
+        # Import diagnosis service
+        from app.services.diagnosis_service import diagnosis_service
+        
+        logger.info("Starting direct training test")
+        
+        # Get training data
+        X, y = training_service.get_training_data()
+        
+        # Check if we have any data
+        if len(X) == 0 or len(y) == 0:
+            logger.error("No training data available")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "message": "No training data available",
+                    "data_shapes": {
+                        "X": str((0, 0)),
+                        "y": str((0, 0))
+                    }
+                }
+            )
+        
+        # Log data shapes
+        logger.info(f"Training data shapes: X={X.shape}, y={y.shape}")
+        
+        # Use the direct_train method for more detailed diagnosis
+        result = diagnosis_service.direct_train(X, y)
+        
+        if result.get("success", False):
+            return JSONResponse(
+                content={
+                    "status": "success",
+                    "message": "Direct training test completed successfully",
+                    "data_shapes": {
+                        "X": str(X.shape),
+                        "y": str(y.shape),
+                    },
+                    "model_info": result.get("result", {})
+                }
+            )
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "message": "Direct training test failed",
+                    "error": result.get("error", "Unknown error"),
+                    "data_shapes": {
+                        "X": str(X.shape),
+                        "y": str(y.shape),
+                    }
+                }
+            )
+    except Exception as e:
+        logger.error(f"Error in test training endpoint: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"Error testing training process: {str(e)}"
+            }
+        )

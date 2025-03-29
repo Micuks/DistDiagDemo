@@ -114,11 +114,20 @@ async def create_task(request: CreateTaskRequest):
 
 @router.post("/stop-all")
 async def stop_all_workloads():
-    """Stop all active workloads"""
+    """Stop all active workloads and anomalies"""
     logger.info("Received request to stop all workloads")
     try:
         # First try to stop all workloads
         success = workload_service.stop_all_workloads()
+        
+        # Also stop all active anomalies
+        try:
+            logger.info("Stopping all active anomalies")
+            await k8s_service.delete_all_chaos_experiments()
+            logger.info("All anomalies stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping all anomalies: {str(e)}")
+            # Continue anyway to check workload status
         
         # Verify if workloads are actually stopped by checking active workloads
         active_workloads = workload_service.get_active_workloads()
@@ -126,7 +135,7 @@ async def stop_all_workloads():
         if not active_workloads:
             # No active workloads, so operation was successful regardless of the service's return value
             logger.info("All workloads verified as stopped")
-            return {"status": "success", "message": "All workloads stopped successfully"}
+            return {"status": "success", "message": "All workloads and anomalies stopped successfully"}
         else:
             # Some workloads are still active - this is an actual failure
             workload_ids = [w['id'] for w in active_workloads]
@@ -197,8 +206,31 @@ async def get_active_tasks():
     """Get all active tasks"""
     try:
         tasks = workload_service.get_active_tasks()
+        
+        # Log task count for debugging
+        logger.info(f"Retrieved {len(tasks)} active tasks")
+        if tasks:
+            for task in tasks:
+                logger.debug(f"Active task: {task.id}, status: {task.status}, name: {task.name}")
+                
         return tasks
     except Exception as e:
+        logger.error(f"Error getting active tasks: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/tasks/cleanup", response_model=dict)
+async def cleanup_tasks():
+    """Remove stopped tasks older than a certain threshold"""
+    try:
+        removed_count = workload_service.cleanup_old_tasks()
+        logger.info(f"Cleaned up {removed_count} old tasks")
+        return {
+            "status": "success", 
+            "message": f"Cleaned up {removed_count} old tasks",
+            "removed_count": removed_count
+        }
+    except Exception as e:
+        logger.error(f"Error cleaning up tasks: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/tasks/{task_id}", response_model=Task)
@@ -234,6 +266,20 @@ async def stop_task(task_id: str):
             except Exception as e:
                 logger.warning(f"Failed to stop workload {task.workload_id}: {str(e)}")
                 # Continue anyway to update task status
+
+        # Stop all associated anomalies
+        if task.anomalies:
+            logger.info(f"Stopping {len(task.anomalies)} anomalies associated with task {task_id}")
+            for anomaly in task.anomalies:
+                try:
+                    anomaly_type = anomaly.get('type')
+                    experiment_name = anomaly.get('name')
+                    if anomaly_type:
+                        logger.info(f"Stopping anomaly: {anomaly_type} (name: {experiment_name})")
+                        await k8s_service.delete_chaos_experiment(anomaly_type, experiment_name)
+                except Exception as e:
+                    logger.warning(f"Failed to stop anomaly {anomaly.get('type')}: {str(e)}")
+                    # Continue anyway to update task status
         
         # Update task status
         updated_task = workload_service.update_task_status(task_id, WorkloadStatus.STOPPED)
