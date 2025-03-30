@@ -546,7 +546,7 @@ async def set_workload_active(active: bool = True):
 @router.get("/process-status")
 async def get_process_status():
     """Get the status of all training processes (training, anomaly collection, normal collection)"""
-    async with _collection_lock, _training_executor:
+    async with _collection_lock:
         return {
             "training_in_progress": TRAINING_STATE["in_progress"],
             "anomaly_collection_in_progress": _anomaly_collection_in_progress,

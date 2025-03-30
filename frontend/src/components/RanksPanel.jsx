@@ -467,6 +467,7 @@ const RanksPanel = () => {
           getTimelineData={getTimelineData}
           renderForceGraph={renderForceGraph}
           renderNodeHeatmap={renderNodeHeatmap}
+          thresholdValue={thresholdValue}
         />
       );
     } else if (analysisStep === 2) {

@@ -98,9 +98,9 @@ class K8sService:
         # Add severity variations for experiments
         self.severity_variations = {
             "cpu_stress": [
-                {"workers": 32, "load": 50},
-                {"workers": 48, "load": 75},
-                {"workers": 64, "load": 100}
+                {"workers": 32, "load": 100, "stress-ng-params": "--cpu 40 -t 180"},
+                {"workers": 48, "load": 100, "stress-ng-params": "--cpu 80 -t 180"},
+                {"workers": 64, "load": 100, "stress-ng-params": "--cpu 120 -t 180"}
             ],
             "io_bottleneck": [
                 {"intensity": "low", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=2048 conv=fdatasync & sleep %s"},
@@ -108,9 +108,9 @@ class K8sService:
                 {"intensity": "high", "command": "dd if=/dev/zero of=/tmp/io_stress_file bs=1M count=2048 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file2 bs=1M count=2048 conv=fdatasync & dd if=/dev/zero of=/tmp/io_stress_file3 bs=1M count=2048 conv=fdatasync & sleep %s"}
             ],
             "network_bottleneck": [
-                {"latency": "1000ms", "correlation": "85"},
-                {"latency": "2000ms", "correlation": "95"},
-                {"latency": "3000ms", "correlation": "100"}
+                {"loss": "50", "correlation": "0"},
+                {"loss": "80", "correlation": "0"},
+                {"loss": "100", "correlation": "0"}
             ],
             "cache_bottleneck": [
                 {"workers": 8, "size": "2GB"},
@@ -300,6 +300,83 @@ class K8sService:
                 # Return deleted experiments
                 return deleted_experiments
             
+            # Special handling for cpu_stress - clean up properly
+            elif anomaly_type == "cpu_stress":
+                if experiment_name:
+                    if experiment_name in self.active_anomalies:
+                        process_id = self.active_anomalies[experiment_name].get('process_id')
+                        if process_id:
+                            try:
+                                import os, signal
+                                os.kill(process_id, signal.SIGKILL)
+                            except Exception as e:
+                                logger.warning(f"Failed to kill process {process_id}: {str(e)}")
+                        node = self.active_anomalies[experiment_name].get('node')
+                        if node:
+                            cleanup_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c 'pkill stress-ng' || true"
+                            logger.info(f"Running cleanup: {cleanup_cmd}")
+                            import os
+                            os.system(cleanup_cmd)
+                        del self.active_anomalies[experiment_name]
+                        deleted_experiments.append(experiment_name)
+                else:
+                    cpu_experiments = [name for name, anomaly in self.active_anomalies.items() if anomaly.get('type') == 'cpu_stress']
+                    for exp_name in cpu_experiments:
+                        process_id = self.active_anomalies[exp_name].get('process_id')
+                        if process_id:
+                            try:
+                                import os, signal
+                                os.kill(process_id, signal.SIGKILL)
+                            except Exception as e:
+                                logger.warning(f"Failed to kill process {process_id}: {str(e)}")
+                        node = self.active_anomalies[exp_name].get('node')
+                        if node:
+                            cleanup_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c 'pkill stress-ng' || true"
+                            logger.info(f"Running cleanup: {cleanup_cmd}")
+                            import os
+                            os.system(cleanup_cmd)
+                        del self.active_anomalies[exp_name]
+                        deleted_experiments.append(exp_name)
+
+                plural = self._get_experiment_plural(anomaly_type)
+                try:
+                    if experiment_name and "ob-cpu-stress" in experiment_name:
+                        await asyncio.to_thread(
+                            self.custom_api.delete_namespaced_custom_object,
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=plural,
+                            name=experiment_name
+                        )
+                        logger.info(f"Deleted K8s tracking resource: {experiment_name}")
+                    else:
+                        experiments = await asyncio.to_thread(
+                            self.custom_api.list_namespaced_custom_object,
+                            group="chaos-mesh.org",
+                            version="v1alpha1",
+                            namespace=self.namespace,
+                            plural=plural
+                        )
+                        for exp in experiments.get('items', []):
+                            name = exp['metadata']['name']
+                            if name.startswith("ob-cpu-stress"):
+                                await asyncio.to_thread(
+                                    self.custom_api.delete_namespaced_custom_object,
+                                    group="chaos-mesh.org",
+                                    version="v1alpha1",
+                                    namespace=self.namespace,
+                                    plural=plural,
+                                    name=name
+                                )
+                                logger.info(f"Deleted K8s tracking resource: {name}")
+                    self.invalidate_cache()
+                    self._last_cache_update = 0
+                    return deleted_experiments
+                except Exception as e:
+                    logger.warning(f"Error deleting K8s tracking resources for CPU stress: {str(e)}")
+                    return deleted_experiments
+
             # Special handling for cache bottleneck
             elif anomaly_type == "cache_bottleneck":
                 # Restore default memstore_limit_percentage for all zones
@@ -542,13 +619,23 @@ class K8sService:
                                 start_time = exp['metadata'].get('creationTimestamp', datetime.now().isoformat())
                                 target_label = exp['spec']['selector']['labelSelectors'].get('ref-obcluster', 'unknown')
                                 target_pods = exp['spec']['selector']['pods'].get(self.namespace, [])
+                                # Determine the correct anomaly type based on the experiment name prefix
+                                computed_type = exp_type
+                                if name.startswith('ob-cpu-stress-'):
+                                    computed_type = 'cpu_stress'
+                                elif name.startswith('ob-io-bottleneck-'):
+                                    computed_type = 'io_bottleneck'
+                                elif name.startswith('ob-network-bottleneck-'):
+                                    computed_type = 'network_bottleneck'
+                                elif name.startswith('ob-cache-bottleneck-'):
+                                    computed_type = 'cache_bottleneck'
                                 current_experiments.append({
-                                    "name": name,
-                                    "type": exp_type,
-                                    "start_time": start_time,
-                                    "status": "active",
-                                    "target": target_label,
-                                    "node": target_pods
+                                    'name': name,
+                                    'type': computed_type,
+                                    'start_time': start_time,
+                                    'status': 'active',
+                                    'target': target_label,
+                                    'node': target_pods
                                 })
                     except ApiException as e:
                         if e.status != 404:  # Ignore 404 Not Found errors
@@ -674,9 +761,10 @@ class K8sService:
             "cpu_stress": {
                 "kind": "StressChaos",
                 "spec": {
+                    "stressngStressors": "--cpu 30 -t 180",
                     "stressors": {
                         "cpu": {
-                            "workers": severity_config.get("workers", 32),
+                            "workers": severity_config.get("workers", 320),
                             "load": severity_config.get("load", 100)
                         }
                     },
@@ -701,11 +789,10 @@ class K8sService:
             "network_bottleneck": {
                 "kind": "NetworkChaos",
                 "spec": {
-                    "action": "delay",
-                    "delay": {
-                        "latency": severity_config.get("latency", "2000ms"),
-                        "correlation": severity_config.get("correlation", "100"),
-                        "jitter": "0ms"
+                    "action": "loss",
+                    "loss": {
+                        "loss": severity_config.get("loss", "80%"),
+                        "correlation": severity_config.get("correlation", "0")
                     },
                     "target": {
                         "selector": {
@@ -951,6 +1038,7 @@ class K8sService:
 
     async def apply_chaos_experiment(self, anomaly_type: str, target_node: Optional[Union[List[str], str]] = None, severity: str = "medium"):
         """Apply a chaos mesh experiment based on the anomaly type with optimized retries"""
+        severity_map = {"low": 0, "medium": 1, "high": 2}
         try:
             # Normalize target_node to a list if it's a string
             if isinstance(target_node, str):
@@ -962,14 +1050,12 @@ class K8sService:
                 
             # Special handling for cache bottleneck
             if anomaly_type == "cache_bottleneck":
-                severity_map = {"low": 0, "medium": 1, "high": 2}
                 index = severity_map.get(severity.lower(), 1)
                 severity_config = self.severity_variations.get(anomaly_type, [{}])[index]
                 
-                memory_workers = severity_config.get("workers", 8)
-                if memory_workers <= 4:  # Lite severity
+                if severity.lower() == "low":  # Lite severity
                     memstore_limit = "9"
-                elif memory_workers <= 6:  # Medium severity
+                elif severity.lower() == "medium":  # Medium severity
                     memstore_limit = "6"
                 else:  # Severe, must be > 0.01 else database will crash
                     memstore_limit = "3"
@@ -1043,7 +1129,6 @@ class K8sService:
                     }
                 }
                 
-                # Create the tracking resource in Kubernetes
                 try:
                     await asyncio.to_thread(
                         self.custom_api.create_namespaced_custom_object,
@@ -1057,20 +1142,18 @@ class K8sService:
                 except Exception as e:
                     logger.warning(f"Failed to create tracking resource for IO bottleneck: {str(e)}")
                 
-                # For each target node, execute IO stress command directly on the pod 
+                # For each target node, execute IO stress command directly
                 for node in target_nodes:
                     node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
-                    
                     try:
                         logger.info(f"Running IO stress command on node {node}")
                         io_command = severity_config.get("command") % self.collection_duration
-                        
                         kubectl_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c '{io_command}' > /dev/null 2>&1 &"
                         logger.info(f"Executing kubectl command: {kubectl_cmd}")
                         import subprocess
                         process = subprocess.Popen(kubectl_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         
-                        # Track this specific anomaly
+                        # Track the anomaly
                         self.active_anomalies[node_experiment_name] = {
                             "start_time": datetime.now().isoformat(),
                             "status": "active",
@@ -1082,37 +1165,79 @@ class K8sService:
                             "process_id": process.pid,
                             "expected_duration": self.collection_duration
                         }
-                        
                         logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
                     except Exception as e:
                         logger.error(f"Error running IO stress on node {node}: {str(e)}")
             
-                # The following block for too_many_indexes remains unchanged
-                experiment_name = f"ob-too-many-indexes-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                template = self._get_experiment_template(anomaly_type)
-                sql_commands = template["spec"].get("sqlCommands", [])
-                
-                await self._execute_sql_commands(sql_commands)
-                
-                if not target_nodes:
-                    target_nodes = ["obcluster"]
+            # Special handling for cpu_stress
+            elif anomaly_type == "cpu_stress":
+                experiment_name = f"ob-cpu-stress-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                # Create tracking experiment for Kubernetes (tracker only)
+                experiment = {
+                    "apiVersion": "chaos-mesh.org/v1alpha1",
+                    "kind": "StressChaos",
+                    "metadata": {
+                        "name": experiment_name,
+                        "namespace": self.namespace
+                    },
+                    "spec": {
+                        "mode": "one",
+                        "selector": {
+                            "namespaces": [self.namespace],
+                            "labelSelectors": {"ref-obcluster": "obcluster"},
+                            "pods": {self.namespace: target_nodes if target_nodes else []}
+                        },
+                        "stressors": {
+                            "cpu": {
+                                "workers": 30,
+                                "load": 100
+                            }
+                        },
+                        "duration": f"{self.collection_duration}s",
+                    }
+                }
+                try:
+                    await asyncio.to_thread(
+                        self.custom_api.create_namespaced_custom_object,
+                        group="chaos-mesh.org",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=self._get_experiment_plural(anomaly_type),
+                        body=experiment
+                    )
+                    logger.info(f"Created tracking resource for CPU stress: {experiment_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to create tracking resource for CPU stress: {str(e)}")
                 
                 for node in target_nodes:
                     node_experiment_name = f"{experiment_name}-{node.replace('.', '-')}"
-                    self.active_anomalies[node_experiment_name] = {
-                        "start_time": datetime.now().isoformat(),
-                        "status": "active",
-                        "type": anomaly_type,
-                        "name": node_experiment_name,
-                        "target": "obcluster",
-                        "node": node,
-                        "sql_commands": sql_commands
-                    }
-                    logger.info(f"Created {anomaly_type} experiment {node_experiment_name} for node {node}")
+                    index = severity_map.get(severity.lower(), 1)
+                    severity_config = self.severity_variations.get(anomaly_type, [{}])[index]
+                    try:
+                        logger.info(f"Running CPU stress command on node {node}")
+                        cpu_command = f"stress-ng {severity_config.get('stress-ng-params', '--cpu 80 -t 180')}"
+                        kubectl_cmd = f"kubectl exec -n {self.namespace} {node} -- /bin/bash -c '{cpu_command}' > /dev/null 2>&1 &"
+                        logger.info(f"Executing kubectl command: {kubectl_cmd}")
+                        import subprocess
+                        process = subprocess.Popen(kubectl_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        
+                        self.active_anomalies[node_experiment_name] = {
+                            "start_time": datetime.now().isoformat(),
+                            "status": "active",
+                            "type": anomaly_type,
+                            "name": node_experiment_name,
+                            "target": "obcluster",
+                            "node": node,
+                            "command": cpu_command,
+                            "process_id": process.pid,
+                            "expected_duration": self.collection_duration
+                        }
+                        logger.info(f"Created {anomaly_type} experiment {node_experiment_name} on node {node}")
+                    except Exception as e:
+                        logger.error(f"Error running CPU stress on node {node}: {str(e)}")
                 
                 self.invalidate_cache()
                 self._last_cache_update = 0
-                
                 return
             else:
                 experiment = self._get_experiment_template(anomaly_type, severity)
@@ -1211,6 +1336,12 @@ class K8sService:
                     
                     if "items" in experiments:
                         for exp in experiments["items"]:
+                            phase = exp.get('status', {}).get('phase')
+                            if phase is None:
+                                phase = exp.get('status', {}).get('experiment', {}).get('desiredPhase', '')
+                            phase_str = str(phase).lower() if phase else ""
+                            if phase_str in ['failed', 'finished', 'deleted', 'completed', 'terminating', 'stop']:
+                                continue
                             name = exp['metadata']['name']
                             start_time = exp['metadata'].get('creationTimestamp', datetime.now().isoformat())
                             target = exp['spec']['selector']['labelSelectors'].get('ref-obcluster', 'unknown')

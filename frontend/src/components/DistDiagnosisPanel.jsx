@@ -43,8 +43,10 @@ const DistDiagnosisPanel = ({
   getAnomalyDistribution,
   getTimelineData,
   renderForceGraph,
-  renderNodeHeatmap
+  renderNodeHeatmap,
+  thresholdValue = 0.1
 }) => {
+  const confidenceThreshold = thresholdValue;
   
   if (selectedModels.length === 0 || !comparisonData || Object.keys(comparisonData).length === 0) {
     if (comparisonLoading) {
@@ -75,7 +77,7 @@ const DistDiagnosisPanel = ({
     <div className="comparison-results">
       {selectedModels.map(model => {
         const modelData = comparisonData[model] || {};
-        const anomalies = modelData.ranks || [];
+        const anomalies = (modelData.ranks || []).filter(item => item.positive_prob_score >= confidenceThreshold);
         
         return (
           <div key={model} className="model-analysis-section">

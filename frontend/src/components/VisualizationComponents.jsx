@@ -3,7 +3,7 @@ import { Empty } from "antd";
 import { getModelColor, getFullNodeName } from "../utils/rankUtils.jsx";
 
 // Force directed graph visualization of the propagation graph
-export const renderForceGraph = (comparisonData, selectedModels) => {
+export const renderForceGraph = (comparisonData, selectedModels, thresholdValue = 0.1) => {
   if (!comparisonData || !selectedModels.length) return <Empty description="No data available" />;
   
   const model = selectedModels[0]; // Use first selected model
@@ -17,41 +17,45 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
     return <Empty description="No nodes in propagation graph" />;
   }
   
-  // Create array of nodes
+  // Filter anomalies using threshold
+  const filteredRanks = (comparisonData[model].ranks || []).filter(r => r.positive_prob_score >= thresholdValue);
+  
+  // Create array of node objects
   const nodeObjects = nodes.map((node, index) => {
-    // Calculate position in a circle
-    const radius = 200; // Slightly larger radius
+    const radius = 200;
     const angle = (2 * Math.PI * index) / nodes.length;
-    const x = radius * Math.cos(angle) + 250; // Centered better
+    const x = radius * Math.cos(angle) + 250;
     const y = radius * Math.sin(angle) + 220;
     
-    // Check if node has anomaly
-    const hasAnomaly = comparisonData[model].ranks?.some(r => r.node === node);
-    const anomalyType = hasAnomaly ? 
-      comparisonData[model].ranks.find(r => r.node === node).type : null;
+    const hasAnomaly = filteredRanks.some(r => r.node === node);
+    const anomalyType = hasAnomaly ? filteredRanks.find(r => r.node === node).type : null;
     
-    // Get full node name
     const fullNodeName = getFullNodeName(node);
     
     return { id: node, fullName: fullNodeName, x, y, hasAnomaly, anomalyType };
   });
   
-  // Create array of links
-  const links = [];
+  // Create array of unique undirected links with mean correlation if both directions exist
+  const edgeMap = {};
   nodes.forEach(source => {
     const targets = propagationGraph[source];
-    if (Array.isArray(targets)) {
-      targets.forEach(target => {
-        links.push({
-          source,
-          target: target.target,
-          correlation: target.correlation
-        });
+    if (targets && typeof targets === 'object') {
+      Object.entries(targets).forEach(([targetNode, correlation]) => {
+        // Create a sorted key to ensure undirected edge uniqueness
+        const key = source < targetNode ? `${source}|${targetNode}` : `${targetNode}|${source}`;
+        if (!edgeMap[key]) {
+          edgeMap[key] = { source: source, target: targetNode, correlations: [correlation] };
+        } else {
+          edgeMap[key].correlations.push(correlation);
+        }
       });
     }
   });
+  const links = Object.values(edgeMap).map(edge => {
+    const meanCorrelation = edge.correlations.reduce((sum, weight) => sum + weight, 0) / edge.correlations.length;
+    return { source: edge.source, target: edge.target, correlation: meanCorrelation };
+  });
   
-  // Generate SVG
   return (
     <div style={{ padding: '20px', textAlign: 'center' }}>
       <h3>Node Propagation Graph</h3>
@@ -61,45 +65,54 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
         <div style={{ display: 'inline-block', padding: '4px 10px', background: '#52c41a', color: 'white', borderRadius: '4px', fontWeight: 'bold' }}>Medium Correlation (≥ 0.7)</div>
       </div>
       <svg width="550" height="500" style={{ border: '1px solid #f0f0f0', borderRadius: '8px', background: '#fafafa', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
-        {/* Draw links first so they appear behind nodes */}
+        <defs>
+          {links.map((link, index) => {
+            let strokeColor = '#d9d9d9';
+            if (link.correlation >= 0.9) {
+              strokeColor = '#1890ff';
+            } else if (link.correlation >= 0.7) {
+              strokeColor = '#52c41a';
+            }
+            return (
+              <marker
+                key={`arrow-${index}`}
+                id={`arrow-${index}`}
+                viewBox="0 0 10 10"
+                refX="5"
+                refY="5"
+                markerWidth="6"
+                markerHeight="6"
+                orient="auto"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill={strokeColor} />
+              </marker>
+            );
+          })}
+        </defs>
         {links.map((link, index) => {
           const sourceNode = nodeObjects.find(n => n.id === link.source);
           const targetNode = nodeObjects.find(n => n.id === link.target);
           
           if (!sourceNode || !targetNode) return null;
           
-          // Determine line color based on correlation strength
           let strokeColor = '#d9d9d9';
           let strokeWidth = 1;
-          
           if (link.correlation >= 0.9) {
-            strokeColor = '#1890ff'; // Blue for strong correlation
+            strokeColor = '#1890ff';
             strokeWidth = 3;
           } else if (link.correlation >= 0.7) {
-            strokeColor = '#52c41a'; // Green for medium correlation
+            strokeColor = '#52c41a';
             strokeWidth = 2;
           }
           
-          // Check if this is a bidirectional link (the reverse link exists)
-          const isReverseLinkPresent = links.some(l => 
-            l.source === link.target && l.target === link.source
-          );
-          
-          // Calculate label offset for bidirectional links
           const dx = targetNode.x - sourceNode.x;
           const dy = targetNode.y - sourceNode.y;
           const angle = Math.atan2(dy, dx);
-          
-          // Offset label position for bidirectional edges
-          const offset = isReverseLinkPresent ? 15 : 0; // Offset in pixels
+          const offset = links.some(l => l.source === link.target && l.target === link.source) ? 15 : 0;
           const perpX = Math.sin(angle) * offset;
           const perpY = -Math.cos(angle) * offset;
-          
-          // Calculate midpoint of the line
           const midX = (sourceNode.x + targetNode.x) / 2;
           const midY = (sourceNode.y + targetNode.y) / 2;
-          
-          // Position label with offset
           const labelX = midX + perpX;
           const labelY = midY + perpY;
           
@@ -115,23 +128,6 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
                 strokeOpacity={0.8}
                 markerEnd={`url(#arrow-${index})`}
               />
-              
-              {/* Arrow marker definition */}
-              <defs>
-                <marker
-                  id={`arrow-${index}`}
-                  viewBox="0 0 10 10"
-                  refX="5"
-                  refY="5"
-                  markerWidth="6"
-                  markerHeight="6"
-                  orient="auto"
-                >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill={strokeColor} />
-                </marker>
-              </defs>
-              
-              {/* Add correlation label with background */}
               <rect
                 x={labelX - 16}
                 y={labelY - 10}
@@ -157,11 +153,8 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
             </g>
           );
         })}
-        
-        {/* Draw nodes */}
         {nodeObjects.map((node, index) => (
           <g key={`node-${index}`}>
-            {/* Node circle with gradient */}
             <defs>
               <radialGradient id={`gradient-${index}`} cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
                 <stop offset="0%" stopColor={node.hasAnomaly ? '#ff7875' : '#fff'} />
@@ -179,7 +172,6 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
               filter="drop-shadow(0px 2px 3px rgba(0,0,0,0.1))"
             />
             
-            {/* Node ID (shorter version, fits better) */}
             <text 
               x={node.x} 
               y={node.y}
@@ -192,7 +184,6 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
               {node.id.match(/\d+/)[0]}
             </text>
             
-            {/* Node full name label below circle */}
             <text 
               x={node.x} 
               y={node.y + (node.hasAnomaly ? 40 : 35)}
@@ -203,7 +194,6 @@ export const renderForceGraph = (comparisonData, selectedModels) => {
               {node.fullName}
             </text>
             
-            {/* Anomaly type label */}
             {node.hasAnomaly && (
               <text 
                 x={node.x} 
@@ -340,10 +330,9 @@ export const renderNodeHeatmap = (comparisonData, selectedModels) => {
 };
 
 // Get anomaly distribution data for charts
-export const getAnomalyDistribution = (comparisonData, selectedModels) => {
+export const getAnomalyDistribution = (comparisonData, selectedModels, thresholdValue = 0.1) => {
   if (!comparisonData || typeof comparisonData !== 'object' || Object.keys(comparisonData).length === 0 || !selectedModels.length) return [];
   
-  // Create data array for all anomaly types across models
   const allTypes = new Set();
   const typeCountByModel = {};
   
@@ -351,20 +340,17 @@ export const getAnomalyDistribution = (comparisonData, selectedModels) => {
     if (!comparisonData[model] || !comparisonData[model].ranks) {
       return;
     }
-    
     typeCountByModel[model] = {};
-    const typeCount = comparisonData[model].ranks.filter(
-      rank => rank.type).reduce((counts, rank) => {
-        if (!counts[rank.type]) counts[rank.type] = 0;
-        counts[rank.type]++;
-        allTypes.add(rank.type);
-        return counts;
-      }, {});
-    
+    const filteredRanks = (comparisonData[model].ranks || []).filter(rank => rank.positive_prob_score >= thresholdValue);
+    const typeCount = filteredRanks.filter(rank => rank.type).reduce((counts, rank) => {
+      if (!counts[rank.type]) counts[rank.type] = 0;
+      counts[rank.type]++;
+      allTypes.add(rank.type);
+      return counts;
+    }, {});
     typeCountByModel[model] = typeCount;
   });
   
-  // Format for chart
   return Array.from(allTypes).map(type => {
     const result = { type };
     selectedModels.forEach(model => {
@@ -375,45 +361,55 @@ export const getAnomalyDistribution = (comparisonData, selectedModels) => {
 };
 
 // Get timeline data for charts
-export const getTimelineData = (comparisonData, selectedModels) => {
+export const getTimelineData = (comparisonData, selectedModels, thresholdValue = 0.1) => {
   if (!comparisonData || typeof comparisonData !== 'object' || Object.keys(comparisonData).length === 0) return [];
   
-  // Create timeline data points
+  // Create timeline points at 5-minute intervals
   const timePoints = [];
   const now = Date.now();
   
-  // Generate time points for the last hour (or selected time period)
   for (let i = 12; i >= 0; i--) {
-    timePoints.push(now - i * 5 * 60 * 1000); // 5-minute intervals
+    timePoints.push(now - i * 5 * 60 * 1000);
   }
   
   return timePoints.map((timestamp, index) => {
     const result = { timestamp };
     
-    selectedModels.forEach((model, modelIndex) => {
+    selectedModels.forEach(model => {
       if (!comparisonData[model] || !comparisonData[model].ranks) {
+        result[model] = 0;
         return;
       }
       
-      // Placeholder values for the timeline - in a real app these would come from historical data
-      result[model] = index < 6 ? 0 : 
-        Math.max(0, Math.min(
-          Math.floor((comparisonData[model].ranks.length / 2) * 
-            (1 - Math.abs(index - 6) / 10)), 
-          comparisonData[model].ranks.length
-        ));
+      // Filter anomalies by threshold
+      const filteredRanks = (comparisonData[model].ranks || []).filter(rank => rank.positive_prob_score >= thresholdValue);
       
-      // Trend line - slight variations
-      result[`${model}_trend`] = index < 6 ? 0 :
-        Math.floor((comparisonData[model].ranks.length / 2) * (1 - (index * 0.1))) - 
-        Math.floor((comparisonData[model].ranks.length / 2) * (1 - ((index-1) * 0.1)));
+      // Count actual anomalies - in a real system, you would use timestamps of when anomalies occurred
+      // Since we don't have real timestamps in this demo, we'll populate recent time points with actual anomaly counts
+      // and leave earlier points at zero to show a trend
+      if (index > 6) { // Show anomalies in recent time points
+        result[model] = filteredRanks.length;
+      } else {
+        result[model] = 0; // No anomalies in earlier time points
+      }
       
-      // Feature importance data for each model
-      if (comparisonData[model].ranks && comparisonData[model].ranks[0] && comparisonData[model].ranks[0].features) {
-        const features = comparisonData[model].ranks[0].features;
+      // Set trend data based on actual anomaly counts instead of artificial formulas
+      if (index === 0) {
+        result[`${model}_trend`] = 0;
+      } else {
+        // Trend shows the change in anomaly count from previous time point
+        const prevCount = index > 7 ? filteredRanks.length : 0;
+        const currentCount = index > 6 ? filteredRanks.length : 0;
+        result[`${model}_trend`] = currentCount - prevCount;
+      }
+      
+      // Add feature data if available
+      if (filteredRanks.length > 0 && filteredRanks[0].features) {
+        const features = filteredRanks[0].features;
         Object.entries(features).forEach(([feature, value], featureIndex) => {
-          if (featureIndex < 3) { // Show only top 3 features
-            result[`${model}_${feature}`] = value * (1 - index * 0.02);
+          if (featureIndex < 3) {
+            // Only show feature values for recent time points where anomalies are present
+            result[`${model}_${feature}`] = index > 6 ? value : 0;
           }
         });
       }

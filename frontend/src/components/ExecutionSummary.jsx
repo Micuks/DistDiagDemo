@@ -46,6 +46,7 @@ const ExecutionSummary = ({
                 return "Network Bottleneck";
             case "cache_bottleneck":
                 return "Cache Bottleneck";
+            case "too_many_indexes":
                 return "Too Many Indexes";
             default:
                 return type;

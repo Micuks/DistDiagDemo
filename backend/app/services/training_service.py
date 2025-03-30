@@ -161,7 +161,12 @@ class TrainingService:
                 logger.info(f"Selected node {node} for anomaly type {anomaly_type}")
                 
             # Track this variation
-            self.anomaly_variations[anomaly_type].add(node)
+            if isinstance(node, list):
+                for n in node:
+                    self.anomaly_variations[anomaly_type].add(n)
+            else:
+                self.anomaly_variations[anomaly_type].add(node)
+            logger.info(f"Anomaly variations: {self.anomaly_variations}")
             
             # Make sure metrics service is aware we're collecting data
             try:

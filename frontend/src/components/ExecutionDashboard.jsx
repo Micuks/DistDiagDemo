@@ -25,6 +25,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
   const [groupedAnomalies, setGroupedAnomalies] = useState([]);
   const [resetCollectionLoading, setResetCollectionLoading] = useState(false);
   const [cleanupTasksLoading, setCleanupTasksLoading] = useState(false);
+  const [optimisticAnomalyCleared, setOptimisticAnomalyCleared] = useState(false);
 
   // Set flag for execution dashboard in localStorage
   useEffect(() => {
@@ -640,6 +641,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     try {
       setWorkloadStopLoading('all');
       await workloadService.stopAllWorkloads();
+      setActiveWorkloads([]);
       message.success('All workloads stopped');
       setIsRefreshing(true);
       await Promise.all([fetchTasks(), fetchActiveWorkloads()]);
@@ -660,9 +662,14 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
         anomalyService.stopAllAnomalies()
       ]);
       message.success('All tasks, workloads and anomalies stopped');
+      setTasks([]);
+      setActiveWorkloads([]);
+      setGroupedAnomalies([]);
+      setOptimisticAnomalyCleared(true);
       setIsRefreshing(true);
       await Promise.all([fetchTasks(), fetchActiveWorkloads(), refetchAnomalies()]);
       setIsRefreshing(false);
+      setOptimisticAnomalyCleared(false);
     } catch (error) {
       console.error('Failed to stop all tasks:', error);
       message.error(`Failed to stop all tasks: ${error.message}`);
@@ -675,11 +682,14 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
     try {
       setAnomalyStopLoading('all');
       await anomalyService.stopAllAnomalies();
+      setOptimisticAnomalyCleared(true);
+      setGroupedAnomalies([]);
       message.success('All anomalies stopped');
       
       // Wait a short timeout before refreshing to allow backend to process
       setTimeout(() => {
         refetchAnomalies();
+        setOptimisticAnomalyCleared(false);
       }, 1000);
     } catch (error) {
       console.error('Failed to stop all anomalies:', error);
@@ -920,7 +930,7 @@ const ExecutionDashboard = ({ workloadConfig, anomalyConfig, onReset, onNewExecu
             >
               <Table 
                 columns={anomalyColumns} 
-                dataSource={groupedAnomalies} 
+                dataSource={optimisticAnomalyCleared ? [] : groupedAnomalies} 
                 rowKey={(record) => record.name || record.type || Math.random().toString(36).substring(2, 9)}
                 pagination={false}
                 locale={{ 
