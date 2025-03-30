@@ -1054,11 +1054,11 @@ class K8sService:
                 severity_config = self.severity_variations.get(anomaly_type, [{}])[index]
                 
                 if severity.lower() == "low":  # Lite severity
-                    memstore_limit = "9"
+                    memstore_limit = "8"
                 elif severity.lower() == "medium":  # Medium severity
                     memstore_limit = "6"
                 else:  # Severe, must be > 0.01 else database will crash
-                    memstore_limit = "3"
+                    memstore_limit = "4"
                 
                 target_zones = set()
                 for node in target_nodes:
