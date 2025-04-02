@@ -29,9 +29,11 @@ class WPRNNode:
         self.node_num = node_num
         self.d = 0.85
         self.p = [1.0/node_num] * node_num  # Initialize with equal probability
+        self.convergence_threshold = 1e-6  # Convergence threshold
 
-    def page_rank(self, iter_num):
-        for _ in range(iter_num):
+    def page_rank(self, max_iter=10):
+        """Run PageRank algorithm with early convergence detection"""
+        for iter_num in range(max_iter):
             new_p = [0] * self.node_num
             for i in range(self.node_num):
                 tmp = 0
@@ -54,6 +56,12 @@ class WPRNNode:
                 new_p = [p/total for p in new_p]
             else:
                 new_p = [1.0/self.node_num] * self.node_num
+                
+            # Check for convergence
+            max_diff = max(abs(new_p[i] - self.p[i]) for i in range(self.node_num))
+            if max_diff < self.convergence_threshold:
+                logger.debug(f"PageRank converged after {iter_num+1} iterations")
+                break
                 
             self.p = new_p
             
@@ -217,100 +225,48 @@ class DistDiagnosis:
             # Check if metrics dictionary is flat (not nested by expected groups) and restructure if necessary.
             expected_groups = ['cpu', 'memory', 'io', 'network', 'transactions']
             if not any(group in metrics for group in expected_groups):
-                groups = {
+                # Create a mapping of expected metrics to their categories for faster lookup
+                metric_to_category = {}
+                for category, metric_list in {
                     "cpu": ['cpu usage', 'worker time', 'cpu time'],
                     "memory": ['active memstore used', 'total memstore used', 'memstore limit', 'memory usage', 'observer memory hold size'],
                     "io": ['row cache hit', 'row cache miss', 'io read count', 'io read delay', 'io write count', 'io write delay', 'accessed data micro block count', 'data micro block cache hit', 'index micro block cache hit', 'blockscaned data micro block count', 'palf write io count to disk', 'palf write size to disk', 'clog trans log total size'],
                     "network": ['rpc packet in', 'rpc packet in bytes', 'rpc packet out', 'rpc packet out bytes', 'rpc deliver fail', 'rpc net delay', 'rpc net frame delay', 'mysql packet in', 'mysql packet in bytes', 'mysql packet out', 'mysql packet out bytes', 'mysql deliver fail'],
                     "transactions": ['request queue time', 'trans system trans count', 'trans user trans count', 'trans commit count', 'trans rollback count', 'trans timeout count', 'commit log replay count', 'local trans total used time', 'distributed trans total used time', 'sql select count', 'sql update count', 'sql delete count', 'sql other count', 'ps prepare count', 'ps execute count', 'sql local count', 'sql remote count', 'sql distributed count', 'active sessions', 'sql inner insert count', 'sql inner update count', 'sql fail count', 'memstore write lock succ count', 'memstore write lock fail count', 'DB time']
-                }
-                flat_metrics = metrics.copy()
-                metrics = {}
-                for group, keys in groups.items():
-                    group_data = {}
-                    for expected_key in keys:
-                        for actual_key, value in flat_metrics.items():
-                            if actual_key.lower() == expected_key.lower():
-                                group_data[expected_key] = value
-                                break
-                    metrics[group] = group_data
+                }.items():
+                    for metric in metric_list:
+                        metric_to_category[metric.lower()] = category
+                
+                # Restructure flat metrics into nested groups
+                restructured_metrics = {group: {} for group in expected_groups}
+                for key, value in metrics.items():
+                    key_lower = key.lower()
+                    if key_lower in metric_to_category:
+                        category = metric_to_category[key_lower]
+                        restructured_metrics[category][key] = value
+                
+                metrics = restructured_metrics
                 logger.debug("Restructured flat metrics into nested groups: %s", metrics)
             
-            # Use fixed expected metrics counts based on predefined metric lists
-            expected_num_metrics = len(['cpu usage', 'worker time', 'cpu time']) + \
-                                   len(['active memstore used', 'total memstore used', 'memstore limit', 'memory usage', 'observer memory hold size']) + \
-                                   len(['row cache hit', 'row cache miss', 'io read count', 'io read delay', 'io write count', 'io write delay', 'accessed data micro block count', 'data micro block cache hit', 'index micro block cache hit', 'blockscaned data micro block count', 'palf write io count to disk', 'palf write size to disk', 'clog trans log total size']) + \
-                                   len(['rpc packet in', 'rpc packet in bytes', 'rpc packet out', 'rpc packet out bytes', 'rpc deliver fail', 'rpc net delay', 'rpc net frame delay', 'mysql packet in', 'mysql packet in bytes', 'mysql packet out', 'mysql packet out bytes', 'mysql deliver fail']) + \
-                                   len(['request queue time', 'trans system trans count', 'trans user trans count', 'trans commit count', 'trans rollback count', 'trans timeout count', 'commit log replay count', 'local trans total used time', 'distributed trans total used time', 'sql select count', 'sql update count', 'sql delete count', 'sql other count', 'ps prepare count', 'ps execute count', 'sql local count', 'sql remote count', 'sql distributed count', 'active sessions', 'sql inner insert count', 'sql inner update count', 'sql fail count', 'memstore write lock succ count', 'memstore write lock fail count', 'DB time'])
+            # Pre-allocate feature vector for better performance
+            expected_num_metrics = sum(len(metrics.get(group, {})) for group in expected_groups)
             feature_vector = np.zeros(expected_num_metrics * 16)  # 16 features per metric
             feature_idx = 0
             
-            unique_values_count = 0  # Count metrics with non-zero values
-            
-            # CPU metrics
-            cpu_metrics = metrics.get('cpu', {})
-            for metric in ['cpu usage', 'worker time', 'cpu time']:
-                values = self._get_time_window_values(cpu_metrics, metric)
-                features = self._calculate_time_features(values)
-                if any(f != 0 for f in features):
-                    unique_values_count += 1
-                if feature_idx + len(features) > feature_vector.size:
-                    logger.error(f"Feature vector index out of range at CPU metric '{metric}': feature_idx={feature_idx}, required={len(features)}, total={feature_vector.size}")
-                    break
-                feature_vector[feature_idx:feature_idx+len(features)] = features
-                feature_idx += len(features)
-            
-            # Memory metrics
-            memory_metrics = metrics.get('memory', {})
-            for metric in ['active memstore used', 'total memstore used', 'memstore limit', 'memory usage', 'observer memory hold size']:
-                values = self._get_time_window_values(memory_metrics, metric)
-                features = self._calculate_time_features(values)
-                if any(f != 0 for f in features):
-                    unique_values_count += 1
-                if feature_idx + len(features) > feature_vector.size:
-                    logger.error(f"Feature vector index out of range at Memory metric '{metric}': feature_idx={feature_idx}, required={len(features)}, total={feature_vector.size}")
-                    break
-                feature_vector[feature_idx:feature_idx+len(features)] = features
-                feature_idx += len(features)
-            
-            # IO metrics
-            io_metrics = metrics.get('io', {})
-            for metric in ['row cache hit', 'row cache miss', 'io read count', 'io read delay', 'io write count', 'io write delay', 'accessed data micro block count', 'data micro block cache hit', 'index micro block cache hit', 'blockscaned data micro block count', 'palf write io count to disk', 'palf write size to disk', 'clog trans log total size']:
-                values = self._get_time_window_values(io_metrics, metric)
-                features = self._calculate_time_features(values)
-                if any(f != 0 for f in features):
-                    unique_values_count += 1
-                if feature_idx + len(features) > feature_vector.size:
-                    logger.error(f"Feature vector index out of range at IO metric '{metric}': feature_idx={feature_idx}, required={len(features)}, total={feature_vector.size}")
-                    break
-                feature_vector[feature_idx:feature_idx+len(features)] = features
-                feature_idx += len(features)
-            
-            # Network metrics
-            network_metrics = metrics.get('network', {})
-            for metric in ['rpc packet in', 'rpc packet in bytes', 'rpc packet out', 'rpc packet out bytes', 'rpc deliver fail', 'rpc net delay', 'rpc net frame delay', 'mysql packet in', 'mysql packet in bytes', 'mysql packet out', 'mysql packet out bytes', 'mysql deliver fail']:
-                values = self._get_time_window_values(network_metrics, metric)
-                features = self._calculate_time_features(values)
-                if any(f != 0 for f in features):
-                    unique_values_count += 1
-                if feature_idx + len(features) > feature_vector.size:
-                    logger.error(f"Feature vector index out of range at Network metric '{metric}': feature_idx={feature_idx}, required={len(features)}, total={feature_vector.size}")
-                    break
-                feature_vector[feature_idx:feature_idx+len(features)] = features
-                feature_idx += len(features)
-            
-            # Transaction metrics
-            trans_metrics = metrics.get('transactions', {})
-            for metric in ['request queue time', 'trans system trans count', 'trans user trans count', 'trans commit count', 'trans rollback count', 'trans timeout count', 'commit log replay count', 'local trans total used time', 'distributed trans total used time', 'sql select count', 'sql update count', 'sql delete count', 'sql other count', 'ps prepare count', 'ps execute count', 'sql local count', 'sql remote count', 'sql distributed count', 'active sessions', 'sql inner insert count', 'sql inner update count', 'sql fail count', 'memstore write lock succ count', 'memstore write lock fail count', 'DB time']:
-                values = self._get_time_window_values(trans_metrics, metric)
-                features = self._calculate_time_features(values)
-                if any(f != 0 for f in features):
-                    unique_values_count += 1
-                if feature_idx + len(features) > feature_vector.size:
-                    logger.error(f"Feature vector index out of range at Transaction metric '{metric}': feature_idx={feature_idx}, required={len(features)}, total={feature_vector.size}")
-                    break
-                feature_vector[feature_idx:feature_idx+len(features)] = features
-                feature_idx += len(features)
+            # Process each category and its metrics
+            for category in expected_groups:
+                category_metrics = metrics.get(category, {})
+                for metric_name, metric_value in category_metrics.items():
+                    values = self._get_time_window_values(category_metrics, metric_name)
+                    features = self._calculate_time_features(values)
+                    
+                    # Ensure we don't exceed the pre-allocated vector size
+                    if feature_idx + len(features) > feature_vector.size:
+                        logger.error(f"Feature vector index out of range at {category} metric '{metric_name}': feature_idx={feature_idx}, required={len(features)}, total={feature_vector.size}")
+                        break
+                    
+                    feature_vector[feature_idx:feature_idx+len(features)] = features
+                    feature_idx += len(features)
             
             return feature_vector
         except Exception as e:
@@ -415,43 +371,64 @@ class DistDiagnosis:
             # Calculate PageRank scores for nodes
             node_scores = self.calculate_score_for_node(node_metrics_list)
             
+            # Convert features to a single numpy array for batch prediction
+            all_features = np.vstack(features)
+            
             # Process each node independently
             all_predictions = []
             node_predictions = {}
             
-            for node_idx, feature_vector in enumerate(features):
-                logger.debug(f"Processing node {node_names[node_idx]} with feature vector shape: {feature_vector.shape}")
-                node_name = node_names[node_idx]
-                node_score = node_scores[node_idx]
-                node_predictions[node_name] = []
-                
-                # Get predictions from each classifier
-                for clf_idx, classifier in enumerate(self.clf_list):
-                    try:
-                        anomaly_type = self.classes[clf_idx]
-                        
-                        # Get prediction probabilities
-                        proba = classifier.predict_proba(feature_vector.reshape(1, -1))
-                        
-                        # Get positive class probability
-                        positive_prob = proba[0][1] if proba.shape[1] > 1 else proba[0][0]
-                        
-                        # Apply node score as weight
-                        weighted_score = positive_prob * node_score
-                        
+            # Pre-calculate all correlations for both PageRank and propagation graph
+            n = len(node_names)
+            correlation_matrix = np.zeros((n, n))
+            for i in range(n):
+                for j in range(i+1, n):
+                    correlation = self.calculate_rank(node_metrics_list[i], node_metrics_list[j])
+                    correlation_matrix[i, j] = correlation
+                    correlation_matrix[j, i] = correlation  # Symmetric
+            
+            # Build propagation graph using pre-calculated correlations
+            propagation_graph = {}
+            for i in range(n):
+                node_i = node_names[i]
+                propagation_graph[node_i] = {}
+                for j in range(n):
+                    if i != j:
+                        node_j = node_names[j]
+                        propagation_graph[node_i][node_j] = float(correlation_matrix[i, j])
+            
+            # Get predictions from each classifier in batch mode
+            for clf_idx, classifier in enumerate(self.clf_list):
+                try:
+                    anomaly_type = self.classes[clf_idx]
+                    
+                    # Get prediction probabilities for all nodes at once
+                    probas = classifier.predict_proba(all_features)
+                    
+                    # Get positive class probability for each node
+                    positive_probs = probas[:, 1] if probas.shape[1] > 1 else probas[:, 0]
+                    
+                    # Apply node scores as weights
+                    weighted_scores = positive_probs * node_scores
+                    
+                    # Add predictions for each node
+                    for node_idx, node_name in enumerate(node_names):
+                        if node_name not in node_predictions:
+                            node_predictions[node_name] = []
+                            
                         prediction = {
                             'node': node_name,
                             'type': anomaly_type,
-                            'score': float(weighted_score),
-                            'positive_prob_score': float(positive_prob),
-                            'pagerank_score': float(node_score)
+                            'score': float(weighted_scores[node_idx]),
+                            'positive_prob_score': float(positive_probs[node_idx]),
+                            'pagerank_score': float(node_scores[node_idx])
                         }
                         
                         node_predictions[node_name].append(prediction)
                         all_predictions.append(prediction)
                         
-                    except Exception as e:
-                        logger.error(f"Error in diagnosis for node {node_name}, classifier {clf_idx}: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error in batch prediction for classifier {clf_idx}: {str(e)}")
 
             # Normalize scores across all predictions
             if all_predictions:
@@ -459,20 +436,6 @@ class DistDiagnosis:
                 normalized_scores = softmax(scores_array)
                 for idx, pred in enumerate(all_predictions):
                     pred['score'] = float(normalized_scores[idx])
-
-            # Build propagation graph
-            propagation_graph = {}
-            for i in range(len(node_names)):
-                for j in range(i + 1, len(node_names)):
-                    node_i = node_names[i]
-                    node_j = node_names[j]
-                    rank = self.calculate_rank(node_metrics_list[i], node_metrics_list[j])
-                    if node_i not in propagation_graph:
-                        propagation_graph[node_i] = {}
-                    if node_j not in propagation_graph:
-                        propagation_graph[node_j] = {}
-                    propagation_graph[node_i][node_j] = float(rank)
-                    propagation_graph[node_j][node_i] = float(rank)
 
             # Format results
             result = {
