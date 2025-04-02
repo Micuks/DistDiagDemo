@@ -188,15 +188,6 @@ class MetricsService:
             ]
         }
         
-        # Get counter metrics
-        self._counter_metrics = set()
-        for metrics in self.essential_metrics.values():
-            for metric in metrics:
-                if any(kw in metric.lower() for kw in ['delay', 'count', 'time', 'total', 'hit', 'miss', 'packet', 'sessions']):
-                    # Skip if it contains 'memstore' and 'total', skip 'io read count'
-                    if not ('total memstore used' in metric.lower() or 'request queue time' in metric.lower()):
-                        self._counter_metrics.add(metric.strip().lower())
-
         # Create reverse mapping from metric name to category
         self.metric_to_category = {}
         for category, metrics in self.essential_metrics.items():
@@ -281,18 +272,6 @@ class MetricsService:
                     # Log the decision factors
                     logger.debug(f"Metrics collection: send_to_training={self.send_to_training}, check_workload_active={self.check_workload_active}, workload_active={self.workload_active}, is_training_collecting={is_training_collecting}")
                     
-                    # Add detailed debug logging about the metrics
-                    if metrics:
-                        logger.debug(f"Collected metrics from {len(metrics)} nodes.")
-                        if len(metrics) > 0:
-                            first_node = next(iter(metrics))
-                            logger.debug(f"First node metrics categories: {list(metrics[first_node].keys())}")
-                            # Sample a metric from each category
-                            for category, data in metrics[first_node].items():
-                                if isinstance(data, dict) and len(data) > 0:
-                                    sample_metric = next(iter(data))
-                                    logger.debug(f"Sample {category} metric: {sample_metric}")
-                    
                     # If metrics were collected and should be sent, send to training service
                     if metrics and training_loop and should_send_to_training:
                         logger.info(f"Dispatching metrics to training service: {len(metrics)} nodes of data (non-blocking)")
@@ -352,7 +331,7 @@ class MetricsService:
                 
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        SELECT name, value 
+                        SELECT name, value, VALUE_TYPE 
                         FROM gv$sysstat 
                         WHERE con_id = %s AND svr_ip = %s
                     """, (1, node_ip))
@@ -368,26 +347,20 @@ class MetricsService:
                     
                     # Categorize metrics using exact name matching
                     metrics_found = set()
-                    for name, value in cursor.fetchall():
+                    for name, value, value_type in cursor.fetchall():
                         clean_name = name.strip().lower()
                         category = self.metric_to_category.get(clean_name)
                         
                         if category:
                             value = float(value)
                             
-                            # Check if this is a counter metric
-                            is_counter = clean_name in self._counter_metrics
-                            counter_key = (node_ip, category, name)
-                            
-                            if is_counter:
-                                # Get previous value, defaulting to current value for first occurrence
+                            # Handle counter metrics (ADD_VALUE) vs state metrics (SET_VALUE)
+                            if value_type == 'ADD_VALUE':
+                                counter_key = (node_ip, category, name)
                                 prev_value = self._previous_counter_values.get(counter_key, value)
-                                # Calculate delta
                                 delta = value - prev_value
-                                # Store current value for next iteration
                                 self._previous_counter_values[counter_key] = value
-                                # Use delta as the value, ensure non-negative
-                                value = max(delta, 0)
+                                value = max(delta, 0)  # Ensure non-negative delta
                             
                             node_metrics[category][name] = value
                             metrics_found.add(clean_name)
