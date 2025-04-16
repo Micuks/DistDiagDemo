@@ -2,6 +2,7 @@
     "version": "0.2.0",
     "configurations": [
 
+
         {
             "name": "FastAPI Debug",
             "type": "debugpy",
@@ -27,6 +28,16 @@
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "TRAINING_TEST_MODE": "true"
+            },
+            "cwd": "${workspaceFolder}/backend"
+        },
+        {
+            "name": "Test Anomaly Effects",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "tests.verify_anomaly_effects",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
             },
             "cwd": "${workspaceFolder}/backend"
         }
