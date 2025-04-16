@@ -6,7 +6,6 @@ class AnomalyType(str, Enum):
     CPU_STRESS = "cpu_stress"
     IO_BOTTLENECK = "io_bottleneck"
     NETWORK_BOTTLENECK = "network_bottleneck"
-    MEMORY_LEAK = "memory_leak"
 
 class AnomalyStatus(str, Enum):
     RUNNING = "running"
@@ -54,4 +53,9 @@ class AnomalyRankResponse(BaseModel):
     timestamp: float
 
 class ActiveAnomalyResponse(BaseModel):
-    anomalies: List[Dict] 
+    anomalies: List[Dict]
+
+# New schema for returning anomaly types with descriptions
+class AnomalyTypeInfo(BaseModel):
+    type: str
+    description: str 

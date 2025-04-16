@@ -1,0 +1,31 @@
+/* Suppress -ms-high-contrast deprecation warnings by using the modern forced-colors alternative */
+@media (forced-colors: active) {
+  /* Override Ant Design's use of -ms-high-contrast with modern forced-colors */
+  .ant-btn,
+  .ant-input,
+  .ant-select,
+  .ant-dropdown,
+  .ant-menu,
+  .ant-modal,
+  .ant-pagination,
+  .ant-table,
+  .ant-tabs,
+  .ant-tooltip,
+  .ant-badge,
+  .ant-tag {
+    forced-color-adjust: none;
+  }
+}
+
+/* Additional forced-colors adjustments for high contrast mode */
+@media (forced-colors: active) {
+  /* Ensure buttons have proper borders in high contrast mode */
+  button, .ant-btn {
+    border: 1px solid ButtonText;
+  }
+  
+  /* Ensure focus states are visible */
+  :focus {
+    outline: 2px solid Highlight;
+  }
+} 

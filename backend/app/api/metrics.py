@@ -99,7 +99,6 @@ async def get_metrics_fluctuations():
             status_code=500, 
             content={"error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )

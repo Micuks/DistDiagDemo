@@ -68,19 +68,22 @@ async def start_training_collection(request: AnomalyRequest):
     
     # Check if collection is already in progress
     async with _collection_lock:
-        if _anomaly_collection_in_progress:
-            logger.warning("Anomaly collection already in progress, ignoring duplicate request")
+        # Allow starting collection only if no other collection is active
+        if _anomaly_collection_in_progress or _normal_collection_in_progress:
+            collection_type = "anomaly" if _anomaly_collection_in_progress else "normal"
+            logger.warning(f"{collection_type.capitalize()} collection already in progress, ignoring duplicate request")
             return {
-                "status": "pending", 
-                "message": "Anomaly collection is already in progress",
-                "type": request.type,
-                "node": request.node
+                "status": "pending",
+                "message": f"{collection_type.capitalize()} collection is already in progress",
+                "type": request.type if collection_type == "anomaly" else "normal",
+                "node": request.node if collection_type == "anomaly" else None
             }
         # Mark collection as in progress
         _anomaly_collection_in_progress = True
     
     try:
-        metrics_service.toggle_send_to_training(True);
+        # Ensure metrics collection is active before starting
+        metrics_service.toggle_send_to_training(True)
         await training_service.start_collection(
             anomaly_type=request.type,
             node=request.node,
@@ -101,54 +104,78 @@ async def start_training_collection(request: AnomalyRequest):
 @router.post("/stop")
 async def stop_training_collection(request: TrainingStopRequest):
     """Stop collecting training data for an anomaly type"""
-    global _anomaly_collection_in_progress
-    
-    # Check if there's no collection to stop
+    global _anomaly_collection_in_progress, _normal_collection_in_progress # Added normal flag
+
+    # Check if there's any collection to stop
     async with _collection_lock:
-        if not _anomaly_collection_in_progress:
-            logger.warning("No anomaly collection in progress, ignoring stop request")
+        if not _anomaly_collection_in_progress and not _normal_collection_in_progress:
+            logger.warning("No collection in progress, ignoring stop request")
             return {
-                "status": "warning", 
-                "message": "No anomaly collection was in progress"
+                "status": "warning",
+                "message": "No collection was in progress"
             }
-    
+        # Determine which type of collection was active
+        was_anomaly = _anomaly_collection_in_progress
+        was_normal = _normal_collection_in_progress
+
     try:
-        metrics_service.toggle_send_to_training(False);
-        if hasattr(training_service, "stop_anomaly_collection"):
-            training_service.stop_anomaly_collection(save_post_data=request.save_post_data)
+        # Stop metrics flow regardless of type
+        metrics_service.toggle_send_to_training(False)
+
+        if was_anomaly:
+            logger.info("Stopping anomaly collection")
+            # Use the generic stop_collection which handles task cancellation
+            stop_task = training_service.stop_collection(save_post_data=request.save_post_data)
+            if stop_task:
+                await stop_task # Wait for the stop task to complete
+        elif was_normal:
+            logger.info("Stopping normal collection")
+            await training_service.stop_normal_collection()
         else:
-            # Fallback to generic stop
-            training_service.stop_collection()
-            
-        # Mark collection as stopped
+            # Should not happen due to initial check, but good practice
+            logger.warning("Stop called but no collection was marked as active internally")
+            return {"status": "warning", "message": "Internal state inconsistency, no collection stopped"}
+
+        # Mark collection as stopped - ensure flags are updated *after* stop completes
         async with _collection_lock:
-            _anomaly_collection_in_progress = False
-            
+            if was_anomaly:
+                _anomaly_collection_in_progress = False
+            if was_normal:
+                _normal_collection_in_progress = False
+
         return {
             "status": "success",
-            "message": "Stopped training data collection"
+            "message": f"Stopped {'anomaly' if was_anomaly else 'normal'} data collection"
         }
     except Exception as e:
         logger.error(f"Error stopping training collection: {str(e)}")
+        # Attempt to reset flags even on error to prevent stuck state
+        async with _collection_lock:
+            _anomaly_collection_in_progress = False
+            _normal_collection_in_progress = False
         raise HTTPException(status_code=500, detail=f"Error stopping training collection: {str(e)}")
 
 @router.post("/normal/start")
 async def start_normal_collection():
     """Start collecting normal state data"""
     global _normal_collection_in_progress
-    
+
     # Check if collection is already in progress
     async with _collection_lock:
-        if _normal_collection_in_progress:
-            logger.warning("Normal collection already in progress, ignoring duplicate request")
+        # Allow starting only if no other collection is active
+        if _anomaly_collection_in_progress or _normal_collection_in_progress:
+            collection_type = "anomaly" if _anomaly_collection_in_progress else "normal"
+            logger.warning(f"{collection_type.capitalize()} collection already in progress, ignoring duplicate request")
             return {
-                "status": "pending", 
-                "message": "Normal state collection is already in progress"
+                "status": "pending",
+                "message": f"{collection_type.capitalize()} collection is already in progress"
             }
         # Mark normal collection as in progress
         _normal_collection_in_progress = True
-    
+
     try:
+        # Ensure metrics are sent
+        metrics_service.toggle_send_to_training(True)
         await training_service.start_normal_collection()
         return {"status": "success", "message": "Started normal state data collection"}
     except Exception as e:
@@ -162,26 +189,31 @@ async def start_normal_collection():
 async def stop_normal_collection():
     """Stop collecting normal state data"""
     global _normal_collection_in_progress
-    
+
     # Check if there's no collection to stop
     async with _collection_lock:
         if not _normal_collection_in_progress:
             logger.warning("No normal collection in progress, ignoring stop request")
             return {
-                "status": "warning", 
+                "status": "warning",
                 "message": "No normal state collection was in progress"
             }
-    
+
     try:
+        # Stop metrics flow
+        metrics_service.toggle_send_to_training(False)
         await training_service.stop_normal_collection()
-        
+
         # Mark collection as stopped
         async with _collection_lock:
             _normal_collection_in_progress = False
-            
+
         return {"status": "success", "message": "Stopped normal state data collection"}
     except Exception as e:
         logger.error(f"Failed to stop normal state collection: {str(e)}")
+        # Reset flag on error
+        async with _collection_lock:
+            _normal_collection_in_progress = False
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/stats")
@@ -203,7 +235,6 @@ async def get_training_stats():
                 status_code=404,
                 content={"status": "error", "message": "No training data available"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true",
                 }
             )
@@ -225,7 +256,6 @@ async def get_training_stats():
         return JSONResponse(
             content=jsonable_encoder(response),
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true",
             }
         )
@@ -235,7 +265,6 @@ async def get_training_stats():
             status_code=500,
             content={"status": "error", "message": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true",
             }
         )
@@ -297,7 +326,6 @@ async def get_collection_status():
         return JSONResponse(
             content=status,
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -307,7 +335,6 @@ async def get_collection_status():
             status_code=500,
             content={"error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -577,15 +604,17 @@ async def start_compound_collection(request: CompoundAnomalyRequest):
     
     # Check if collection is already in progress
     async with _collection_lock:
-        if _anomaly_collection_in_progress:
-            logger.warning("Anomaly collection already in progress, ignoring duplicate request")
+        # Allow starting only if no other collection is active
+        if _anomaly_collection_in_progress or _normal_collection_in_progress:
+            collection_type = "anomaly" if _anomaly_collection_in_progress else "normal"
+            logger.warning(f"{collection_type.capitalize()} collection already in progress, ignoring duplicate compound request")
             return {
-                "status": "pending", 
-                "message": "Anomaly collection is already in progress",
+                "status": "pending",
+                "message": f"{collection_type.capitalize()} collection is already in progress",
                 "types": request.anomaly_types,
                 "node": request.node
             }
-        # Mark collection as in progress
+        # Mark collection as in progress (as an anomaly collection)
         _anomaly_collection_in_progress = True
     
     try:
@@ -602,7 +631,8 @@ async def start_compound_collection(request: CompoundAnomalyRequest):
         
         # Inform user about longer collection period for compound anomalies
         collection_duration = getattr(training_service, 'collection_duration', 180)
-        extended_duration = int(collection_duration * 1.5)  # 50% longer for compound anomalies
+        # Use the actual duration set in the service
+        extended_duration = training_service.current_anomaly["duration"] if training_service.current_anomaly else int(collection_duration * 1.5)
         
         return {
             "status": "success",
@@ -610,7 +640,7 @@ async def start_compound_collection(request: CompoundAnomalyRequest):
             "types": request.anomaly_types,
             "node": request.node or "auto-selected",
             "expected_duration": extended_duration,
-            "note": "Collection period is extended by 50% for compound anomalies to ensure sufficient data"
+            "note": "Collection period may be extended for compound anomalies to ensure sufficient data"
         }
     except Exception as e:
         # Reset collection flag on error

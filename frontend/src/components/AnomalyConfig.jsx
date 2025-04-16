@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Form, Select, Button, Card, List, Typography, Alert } from "antd";
+import { Form, Select, Button, Card, List, Typography, Alert, Spin, Tooltip } from "antd";
 import { PlusOutlined, DeleteOutlined } from "@ant-design/icons";
 import { anomalyService } from "../services/anomalyService";
 
@@ -10,11 +10,13 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
   const [form] = Form.useForm(); // Create form instance
   const [anomalies, setAnomalies] = useState(initialConfig?.anomalies || []);
   const [availableNodes, setAvailableNodes] = useState([]); // Initialize as empty array
-  const [loading, setLoading] = useState(false);
+  const [availableAnomalyTypes, setAvailableAnomalyTypes] = useState([]); // Will now store objects {type: string, description: string}
+  const [loadingNodes, setLoadingNodes] = useState(false);
+  const [loadingTypes, setLoadingTypes] = useState(false);
 
   useEffect(() => {
     const fetchNodes = async () => {
-      setLoading(true);
+      setLoadingNodes(true);
       try {
         const nodes = await anomalyService.getAvailableNodes();
         setAvailableNodes(nodes || []); // Ensure it's an array even if API returns null/undefined
@@ -23,11 +25,27 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
         console.error("Failed to fetch nodes:", error);
         setAvailableNodes([]); // Set to empty array on error
       } finally {
-        setLoading(false);
+        setLoadingNodes(false);
+      }
+    };
+
+    const fetchAnomalyTypes = async () => {
+      setLoadingTypes(true);
+      try {
+        const typesWithDescriptions = await anomalyService.getAvailableAnomalyTypes();
+        setAvailableAnomalyTypes(typesWithDescriptions || []); // Ensure it's an array
+        console.log("Set anomaly types: ", typesWithDescriptions);
+      } catch (error) {
+        console.error("Failed to fetch anomaly types:", error);
+        // Fallback already handled in service
+        setAvailableAnomalyTypes([]); 
+      } finally {
+        setLoadingTypes(false);
       }
     };
 
     fetchNodes();
+    fetchAnomalyTypes();
   }, []);
 
   useEffect(() => {
@@ -46,7 +64,25 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
     ];
   };
 
-  // In AnomalyConfig.jsx
+  // Format anomaly type for display
+  const formatAnomalyType = (type) => {
+    if (!type) return ''; // Add check for undefined type
+    const specialCases = {
+      cpu: "CPU",
+      io: "IO",
+      net: "Network",
+      chaosmesh: "ChaosMesh"
+    };
+    return type
+      .split('_')
+      .map(word => {
+        const lowerWord = word.toLowerCase();
+        return specialCases[lowerWord] || (lowerWord.charAt(0).toUpperCase() + lowerWord.slice(1));
+      })
+      .join(' ');
+  };
+
+ 
   const handleAddAnomaly = async () => {
     try {
       const values = await form.validateFields();
@@ -98,10 +134,18 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
             name="type"
             rules={[{ required: true, message: "Select anomaly type" }]}
           >
-            <Select style={{ width: 300 }} placeholder="Select anomaly type">
-              <Option value="cpu_stress">CPU Stress</Option>
-              <Option value="network_bottleneck">Network Bottleneck</Option>
-              <Option value="cache_bottleneck">Cache Bottleneck</Option>
+            <Select 
+              style={{ width: 300 }} 
+              placeholder="Select anomaly type"
+              loading={loadingTypes}
+            >
+              {availableAnomalyTypes.map(anomalyInfo => (
+                <Option key={anomalyInfo.type} value={anomalyInfo.type}>
+                  <Tooltip title={anomalyInfo.description} placement="right"> 
+                    <span>{formatAnomalyType(anomalyInfo.type)}</span>
+                  </Tooltip>
+                </Option>
+              ))}
             </Select>
           </Form.Item>
 
@@ -113,7 +157,7 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
               style={{ width: 300 }}
               placeholder="Select node"
               mode="multiple"
-              loading={loading}
+              loading={loadingNodes}
               placement="bottomLeft"
               maxTagCount={1}
               maxTagTextLength={15}
@@ -172,8 +216,8 @@ const AnomalyConfig = ({ onConfigChange, initialConfig }) => {
                 ]}
               >
                 <List.Item.Meta
-                  title={anomaly.type}
-                  description={`Node: ${anomaly.node}, Severity: ${anomaly.severity}`}
+                  title={formatAnomalyType(anomaly.type)}
+                  description={`Node: ${Array.isArray(anomaly.node) ? anomaly.node.join(', ') : anomaly.node}, Severity: ${anomaly.severity}`}
                 />
               </List.Item>
             )}

@@ -15,6 +15,7 @@ from ..services.training_service import training_service
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
+from kubernetes import client, config
 
 # Load environment variables
 load_dotenv()
@@ -23,8 +24,6 @@ load_dotenv()
 project_root = str(Path(__file__).parent.parent.parent.parent)
 if project_root not in sys.path:
     sys.path.append(project_root)
-
-from config.dist_diagnosis_config import NODE_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +54,7 @@ class MetricsService:
     _metrics_cache = {}
     _last_collection = None
     CACHE_TTL = 30  # Cache time to live in seconds
+    nodes = []
 
     def __new__(cls):
         if cls._instance is None:
@@ -66,6 +66,7 @@ class MetricsService:
 
     def _initialize(self):
         """Initialize the metrics service with OB connection details"""
+        self.nodes = self._fetch_available_nodes()
         self.metrics = {}
         self.metrics_history = {}  # Store time series data
         self.timestamp = None
@@ -306,14 +307,47 @@ class MetricsService:
         self.event_loop.close()
         self.event_loop = None
         logger.info("Metrics collection loop ended")
+        
+    def _fetch_available_nodes(self) -> List[str]:
+        """Get list of available nodes for collecting metrics"""
+        try:
+            if os.getenv('KUBERNETES_SERVICE_HOST'):
+                config.load_incluster_config()
+            else:
+                config.load_kube_config()
+                
+            core_api = client.CoreV1Api()
+            namespace = os.getenv('OCEANBASE_NAMESPACE', 'oceanbase')
+            
+            pods = core_api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector="ref-obcluster"
+            )
+            
+            # Extract pod ips
+            pod_ips = []
+            for pod in pods.items:
+                if not pod.status.pod_ip:
+                    logger.error(f"Pod {pod.metadata.name} has no IP address. pod structure: {pod}")
+                    continue
+                if pod.metadata.name.startswith("obcluster-"):
+                    pod_ips.append(pod.status.pod_ip)
+            
+            return pod_ips
+        except Exception as e:
+            logger.error(f"Error fetching available nodes: {e}")
+            return []
+            
+            
+            
 
     async def _collect_sql_metrics_only(self):
         """Collect metrics using direct SQL queries to OceanBase without sending to training service."""
         timestamp = datetime.now().isoformat()
         current_metrics = {}
         
-        # Get list of nodes from config
-        nodes = NODE_CONFIG.get('node_list', [])
+        # Get list of nodes
+        nodes = self.nodes
         
         for node in nodes:
             try:

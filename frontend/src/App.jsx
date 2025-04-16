@@ -218,6 +218,7 @@ const Navigation = () => {
         selectedKeys={[location.pathname]}
         items={menuItems}
         onClick={handleMenuClick}
+        className="no-scrollbar"
         style={{
           backgroundColor: "#001529",
           color: "#0f0f0f",
@@ -226,9 +227,6 @@ const Navigation = () => {
           flex: 1,
           scrollbarWidth: "none",  // For Firefox
           msOverflowStyle: "none", // For IE
-          "&::-webkit-scrollbar": { // For Chrome/Safari
-            display: "none"
-          }
         }}
       />
 
@@ -382,7 +380,26 @@ const App = () => {
 
 const AppWrapper = () => {
   return (
-    <Router>
+    <Router
+      future={{
+        v7_startTransition: true,
+        v7_relativeSplatPath: true
+      }}
+    >
+      <style>
+        {`
+        .no-scrollbar::-webkit-scrollbar {
+          display: none;
+        }
+        
+        /* Use modern forced-colors mode instead of -ms-high-contrast */
+        @media (forced-colors: active) {
+          .ant-component * {
+            forced-color-adjust: none;
+          }
+        }
+        `}
+      </style>
       <App />
     </Router>
   );

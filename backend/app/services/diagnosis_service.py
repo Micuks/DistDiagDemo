@@ -468,10 +468,10 @@ class DistDiagnosis:
         try:
             os.makedirs(model_dir, exist_ok=True)
             
-            # Save each classifier
+            # Save each classifier using XGBoost's native method
             for i, clf in enumerate(self.clf_list):
-                model_path = os.path.join(model_dir, f'classifier_{i}.joblib')
-                joblib.dump(clf, model_path)
+                model_path = os.path.join(model_dir, f'classifier_{i}.xgb') # Use .xgb extension
+                clf.save_model(model_path)
             
             # Save configuration
             config = {
@@ -507,15 +507,21 @@ class DistDiagnosis:
             self.classes = config.get('classes', self.classes)
             self.time_window = config.get('time_window', self.time_window)
             
-            # Load classifiers
+            # Load classifiers using XGBoost's native method
             self.clf_list = []
             for i in range(self.num_classifier):
-                model_path = os.path.join(model_dir, f'classifier_{i}.joblib')
-                if os.path.exists(model_path):
-                    clf = joblib.load(model_path)
+                xgb_path = os.path.join(model_dir, f'classifier_{i}.xgb') # Use .xgb extension
+                joblib_path = os.path.join(model_dir, f'classifier_{i}.joblib') # Use .joblib extension
+                if os.path.exists(xgb_path):
+                    # Need to initialize a classifier instance before loading
+                    clf = XGBClassifier() 
+                    clf.load_model(xgb_path)
+                    self.clf_list.append(clf)
+                elif os.path.exists(joblib_path):
+                    clf = joblib.load(joblib_path)
                     self.clf_list.append(clf)
                 else:
-                    raise FileNotFoundError(f"Classifier {i} not found at {model_path}")
+                    raise FileNotFoundError(f"Classifier {i} not found at {xgb_path} or {joblib_path}")
                     
             logger.info(f"Model loaded from {model_dir} with {len(self.clf_list)} classifiers")
             

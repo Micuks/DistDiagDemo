@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import App from './App.jsx';
+import './index.css'; // Import the CSS that handles forced-colors mode
 
 const theme = createTheme({
   palette: {
@@ -28,7 +29,8 @@ const theme = createTheme({
   },
 });
 
-function Main() {
+// Define the Main component properly as a function component
+const Main = () => {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -37,7 +39,7 @@ function Main() {
       </div>
     </ThemeProvider>
   );
-}
+};
 
 const root = createRoot(document.getElementById('root'));
 root.render(

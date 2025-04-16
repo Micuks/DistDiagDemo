@@ -11,7 +11,7 @@ export default defineConfig({
     strictPort: true,
     cors: true,
     hmr: {
-      host: '10.101.168.97',
+      host: '10.101.168.212',
       port: 3000,
       protocol: 'http'
     },
@@ -21,7 +21,7 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://10.101.168.97:8001',
+        target: 'http://10.101.168.212:8001',
         changeOrigin: true,
         secure: false,
         rewrite: (path) => path

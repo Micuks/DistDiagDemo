@@ -3,7 +3,7 @@ from app.services.diagnosis_service import DiagnosisService
 from fastapi.responses import JSONResponse
 import logging
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from app.services.metrics_service import MetricsService
 import os
 import json
@@ -19,9 +19,11 @@ metrics_service = MetricsService()
 
 class CompareModelsRequest(BaseModel):
     model_names: List[str] 
+    model_config = ConfigDict(protected_namespaces=())
 
 class ModelValidationRequest(BaseModel):
     model_name: str
+    model_config = ConfigDict(protected_namespaces=())
 
 @router.get("/{model_name}/performance")
 async def get_model_performance(model_name: str):
@@ -35,7 +37,6 @@ async def get_model_performance(model_name: str):
                 status_code=404,
                 content={"error": f"Model '{model_name}' not found"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -59,7 +60,6 @@ async def get_model_performance(model_name: str):
                         status_code=404,
                         content={"error": f"No performance metrics found for model '{model_name}'"},
                         headers={
-                            "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                             "Access-Control-Allow-Credentials": "true"
                         }
                     )
@@ -69,7 +69,6 @@ async def get_model_performance(model_name: str):
                     status_code=404,
                     content={"error": f"No performance metrics found for model '{model_name}'"},
                     headers={
-                        "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                         "Access-Control-Allow-Credentials": "true"
                     }
                 )
@@ -84,7 +83,6 @@ async def get_model_performance(model_name: str):
                 return JSONResponse(
                     content=metrics,
                     headers={
-                        "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                         "Access-Control-Allow-Credentials": "true"
                     }
                 )
@@ -94,7 +92,6 @@ async def get_model_performance(model_name: str):
                 status_code=500,
                 content={"error": f"Invalid metrics data for model '{model_name}': {str(e)}"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -105,7 +102,6 @@ async def get_model_performance(model_name: str):
             status_code=500,
             content={"error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -118,7 +114,6 @@ async def list_models():
         return JSONResponse(
             content=models,
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -128,7 +123,6 @@ async def list_models():
             status_code=500,
             content={"error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -147,7 +141,6 @@ async def validate_model(request: ModelValidationRequest):
             return JSONResponse(
                 content={"valid": False, "error": f"Model '{model_name}' not found"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -159,7 +152,6 @@ async def validate_model(request: ModelValidationRequest):
             return JSONResponse(
                 content={"valid": False, "error": "Model directory not found"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -171,7 +163,6 @@ async def validate_model(request: ModelValidationRequest):
             return JSONResponse(
                 content={"valid": False, "error": "feature_info.json not found"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -186,7 +177,6 @@ async def validate_model(request: ModelValidationRequest):
             return JSONResponse(
                 content={"valid": False, "error": f"Invalid JSON in feature_info.json: {str(e)}"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -198,7 +188,6 @@ async def validate_model(request: ModelValidationRequest):
             return JSONResponse(
                 content={"valid": False, "error": "No classifier files found"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -214,7 +203,6 @@ async def validate_model(request: ModelValidationRequest):
                 }
             },
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -225,7 +213,6 @@ async def validate_model(request: ModelValidationRequest):
             status_code=500,
             content={"valid": False, "error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -245,7 +232,6 @@ async def get_model_ranks(
             return JSONResponse(
                 content={},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -388,7 +374,6 @@ async def get_model_ranks(
         return JSONResponse(
             content=results,
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -399,7 +384,6 @@ async def get_model_ranks(
             status_code=500,
             content={"error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -479,7 +463,6 @@ async def get_metric_ranks(
             return JSONResponse(
                 content={"error": "No metrics data available"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -496,7 +479,6 @@ async def get_metric_ranks(
             return JSONResponse(
                 content={"error": f"Node {node} not found in metrics data"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -510,7 +492,6 @@ async def get_metric_ranks(
         return JSONResponse(
             content=analysis_result,
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -521,7 +502,6 @@ async def get_metric_ranks(
             status_code=500,
             content={"error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -542,7 +522,6 @@ async def get_metrics_summary(
             return JSONResponse(
                 content={"error": "No metrics data available"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -559,7 +538,6 @@ async def get_metrics_summary(
             return JSONResponse(
                 content={"error": f"Node {node} not found in metrics data"},
                 headers={
-                    "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                     "Access-Control-Allow-Credentials": "true"
                 }
             )
@@ -580,7 +558,6 @@ async def get_metrics_summary(
                 "actions": result.get("actions", [])
             },
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )
@@ -591,7 +568,6 @@ async def get_metrics_summary(
             status_code=500,
             content={"error": str(e)},
             headers={
-                "Access-Control-Allow-Origin": "http://10.101.168.97:3000",
                 "Access-Control-Allow-Credentials": "true"
             }
         )

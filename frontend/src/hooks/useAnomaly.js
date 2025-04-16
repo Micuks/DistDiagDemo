@@ -1,129 +1,178 @@
 import { useState, useEffect, useCallback } from 'react';
-import { anomalyService } from '../services/anomalyService';
-import { message } from 'antd';
+import anomalyService from '../services/anomalyService';
+import { useSnackbar } from 'notistack';
 
-export const useAnomaly = () => {
-  const [availableNodes, setAvailableNodes] = useState([]);
-  const [anomalyTypes, setAnomalyTypes] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [activeAnomalies, setActiveAnomalies] = useState([]);
-  const [error, setError] = useState(null);
+export const useAnomaly = (refreshInterval = 10000) => {
+    const [availableNodes, setAvailableNodes] = useState([]);
+    const [activeAnomalies, setActiveAnomalies] = useState([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [isSocketConnected, setIsSocketConnected] = useState(false);
+    const [error, setError] = useState(null);
+    const { enqueueSnackbar } = useSnackbar();
+    
+    // Fetch functions
+    const fetchAvailableNodes = useCallback(async () => {
+        try {
+            setIsLoading(true);
+            const nodes = await anomalyService.getAvailableNodes();
+            setAvailableNodes(nodes);
+            setError(null);
+        } catch (err) {
+            console.error('Error fetching available nodes:', err);
+            setError(err?.message || 'Failed to fetch available nodes');
+        } finally {
+            setIsLoading(false);
+        }
+    }, []);
 
-  // Fetch available nodes
-  const fetchAvailableNodes = useCallback(async () => {
-    try {
-      const nodes = await anomalyService.getAvailableNodes();
-      setAvailableNodes(nodes);
-    } catch (err) {
-      console.error('Error fetching available nodes:', err);
-      setError('Failed to fetch available nodes');
-    }
-  }, []);
+    const fetchActiveAnomalies = useCallback(async () => {
+        try {
+            setIsLoading(true);
+            const anomalies = await anomalyService.getActiveAnomalies();
+            setActiveAnomalies(anomalies);
+            setError(null);
+        } catch (err) {
+            console.error('Error fetching active anomalies:', err);
+            setError(err?.message || 'Failed to fetch active anomalies');
+        } finally {
+            setIsLoading(false);
+        }
+    }, []);
 
-  // Load anomaly types
-  const loadAnomalyTypes = useCallback(() => {
-    const types = anomalyService.getAnomalyTypes();
-    setAnomalyTypes(types);
-  }, []);
+    // WebSocket handlers
+    const handleWebSocketMessage = useCallback((data) => {
+        if (data.type === 'anomalies_update') {
+            setActiveAnomalies(data.anomalies || []);
+        } else if (data.type === 'nodes_update') {
+            setAvailableNodes(data.nodes || []);
+        } else if (data.type === 'anomaly_started') {
+            enqueueSnackbar(`Anomaly started: ${data.anomaly?.type} on ${data.anomaly?.node || 'system'}`, { 
+                variant: 'info' 
+            });
+            fetchActiveAnomalies();
+        } else if (data.type === 'anomaly_stopped') {
+            enqueueSnackbar(`Anomaly stopped: ${data.anomaly?.type} on ${data.anomaly?.node || 'system'}`, { 
+                variant: 'success' 
+            });
+            fetchActiveAnomalies();
+        } else if (data.type === 'error') {
+            enqueueSnackbar(data.message || 'Unknown error occurred', { 
+                variant: 'error' 
+            });
+        }
+    }, [enqueueSnackbar, fetchActiveAnomalies]);
 
-  // Fetch active anomalies
-  const fetchActiveAnomalies = useCallback(async () => {
-    try {
-      setLoading(true);
-      const anomalies = await anomalyService.getActiveAnomalies();
-      setActiveAnomalies(anomalies);
-      setError(null);
-    } catch (err) {
-      console.error('Error fetching active anomalies:', err);
-      setError('Failed to fetch active anomalies');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    const setupWebSocket = useCallback(() => {
+        anomalyService.connectToWebSocket({
+            onMessage: handleWebSocketMessage,
+            onConnect: () => {
+                setIsSocketConnected(true);
+                enqueueSnackbar('Connected to anomaly real-time updates', { 
+                    variant: 'success' 
+                });
+            },
+            onDisconnect: () => {
+                setIsSocketConnected(false);
+                enqueueSnackbar('Disconnected from anomaly real-time updates', { 
+                    variant: 'warning' 
+                });
+            },
+            onError: (error) => {
+                console.error('WebSocket error:', error);
+                setIsSocketConnected(false);
+                enqueueSnackbar('Error connecting to anomaly updates', { 
+                    variant: 'error' 
+                });
+            }
+        });
+    }, [handleWebSocketMessage, enqueueSnackbar]);
 
-  // Inject an anomaly
-  const injectAnomaly = useCallback(async (anomalyType, targetNode, severity, duration) => {
-    try {
-      setLoading(true);
-      const result = await anomalyService.injectAnomaly(anomalyType, targetNode, severity, duration);
-      message.success(`Injected ${anomalyType} anomaly successfully`);
-      await fetchActiveAnomalies();
-      return result;
-    } catch (err) {
-      console.error('Error injecting anomaly:', err);
-      message.error(`Failed to inject anomaly: ${err.message}`);
-      setError(`Failed to inject anomaly: ${err.message}`);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, [fetchActiveAnomalies]);
+    // Anomaly injection and management
+    const injectAnomaly = useCallback(async (type, node_or_params) => {
+        try {
+            setIsLoading(true);
+            await anomalyService.startAnomaly(type, node_or_params);
+            enqueueSnackbar(`Successfully injected anomaly: ${type}`, { variant: 'success' });
+            fetchActiveAnomalies();
+        } catch (err) {
+            console.error('Error injecting anomaly:', err);
+            enqueueSnackbar(err?.message || `Failed to inject anomaly: ${type}`, { variant: 'error' });
+        } finally {
+            setIsLoading(false);
+        }
+    }, [enqueueSnackbar, fetchActiveAnomalies]);
 
-  // Stop an anomaly
-  const stopAnomaly = useCallback(async (anomalyId) => {
-    try {
-      setLoading(true);
-      const result = await anomalyService.stopAnomaly(anomalyId);
-      message.success(`Stopped anomaly successfully`);
-      await fetchActiveAnomalies();
-      return result;
-    } catch (err) {
-      console.error('Error stopping anomaly:', err);
-      message.error(`Failed to stop anomaly: ${err.message}`);
-      setError(`Failed to stop anomaly: ${err.message}`);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, [fetchActiveAnomalies]);
+    const stopAnomaly = useCallback(async (typeOrId, experimentName) => {
+        try {
+            setIsLoading(true);
+            await anomalyService.stopAnomaly(typeOrId, experimentName);
+            enqueueSnackbar(`Successfully stopped anomaly`, { variant: 'success' });
+            fetchActiveAnomalies();
+        } catch (err) {
+            console.error('Error stopping anomaly:', err);
+            enqueueSnackbar(err?.message || 'Failed to stop anomaly', { variant: 'error' });
+        } finally {
+            setIsLoading(false);
+        }
+    }, [enqueueSnackbar, fetchActiveAnomalies]);
 
-  // Stop all anomalies
-  const stopAllAnomalies = useCallback(async () => {
-    try {
-      setLoading(true);
-      const result = await anomalyService.stopAllAnomalies();
-      message.success('Stopped all anomalies successfully');
-      await fetchActiveAnomalies();
-      return result;
-    } catch (err) {
-      console.error('Error stopping all anomalies:', err);
-      message.error(`Failed to stop all anomalies: ${err.message}`);
-      setError(`Failed to stop all anomalies: ${err.message}`);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, [fetchActiveAnomalies]);
+    const stopAllAnomalies = useCallback(async () => {
+        try {
+            setIsLoading(true);
+            await anomalyService.stopAllAnomalies();
+            enqueueSnackbar('Successfully stopped all anomalies', { variant: 'success' });
+            fetchActiveAnomalies();
+        } catch (err) {
+            console.error('Error stopping all anomalies:', err);
+            enqueueSnackbar(err?.message || 'Failed to stop all anomalies', { variant: 'error' });
+        } finally {
+            setIsLoading(false);
+        }
+    }, [enqueueSnackbar, fetchActiveAnomalies]);
 
-  // Get anomaly status
-  const getAnomalyStatus = useCallback(async (anomalyId) => {
-    try {
-      const status = await anomalyService.getAnomalyStatus(anomalyId);
-      return status;
-    } catch (err) {
-      console.error('Error getting anomaly status:', err);
-      setError(`Failed to get anomaly status: ${err.message}`);
-      throw err;
-    }
-  }, []);
+    const refreshAnomalies = useCallback(() => {
+        if (isSocketConnected) {
+            anomalyService.refreshAnomalies();
+        } else {
+            fetchActiveAnomalies();
+        }
+    }, [fetchActiveAnomalies, isSocketConnected]);
 
-  // Initialize by fetching available nodes and loading anomaly types
-  useEffect(() => {
-    fetchAvailableNodes();
-    loadAnomalyTypes();
-  }, [fetchAvailableNodes, loadAnomalyTypes]);
+    // Setup effects
+    useEffect(() => {
+        fetchAvailableNodes();
+        fetchActiveAnomalies();
+        setupWebSocket();
 
-  return {
-    availableNodes,
-    anomalyTypes,
-    activeAnomalies,
-    loading,
-    error,
-    fetchAvailableNodes,
-    fetchActiveAnomalies,
-    injectAnomaly,
-    stopAnomaly,
-    stopAllAnomalies,
-    getAnomalyStatus
-  };
-}; 
+        // Cleanup on unmount
+        return () => {
+            anomalyService.disconnectFromWebSocket();
+        };
+    }, [fetchAvailableNodes, fetchActiveAnomalies, setupWebSocket]);
+
+    // Set up polling if WebSocket is not connected
+    useEffect(() => {
+        if (!isSocketConnected && refreshInterval > 0) {
+            const intervalId = setInterval(() => {
+                fetchActiveAnomalies();
+            }, refreshInterval);
+
+            return () => clearInterval(intervalId);
+        }
+    }, [fetchActiveAnomalies, refreshInterval, isSocketConnected]);
+
+    return {
+        availableNodes,
+        activeAnomalies,
+        isLoading,
+        isSocketConnected,
+        error,
+        injectAnomaly,
+        stopAnomaly,
+        stopAllAnomalies,
+        refreshAnomalies,
+        reconnectWebSocket: setupWebSocket
+    };
+};
+
+export default useAnomaly; 

@@ -142,32 +142,39 @@ class TrainingService:
                 logger.info(f"    Label file: {'Present' if has_label else 'Missing'}")
         
     async def start_collection(self, anomaly_type: str, node: str):
-        """Start collecting training data for an anomaly case"""
+        """Start collecting training data for a single anomaly case"""
         async with self._lock:
             # Validate node parameter
             if not node:
                 # Get list of available nodes that haven't been used for this type
                 from app.services.k8s_service import k8s_service
                 available_nodes = await k8s_service.get_available_nodes()
-                used_nodes = self.anomaly_variations[anomaly_type]
+                used_nodes = self.anomaly_variations.get(anomaly_type, set())
                 unused_nodes = [n for n in available_nodes if n not in used_nodes]
-                
+
                 if not unused_nodes:
                     # If all nodes used, clear history to allow reuse
-                    self.anomaly_variations[anomaly_type].clear()
+                    self.anomaly_variations[anomaly_type] = set()
                     unused_nodes = available_nodes
-                
-                node = unused_nodes[0] if unused_nodes else available_nodes[0]
+
+                node = unused_nodes[0] if unused_nodes else (available_nodes[0] if available_nodes else None)
+
+                if not node:
+                    logger.error(f"Cannot start collection for {anomaly_type}: No available nodes.")
+                    raise ValueError("No available nodes found.")
+
                 logger.info(f"Selected node {node} for anomaly type {anomaly_type}")
-                
+
             # Track this variation
+            if anomaly_type not in self.anomaly_variations:
+                self.anomaly_variations[anomaly_type] = set()
             if isinstance(node, list):
                 for n in node:
                     self.anomaly_variations[anomaly_type].add(n)
             else:
                 self.anomaly_variations[anomaly_type].add(node)
             logger.info(f"Anomaly variations: {self.anomaly_variations}")
-            
+
             # Make sure metrics service is aware we're collecting data
             try:
                 from app.services.metrics_service import metrics_service
@@ -175,7 +182,7 @@ class TrainingService:
                 logger.info("Enabled sending metrics to training service")
             except Exception as e:
                 logger.error(f"Failed to enable metrics collection: {e}")
-            
+
             self.collection_start_time = datetime.now().isoformat()
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
             self.current_case = f"case_{anomaly_type}_{node}_{timestamp}"
@@ -185,17 +192,90 @@ class TrainingService:
                 "start_time": self.collection_start_time,
                 "duration": self.collection_duration
             }
-            
+
             # Ensure the metrics buffer is initialized as an empty list
             self.metrics_buffer = []
-            
+
             # No pre/post collection - directly start anomaly collection
             self.is_collecting_normal = False
-            logger.info(f"Started anomaly data collection for {self.current_case} at {self.collection_start_time}")
+            logger.info(f"Started single anomaly data collection for {self.current_case} at {self.collection_start_time}")
             logger.info(f"Metrics buffer initialized: {self.metrics_buffer is not None}, length: {len(self.metrics_buffer)}")
-            
+
             # Schedule automatic stop after collection_duration
             asyncio.create_task(self._auto_stop_collection())
+
+    async def start_compound_collection(self, anomaly_types: List[str], node: str):
+        """Start collecting training data for a compound anomaly case"""
+        async with self._lock:
+            # Validate node parameter
+            if not node:
+                # Get list of available nodes that haven't been used for this type
+                from app.services.k8s_service import k8s_service
+                available_nodes = await k8s_service.get_available_nodes()
+                # Create a compound key for tracking variations based on the input list
+                # Sort the list first for consistency
+                compound_key = "+".join(sorted(anomaly_types))
+                used_nodes = self.anomaly_variations.get(compound_key, set())
+                unused_nodes = [n for n in available_nodes if n not in used_nodes]
+
+                if not unused_nodes:
+                    # If all nodes used, clear history for this specific compound type to allow reuse
+                    self.anomaly_variations[compound_key] = set()
+                    unused_nodes = available_nodes
+
+                node = unused_nodes[0] if unused_nodes else (available_nodes[0] if available_nodes else None)
+
+                if not node:
+                    # Use anomaly_types (the list) in the error message
+                    logger.error(f"Cannot start collection for compound types {anomaly_types}: No available nodes.")
+                    raise ValueError("No available nodes found for compound collection.")
+
+                logger.info(f"Selected node {node} for compound anomaly types {anomaly_types}")
+
+            # If node was specified, track it using the compound key
+            else:
+                # Sort the list first for consistency
+                compound_key = "+".join(sorted(anomaly_types))
+                if compound_key not in self.anomaly_variations:
+                    self.anomaly_variations[compound_key] = set()
+                # Add the selected node(s) to the variation tracking for the compound key
+                if isinstance(node, list):
+                    for n in node:
+                        self.anomaly_variations[compound_key].add(n)
+                else:
+                    self.anomaly_variations[compound_key].add(node)
+
+            logger.info(f"Anomaly variations tracked: {self.anomaly_variations}")
+
+            # Set up collection parameters with potentially longer duration for compound anomalies
+            self.collection_start_time = datetime.now().isoformat()
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+            # Create case name with all anomaly types
+            # Sort for consistent naming
+            anomaly_str = "_plus_".join(sorted(anomaly_types))
+            self.current_case = f"case_compound_{anomaly_str}_{node}_{timestamp}"
+
+            # Store anomaly data with all types
+            self.current_anomaly = {
+                "type": "compound",
+                # Store sorted list
+                "subtypes": sorted(anomaly_types),
+                "node": node,
+                "start_time": self.collection_start_time,
+                "duration": self.collection_duration * 1.5  # Optional: 50% longer for compound anomalies
+            }
+
+            # Initialize metrics buffer
+            self.metrics_buffer = []
+            self.is_collecting_normal = False
+            logger.info(f"Started compound anomaly data collection for {self.current_case} at {self.collection_start_time}")
+            logger.info(f"Collecting {len(anomaly_types)} simultaneous anomalies: {', '.join(sorted(anomaly_types))}")
+
+            # Schedule automatic stop after extended collection_duration
+            # Use the duration stored in current_anomaly
+            compound_duration = self.current_anomaly["duration"]
+            asyncio.create_task(self._auto_stop_collection_with_duration(compound_duration))
 
     async def _auto_stop_collection(self):
         """Automatically stop collection after the specified duration"""
@@ -203,6 +283,21 @@ class TrainingService:
             await asyncio.sleep(self.collection_duration)
             if self.current_case:  # Only stop if still collecting
                 logger.info(f"Auto-stopping collection after {self.collection_duration} seconds")
+                # Use await here to ensure full completion of the stop operation
+                await self.stop_collection(save_post_data=True)
+                # Log completion for debugging
+                logger.info("Auto-stop collection completed successfully")
+        except Exception as e:
+            logger.error(f"Error in auto-stop collection: {str(e)}")
+            # Ensure state is cleaned up even on error
+            await self._clear_collection_state()
+
+    async def _auto_stop_collection_with_duration(self, duration: int):
+        """Automatically stop collection after the specified duration"""
+        try:
+            await asyncio.sleep(duration)
+            if self.current_case:  # Only stop if still collecting
+                logger.info(f"Auto-stopping collection after {duration} seconds")
                 # Use await here to ensure full completion of the stop operation
                 await self.stop_collection(save_post_data=True)
                 # Log completion for debugging
@@ -564,8 +659,8 @@ class TrainingService:
                             stats["normal"] += count
                             logger.debug(f"Added {count} normal samples from {case_dir}")
                     else:
-                        # For anomaly cases:
-                        # 1. Count pre_anomaly as normal
+                        # For anomaly cases (single or compound):
+                        # 1. Count pre_anomaly as normal (if exists)
                         pre_anomaly_file = os.path.join(case_path, "pre_anomaly_metrics.json")
                         if os.path.exists(pre_anomaly_file):
                             count = self._count_json_entries(pre_anomaly_file)
@@ -577,12 +672,20 @@ class TrainingService:
                         if os.path.exists(metrics_file):
                             count = self._count_json_entries(metrics_file)
                             stats["anomaly"] += count
+                            # Handle compound vs single type for stats breakdown
                             anomaly_type = label_data.get("type")
-                            if anomaly_type:
+                            if anomaly_type == "compound":
+                                # For compound, maybe log under a special key or distribute count?
+                                # For simplicity, let's log under 'compound' for now.
+                                stats["anomaly_types"]["compound"] += count
+                                # Optionally, could increment counts for each subtype involved:
+                                # for subtype in label_data.get("subtypes", []):
+                                #     stats["anomaly_types"][subtype] += count / len(label_data["subtypes"]) # Distribute count
+                            elif anomaly_type:
                                 stats["anomaly_types"][anomaly_type] += count
                             logger.debug(f"Added {count} anomaly samples of type {anomaly_type} from {case_dir}")
                         
-                        # 3. Count post_anomaly as normal
+                        # 3. Count post_anomaly as normal (if exists)
                         post_anomaly_file = os.path.join(case_path, "post_anomaly_metrics.json")
                         if os.path.exists(post_anomaly_file):
                             count = self._count_json_entries(post_anomaly_file)
@@ -903,34 +1006,31 @@ class TrainingService:
         ]
 
     def _create_label_vector(self, label_data: Dict) -> np.ndarray:
-        """Create label vector for anomaly data"""
-        # Define indices for different anomaly types
-        anomaly_types = {
-            "cpu_stress": 0,
-            "network_bottleneck": 1,
-            "cache_bottleneck": 2,
-        }
-        
+        """Create label vector for anomaly data (handles single and compound types)"""
+        # Define indices based on the ORDERED list from _get_anomaly_types()
+        anomaly_types_map = {name: idx for idx, name in enumerate(self._get_anomaly_types())}
+
         # Initialize label vector with zeros (multi-hot encoding)
-        label_vector = np.zeros(len(anomaly_types))
-        
+        label_vector = np.zeros(len(anomaly_types_map))
+
         # Handle compound anomalies
         if label_data.get("type") == "compound" and "subtypes" in label_data:
             for subtype in label_data["subtypes"]:
-                if subtype in anomaly_types:
-                    label_vector[anomaly_types[subtype]] = 1
+                if subtype in anomaly_types_map:
+                    label_vector[anomaly_types_map[subtype]] = 1
             logger.debug(f"Created compound label vector for subtypes {label_data['subtypes']}: {label_vector}")
         else:
-            # Special handling for 'normal' samples - return zeros vector
+            # Handle single anomalies
             anomaly_type = label_data.get("type")
+            # Special handling for 'normal' samples - return zeros vector
             if anomaly_type == "normal":
                 return label_vector
-                
-            if anomaly_type in anomaly_types:
-                label_vector[anomaly_types[anomaly_type]] = 1
-                logger.debug(f"Created label vector for anomaly type {anomaly_type}: {label_vector}")
+
+            if anomaly_type in anomaly_types_map:
+                label_vector[anomaly_types_map[anomaly_type]] = 1
+                logger.debug(f"Created single label vector for anomaly type {anomaly_type}: {label_vector}")
             else:
-                logger.warning(f"Unknown anomaly type: {anomaly_type}")
+                logger.warning(f"Unknown anomaly type in label data: {anomaly_type}")
 
         logger.info(f"Final label vector for case with label data {label_data}: {label_vector}")
         return label_vector
@@ -1002,77 +1102,108 @@ class TrainingService:
     async def start_compound_collection(self, anomaly_types: list, node: str = None):
         """
         Start collecting training data for compound anomaly scenarios (multiple simultaneous anomalies)
-        
+
         Args:
             anomaly_types: List of anomaly types to simulate simultaneously
             node: Optional target node, if None a node will be selected automatically
         """
-        if len(anomaly_types) < 2:
-            raise ValueError("Compound collection requires at least 2 anomaly types")
-            
+        if not isinstance(anomaly_types, list) or len(anomaly_types) < 2: # Ensure it's a list with >= 2 types
+            raise ValueError("Compound collection requires a list of at least 2 anomaly types")
+
         async with self._lock:
-            # Validate anomaly types are supported
+            # Validate anomaly types are supported (using the defined list)
+            supported_types = self._get_anomaly_types()
             for atype in anomaly_types:
-                if atype not in self.experiment_types:
-                    raise ValueError(f"Unsupported anomaly type: {atype}. Valid types: {self.experiment_types}")
-            
+                if atype not in supported_types:
+                    raise ValueError(f"Unsupported anomaly type: {atype}. Valid types: {supported_types}")
+
             # Make sure metrics service is aware we're collecting data
             try:
                 from app.services.metrics_service import metrics_service
                 metrics_service.toggle_send_to_training(True)
-                logger.info("Enabled sending metrics to training service")
+                logger.info("Enabled sending metrics to training service for compound collection")
             except Exception as e:
-                logger.error(f"Failed to enable metrics collection: {e}")
-            
+                logger.error(f"Failed to enable metrics collection for compound scenario: {e}")
+
             # Validate node parameter or select appropriate node
             if not node:
                 # Get list of available nodes that haven't been used for this combination
                 from app.services.k8s_service import k8s_service
                 available_nodes = await k8s_service.get_available_nodes()
-                
+
                 # Create a compound key for tracking variations
                 compound_key = "+".join(sorted(anomaly_types))
                 used_nodes = self.anomaly_variations.get(compound_key, set())
                 unused_nodes = [n for n in available_nodes if n not in used_nodes]
-                
+
                 if not unused_nodes:
-                    # If all nodes used, clear history to allow reuse
+                    # If all nodes used, clear history for this specific compound type to allow reuse
                     self.anomaly_variations[compound_key] = set()
                     unused_nodes = available_nodes
-                
-                node = unused_nodes[0] if unused_nodes else available_nodes[0]
+
+                node = unused_nodes[0] if unused_nodes else (available_nodes[0] if available_nodes else None) # Handle no nodes
+
+                if not node:
+                     logger.error(f"Cannot start compound collection for {anomaly_types}: No available nodes.")
+                     raise ValueError("No available nodes found for compound collection.")
+
                 logger.info(f"Selected node {node} for compound anomaly types {anomaly_types}")
-                
-                # Track this variation
-                if compound_key not in self.anomaly_variations:
-                    self.anomaly_variations[compound_key] = set()
+
+            # Track this variation using the compound key
+            compound_key = "+".join(sorted(anomaly_types)) # Ensure key is consistent
+            if compound_key not in self.anomaly_variations:
+                self.anomaly_variations[compound_key] = set()
+
+            # Add the selected node(s) to the variation tracking for the compound key
+            if isinstance(node, list):
+                for n in node:
+                    self.anomaly_variations[compound_key].add(n)
+            else:
                 self.anomaly_variations[compound_key].add(node)
-            
-            # Set up collection parameters with longer duration for compound anomalies
+            logger.info(f"Anomaly variations: {self.anomaly_variations}")
+
+            # Set up collection parameters with potentially longer duration for compound anomalies
             self.collection_start_time = datetime.now().isoformat()
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            
+
             # Create case name with all anomaly types
-            anomaly_str = "_plus_".join(anomaly_types)
+            # Sort for consistent naming
+            anomaly_str = "_plus_".join(sorted(anomaly_types))
             self.current_case = f"case_compound_{anomaly_str}_{node}_{timestamp}"
-            
+
             # Store anomaly data with all types
             self.current_anomaly = {
                 "type": "compound",
-                "subtypes": anomaly_types,
+                # Store sorted list
+                "subtypes": sorted(anomaly_types),
                 "node": node,
                 "start_time": self.collection_start_time,
-                "duration": self.collection_duration * 1.5  # 50% longer for compound anomalies
+                "duration": self.collection_duration * 1.5  # Optional: 50% longer for compound anomalies
             }
-            
+
             # Initialize metrics buffer
             self.metrics_buffer = []
             self.is_collecting_normal = False
             logger.info(f"Started compound anomaly data collection for {self.current_case} at {self.collection_start_time}")
-            logger.info(f"Collecting {len(anomaly_types)} simultaneous anomalies: {', '.join(anomaly_types)}")
-            
+            logger.info(f"Collecting {len(anomaly_types)} simultaneous anomalies: {', '.join(sorted(anomaly_types))}")
+
             # Schedule automatic stop after extended collection_duration
-            asyncio.create_task(self._auto_stop_collection())
+            # Use the duration stored in current_anomaly
+            compound_duration = self.current_anomaly["duration"]
+            asyncio.create_task(self._auto_stop_collection_with_duration(compound_duration))
+
+    async def _auto_stop_collection_with_duration(self, duration: float):
+        """Automatically stop collection after a specific duration."""
+        try:
+            await asyncio.sleep(duration)
+            if self.current_case:  # Only stop if still collecting this case
+                logger.info(f"Auto-stopping collection after {duration} seconds for case {self.current_case}")
+                await self.stop_collection(save_post_data=True)
+                logger.info(f"Auto-stop collection completed successfully for {self.current_case}")
+        except Exception as e:
+            logger.error(f"Error in auto-stop collection with duration: {str(e)}")
+            # Ensure state is cleaned up even on error
+            await self._clear_collection_state()
 
     def test_training_data(self):
         """Test function to diagnose training data issues and manually train the model"""

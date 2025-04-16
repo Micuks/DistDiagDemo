@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Steps, Card, Space, Typography, Button, message, Alert, Divider, Row, Col, Form, Input, Select } from 'antd';
-import { ControlOutlined, ApiOutlined, LineChartOutlined, ExperimentOutlined, ArrowRightOutlined } from '@ant-design/icons';
+import { Steps, Card, Space, Typography, Button, message, Alert, Divider, Row, Col, Form, Input, Select, Table, Tabs, Tag } from 'antd';
+import { ControlOutlined, ApiOutlined, LineChartOutlined, ExperimentOutlined, ArrowRightOutlined, HistoryOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { useAnomalyData } from '../hooks/useAnomalyData';
-import { workloadService } from '../services/workloadService';
-import { anomalyService } from '../services/anomalyService';
+import { useTask } from '../hooks/useTask';
 import WorkloadConfig from './WorkloadConfig';
 import AnomalyConfig from './AnomalyConfig';
 import ExecutionSummary from './ExecutionSummary';
@@ -17,143 +15,69 @@ const ControlPanel = () => {
     const [currentStep, setCurrentStep] = useState(0);
     const [workloadConfig, setWorkloadConfig] = useState(null);
     const [anomalyConfig, setAnomalyConfig] = useState({ anomalies: [] });
-    const [isExecuting, setIsExecuting] = useState(false);
     const [isExecuted, setIsExecuted] = useState(false);
     const [taskName, setTaskName] = useState('');
-    const { data: activeAnomalies = [], refetch: refetchAnomalies } = useAnomalyData();
     const [showDashboard, setShowDashboard] = useState(false);
-    const [activeWorkloads, setActiveWorkloads] = useState([]);
+    const [activeTabKey, setActiveTabKey] = useState('1');
     const [skipWorkload, setSkipWorkload] = useState(false);
     const navigate = useNavigate();
-    const [loading, setLoading] = useState(false);
 
-    // Check for active workloads when component mounts
+    const { tasks, createTask, loading: taskLoading, error: taskError, fetchTasks } = useTask();
+
+    const activeWorkloads = tasks.filter(task => ['running', 'pending', 'stopping'].includes(task.status));
+
+    const toggleWorkloadSkip = () => {
+        setSkipWorkload(!skipWorkload);
+        if (!skipWorkload) {
+            setWorkloadConfig(null);
+        }
+    };
+
     useEffect(() => {
         localStorage.removeItem('onExecutionDashboard');
-        const checkActiveTasks = async() => {
-            try {
-                // Use the new task API to check for active tasks
-                const activeTasks = await workloadService.getActiveTasks();
-                console.log("Active tasks: ", activeTasks);
-                const activeWorkloads = await workloadService.getActiveWorkloads();
-                console.log("Active workloads: ", activeWorkloads);
-
-                // Set active workloads
-                setActiveWorkloads(activeWorkloads);
-
-                // If there are active tasks, show the dashboard
-                if (activeTasks.length > 0) {
-                    setShowDashboard(true);
-                }
-            } catch (error) {
-                console.error('Failed to check active tasks:', error);
-            }
-        };
-
-        checkActiveTasks();
-    }, []);
+        const hasActiveTasks = tasks.some(task => ['running', 'pending', 'stopping'].includes(task.status));
+        setShowDashboard(hasActiveTasks);
+    }, [tasks]);
 
     const handleTaskNameChange = (name) => {
         setTaskName(name);
     };
 
-    const handleExecute = async() => {
-        // Check if we have anomalies configured
-        const hasAnomalies = anomalyConfig &&
-            anomalyConfig.anomalies &&
-            anomalyConfig.anomalies.length > 0;
-
-        // Check if we're running in anomaly-only mode (with existing workloads)
-        const isAnomalyOnlyMode = skipWorkload && activeWorkloads.length > 0;
-
-        // In anomaly-only mode, we don't need workload config
-        if (!isAnomalyOnlyMode && !workloadConfig) {
-            message.error('Please complete workload configuration');
+    const handleExecute = async () => {
+        if (!workloadConfig || !workloadConfig.type || !workloadConfig.threads) {
+            message.error('Please complete workload configuration (Type and Threads required)');
+            setCurrentStep(0);
             return;
         }
-
-        // Always require a task name
         if (!taskName.trim()) {
             message.error('Please provide a task name');
+            setCurrentStep(2);
             return;
         }
 
-        // In normal mode (not anomaly-only), check if same type workload is running
-        if (!isAnomalyOnlyMode && activeWorkloads.length > 0) {
-            const sameTypeWorkloads = activeWorkloads.filter(
-                workload => workload.type === workloadConfig.type && workload.status === 'running'
-            );
+        const taskCreateData = {
+            name: taskName.trim(),
+            workload_type: workloadConfig.type,
+            workload_config: {
+                 num_threads: workloadConfig.threads,
+                 ...(workloadConfig.options || {})
+            },
+            anomalies: anomalyConfig.anomalies || [],
+        };
 
-            if (sameTypeWorkloads.length > 0) {
-                // If a workload of same type is running, ask if user wants to just add anomalies
-                const activeWorkloadId = sameTypeWorkloads[0].id;
-                message.info(`A ${workloadConfig.type} workload is already running. Will add anomalies to the existing workload.`);
-                setSkipWorkload(true);
-            }
-        }
+        console.log("Creating task with data:", taskCreateData);
 
-        // If no anomalies are configured in anomaly-only mode, there's nothing to do
-        if (isAnomalyOnlyMode && !hasAnomalies) {
-            message.error('Please add at least one anomaly when adding to an existing workload');
-            return;
-        }
-
-        setIsExecuting(true);
         try {
-            let workloadResponse = null;
-
-            // Start the workload if we're not in anomaly-only mode
-            if (!isAnomalyOnlyMode) {
-                // Start the workload
-                workloadResponse = await workloadService.startWorkload({
-                    type: workloadConfig.type,
-                    threads: workloadConfig.threads,
-                    options: workloadConfig.options,
-                    task_name: taskName.trim()
-                });
-
-                message.success('Workload started successfully');
+            const createdTask = await createTask(taskCreateData);
+            if (createdTask) {
+                setIsExecuted(true);
+                setShowDashboard(true);
+                setActiveTabKey('1');
             } else {
-                // In anomaly-only mode, create a task with only anomalies
-                // Use the selected workload's ID
-                const activeWorkloadId = activeWorkloads[0].id;
-                const activeWorkloadType = activeWorkloads[0].type;
-
-                // Create a task without starting a new workload
-                workloadResponse = await workloadService.createTask({
-                    type: activeWorkloadType,
-                    task_name: taskName.trim(),
-                    workload_id: activeWorkloadId,
-                    anomalies: anomalyConfig.anomalies
-                });
-
-                message.success('Task created successfully with existing workload');
+                 console.error("Task creation returned undefined/null or failed silently.");
             }
-
-            // Start anomalies if configured
-            if (hasAnomalies) {
-                for (const anomaly of anomalyConfig.anomalies) {
-                    await anomalyService.startAnomaly(anomaly.type, anomaly.node);
-                }
-                message.success('Anomalies started successfully');
-            } else {
-                message.info("Running normal scenario without anomalies");
-            }
-
-            // Refresh anomaly data
-            await refetchAnomalies();
-
-            // Update active workloads
-            const updatedWorkloads = await workloadService.getActiveWorkloads();
-            setActiveWorkloads(updatedWorkloads);
-
-            // Mark as executed to show dashboard
-            setIsExecuted(true);
-            setShowDashboard(true);
         } catch (error) {
-            message.error(`Failed to execute configuration: ${error.message}`);
-        } finally {
-            setIsExecuting(false);
+            console.error("Error during task creation caught in ControlPanel:", error);
         }
     };
 
@@ -163,7 +87,8 @@ const ControlPanel = () => {
         setAnomalyConfig({ anomalies: [] });
         setTaskName('');
         setShowDashboard(false);
-        setSkipWorkload(false);
+        setActiveTabKey('1');
+        setIsExecuted(false);
     };
 
     const handleReset = () => {
@@ -173,12 +98,92 @@ const ControlPanel = () => {
         setAnomalyConfig({ anomalies: [] });
         setTaskName('');
         setShowDashboard(false);
-        setSkipWorkload(false);
+        fetchTasks();
     };
 
-    const toggleWorkloadSkip = () => {
-        setSkipWorkload(!skipWorkload);
+    const formatAnomalyType = (type) => {
+        if (!type) return '';
+        return type
+            .split('_')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ');
     };
+
+    const historyColumns = [
+        {
+            title: 'Task Name',
+            dataIndex: 'name',
+            key: 'name',
+            ellipsis: true,
+        },
+        {
+            title: 'Workload',
+            dataIndex: 'workload_type',
+            key: 'workload_type',
+            render: (type, record) => `${type.toUpperCase()} (${record.workload_config?.num_threads || 'N/A'} threads)`,
+        },
+        {
+            title: 'Anomalies',
+            dataIndex: 'anomalies',
+            key: 'anomalies',
+            render: (anomalies) => {
+                if (!anomalies || anomalies.length === 0) return 'None';
+                return (
+                    <Space direction="vertical" size="small">
+                        {anomalies.map((anomaly, index) => (
+                            <Tag key={index} color="red">
+                                {formatAnomalyType(anomaly.type)}
+                                {anomaly.target ? ` on ${anomaly.target}` : ''}
+                                {anomaly.severity ? ` (${anomaly.severity})` : ''}
+                            </Tag>
+                        ))}
+                    </Space>
+                );
+            },
+            ellipsis: true,
+        },
+        {
+            title: 'Start Time',
+            dataIndex: 'start_time',
+            key: 'start_time',
+            render: (time) => time ? new Date(time).toLocaleString() : '-',
+            sorter: (a, b) => new Date(a.start_time) - new Date(b.start_time),
+            defaultSortOrder: 'descend',
+        },
+        {
+            title: 'End Time',
+            dataIndex: 'end_time',
+            key: 'end_time',
+            render: (time) => time ? new Date(time).toLocaleString() : '-',
+        },
+        {
+            title: 'Status',
+            dataIndex: 'status',
+            key: 'status',
+            filters: [
+                { text: 'Stopped', value: 'stopped' },
+                { text: 'Error', value: 'error' },
+            ],
+            onFilter: (value, record) => record.status === value,
+            render: (status) => {
+                let color = 'default';
+                if (status === 'stopped') color = 'success';
+                else if (status === 'error') color = 'error';
+                else if (status === 'running') color = 'processing';
+                else if (status === 'pending') color = 'warning';
+                else if (status === 'stopping') color = 'warning';
+
+                return <Tag color={color}>{status ? status.toUpperCase() : 'UNKNOWN'}</Tag>;
+            },
+        },
+        {
+             title: 'Error Message',
+             dataIndex: 'error_message',
+             key: 'error_message',
+             ellipsis: true,
+             render: (msg) => msg || '-'
+        }
+    ];
 
     const renderNextStep = () => {
         return (
@@ -228,6 +233,77 @@ const ControlPanel = () => {
         );
     };
 
+    const renderContent = () => {
+        if (activeTabKey === '2') {
+            const historyTasks = tasks.filter(task => ['stopped', 'error'].includes(task.status));
+            return (
+                <Card>
+                    <Space direction="vertical" style={{ width: '100%' }} size="large">
+                        <Title level={4}>Task History</Title>
+                        <Button onClick={fetchTasks} loading={taskLoading} style={{marginBottom: 16}}>Refresh History</Button>
+                        <Table
+                            dataSource={historyTasks}
+                            columns={historyColumns}
+                            rowKey="id"
+                            loading={taskLoading}
+                            pagination={{ pageSize: 10, showSizeChanger: true }}
+                            scroll={{ x: 'max-content' }}
+                        />
+                    </Space>
+                </Card>
+            );
+        }
+
+        return (
+            <>
+                <Steps current={currentStep}
+                    items={
+                        steps.map((step, index) => ({
+                            title: step.title,
+                            description: step.description,
+                            icon: step.icon
+                        }))
+                    }
+                    style={{ marginBottom: 24 }}
+                />
+
+                <Card>{steps[currentStep].content}</Card>
+
+                <Space style={{ marginTop: 24, justifyContent: 'space-between', width: '100%' }}>
+                    <span>
+                        {currentStep > 0 && (
+                            <Button onClick={() => setCurrentStep(currentStep - 1)}>
+                                Previous Step
+                            </Button>
+                        )}
+                    </span>
+                    <span>
+                        {currentStep < steps.length - 1 && (
+                            <Button type="primary"
+                                onClick={() => setCurrentStep(currentStep + 1)}
+                                disabled={currentStep === 0 && (!workloadConfig || !workloadConfig.type)}
+                            >
+                                {currentStep === 0 ? "Configure Anomalies →" : "Review Configuration →"}
+                            </Button>
+                        )}
+                        {currentStep === steps.length - 1 && (
+                             <Button
+                                type="primary"
+                                icon={<PlayCircleOutlined />}
+                                onClick={handleExecute}
+                                loading={taskLoading}
+                                disabled={!workloadConfig || !taskName}
+                                size="large"
+                             >
+                                Execute Task
+                             </Button>
+                        )}
+                    </span>
+                </Space>
+            </>
+        );
+    };
+
     const steps = [{
             title: 'Configure Workload',
             description: 'Select and configure database workload',
@@ -237,7 +313,7 @@ const ControlPanel = () => {
                         description={
                             activeWorkloads.length > 0 ? (
                                 <Space direction="vertical">
-                                    <Text>There are active workloads running. You can either configure a new workload or add anomalies to an existing workload.</Text>
+                                    <Text>There {activeWorkloads.length > 1 ? 'are' : 'is'} active workload{activeWorkloads.length > 1 ? 's' : ''} running. You can either configure a new workload or add anomalies to {activeWorkloads.length > 1 ? 'an' : 'the'} existing workload.</Text>
                                     <Button type={skipWorkload ? "primary" : "default"}
                                         onClick={toggleWorkloadSkip}>
                                         {skipWorkload ? "Configure New Workload" : "Use Existing Workload"}
@@ -263,7 +339,7 @@ const ControlPanel = () => {
                                 <ul>
                                     {activeWorkloads.map(workload => (
                                         <li key={workload.id}>
-                                            <Text strong>{workload.type.toUpperCase()}</Text> - Threads: {workload.threads}
+                                            <Text strong>{workload.workload_type?.toUpperCase()}</Text> - Threads: {workload.workload_config?.num_threads || 'N/A'}
                                         </li>
                                     ))}
                                 </ul>
@@ -299,23 +375,16 @@ const ControlPanel = () => {
             description: 'Review configuration and start execution',
             content: (
                 <>
-                    <Alert message="Step 3: Review and execute"
-                        description="Review your configuration settings and provide a name for this task. Click 'Execute' to start the workload."
-                        type="info"
-                        showIcon style={{ marginBottom: 16 }}
-                    />
-                    <ExecutionSummary workloadConfig={skipWorkload ? null : workloadConfig}
+                    <Alert message="Step 3: Review configuration" description="Review your configuration settings and provide a name for this task. Click 'Execute Task' button below to start." type="info" showIcon style={{ marginBottom: 16 }} />
+                    <ExecutionSummary
+                        workloadConfig={workloadConfig}
                         anomalyConfig={anomalyConfig}
-                        onExecute={handleExecute}
-                        isExecuting={isExecuting}
                         taskName={taskName}
                         onTaskNameChange={handleTaskNameChange}
-                        skipWorkload={skipWorkload}
-                        activeWorkloads={activeWorkloads}
                     />
                 </>
             ),
-            icon: <ControlOutlined />
+            icon: <ArrowRightOutlined />
         },
     ];
 
@@ -356,44 +425,30 @@ const ControlPanel = () => {
                 <Alert message="Workflow Guide"
                     description={
                         <Text>
-                            First you'll configure a workload and optional anomalies, then execute them to either collect 
-                            training data,
-                            monitor system metrics,
-                            or analyze root causes with different models.
+                            Use the steps below to configure a Task (Workload + Optional Anomalies), then review and execute.
+                            Use the Task History tab to view past executions.
                         </Text>
                     }
                     type="success"
                     showIcon style={{ marginBottom: 16 }}
                 />
-
-                <Steps current={currentStep}
-                    items={
-                        steps.map((step, index) => ({
-                            title: step.title,
-                            description: step.description,
-                            icon: step.icon
-                        }))
-                    }
-                    onChange={setCurrentStep}
-                    style={{ marginBottom: 24 }}
+                
+                <Tabs 
+                    activeKey={activeTabKey} 
+                    onChange={(key) => setActiveTabKey(key)}
+                    items={[
+                        {
+                            key: '1',
+                            label: 'Configure Task'
+                        },
+                        {
+                            key: '2',
+                            label: <span><HistoryOutlined /> Task History</span>
+                        }
+                    ]}
                 />
 
-                <Card>{steps[currentStep].content}</Card>
-
-                <Space style={{ marginTop: 24, justifyContent: 'flex-end' }}>
-                    {currentStep > 0 && (
-                        <Button onClick={() => setCurrentStep(currentStep - 1)}>
-                            Previous Step
-                        </Button>
-                    )}
-                    {currentStep < steps.length - 1 && (
-                        <Button type="primary"
-                            onClick={() => setCurrentStep(currentStep + 1)}
-                            disabled={!workloadConfig && currentStep === 0 && !skipWorkload}>
-                            {currentStep === 0 ? "Configure Anomalies →" : "Review Configuration →"}
-                        </Button>
-                    )}
-                </Space>
+                {renderContent()}
             </Space>
         </Card>
     );

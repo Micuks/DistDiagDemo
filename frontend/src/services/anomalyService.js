@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const WS_BASE_URL = import.meta.env.VITE_WS_URL || API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
 const MAX_RETRIES = 3;
 
 // Request tracking for deduplication
@@ -20,6 +21,116 @@ class AnomalyService {
             response => response.data,
             error => this._handleError(error)
         );
+
+        // WebSocket related properties
+        this.ws = null;
+        this.wsConnected = false;
+        this.wsCallbacks = {
+            onMessage: () => {},
+            onConnect: () => {},
+            onDisconnect: () => {},
+            onError: () => {}
+        };
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.reconnectTimeout = null;
+    }
+
+    // WebSocket Methods
+    connectToWebSocket(callbacks = {}) {
+        // Merge provided callbacks with defaults
+        this.wsCallbacks = { ...this.wsCallbacks, ...callbacks };
+        
+        if (this.ws) {
+            console.log('WebSocket connection already exists');
+            return;
+        }
+
+        try {
+            this.ws = new WebSocket(`${WS_BASE_URL}/api/ws/anomalies`);
+            
+            this.ws.onopen = () => {
+                console.log('WebSocket connection established');
+                this.wsConnected = true;
+                this.reconnectAttempts = 0;
+                this.wsCallbacks.onConnect();
+            };
+            
+            this.ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    this.wsCallbacks.onMessage(data);
+                } catch (error) {
+                    console.error('Failed to parse WebSocket message:', error);
+                }
+            };
+            
+            this.ws.onclose = (event) => {
+                console.log('WebSocket connection closed:', event.code, event.reason);
+                this.wsConnected = false;
+                this.ws = null;
+                this.wsCallbacks.onDisconnect(event);
+                this._attemptReconnect();
+            };
+            
+            this.ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                this.wsCallbacks.onError(error);
+            };
+        } catch (error) {
+            console.error('Failed to connect to WebSocket:', error);
+            this.wsCallbacks.onError(error);
+            this._attemptReconnect();
+        }
+    }
+
+    disconnectFromWebSocket() {
+        if (this.ws) {
+            console.log('Closing WebSocket connection');
+            this.ws.close();
+            this.ws = null;
+            this.wsConnected = false;
+            
+            // Clear any pending reconnect attempts
+            if (this.reconnectTimeout) {
+                clearTimeout(this.reconnectTimeout);
+                this.reconnectTimeout = null;
+            }
+        }
+    }
+
+    sendWebSocketMessage(message) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            console.error('WebSocket not connected, cannot send message');
+            return false;
+        }
+        
+        try {
+            this.ws.send(JSON.stringify(message));
+            return true;
+        } catch (error) {
+            console.error('Failed to send WebSocket message:', error);
+            return false;
+        }
+    }
+
+    refreshAnomalies() {
+        return this.sendWebSocketMessage({ action: 'refresh' });
+    }
+
+    _attemptReconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.log('Maximum reconnect attempts reached');
+            return;
+        }
+        
+        const backoffTime = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+        console.log(`Attempting to reconnect in ${backoffTime}ms (attempt ${this.reconnectAttempts + 1}/${this.maxReconnectAttempts})`);
+        
+        this.reconnectTimeout = setTimeout(() => {
+            this.reconnectAttempts++;
+            this.connectToWebSocket(this.wsCallbacks);
+        }, backoffTime);
     }
 
     async _handleError(error) {
@@ -114,12 +225,14 @@ class AnomalyService {
                 return [];
             }
             
-            if (!Array.isArray(response)) {
-                console.warn('Response is not an array:', response);
-                return Array.isArray(response.data) ? response.data : [];
+            // Check if the response has an 'anomalies' property that is an array
+            if (response && Array.isArray(response.anomalies)) {
+                return response.anomalies;
             }
             
-            return response;
+            // Log a warning if the structure is unexpected
+            console.warn('Response structure unexpected or missing anomalies array:', response);
+            return []; // Return empty array if anomalies property is not a valid array
         } catch (error) {
             console.error('Error fetching active anomalies:', error);
             // Return empty array on error rather than throwing
@@ -152,12 +265,30 @@ class AnomalyService {
     }
 
     async stopAnomaly(typeOrId, experimentName = null) {
+        let payload = {
+            collect_training_data: false // Default, not usually needed for stop
+        };
+
+        if (typeof typeOrId === 'string') {
+            // Assume it's the anomaly ID (which corresponds to experiment_name in backend)
+            payload.experiment_name = typeOrId;
+            // Optionally pass experimentName as well if provided, backend prioritizes experiment_name
+            if (experimentName) {
+                payload.type = experimentName; // If experimentName is actually the type
+            }
+            console.log(`Stopping anomaly by ID: ${typeOrId}`);
+        } else if (typeof typeOrId === 'object' && typeOrId !== null) {
+            // Handle object input { type: '...', name: '...' }
+            payload.type = typeOrId.type;
+            payload.experiment_name = typeOrId.name || experimentName; // Use name from object or fallback
+            console.log(`Stopping anomaly by type/name: type=${payload.type}, name=${payload.experiment_name}`);
+        } else {
+            console.error("Invalid input to stopAnomaly:", typeOrId);
+            throw new Error("Invalid input: Must provide anomaly ID string or type/name object.");
+        }
+
         return this._retryableRequest(() =>
-            this.client.post('/api/anomaly/clear', {
-                type: typeof typeOrId === 'object' ? typeOrId.type : typeOrId,
-                experiment_name: experimentName || (typeof typeOrId === 'object' ? typeOrId.name : null),
-                collect_training_data: false
-            })
+            this.client.post('/api/anomaly/clear', payload)
         );
     }
 
@@ -436,30 +567,40 @@ class AnomalyService {
         }
     }
 
-    getAnomalyTypes() {
-        return [
-            {
-                key: 'cpu_stress',
-                name: 'CPU Stress',
-                description: 'Simulate high CPU usage'
-            },
-            {
-                key: 'network_bottleneck',
-                name: 'Network Bottleneck',
-                description: 'Simulate network congestion and high latency'
-            },
-            {
-                key: 'memory_leak',
-                name: 'Memory Leak',
-                description: 'Simulate gradual memory consumption'
-            },
-            {
-                key: 'cache_bottleneck',
-                name: 'Cache Bottleneck',
-                description: 'Reduce available memory storage for the database'
-            }
-        ];
+    async getAvailableAnomalyTypes() {
+        try {
+            // Endpoint now returns List[AnomalyTypeInfo]
+            const response = await this.client.get('/api/anomaly/types'); 
+            return response;
+        } catch (error) {
+            console.error('Error fetching available anomaly types:', error);
+            // Return default types as fallback (now needs description)
+            return [
+              { type: 'cpu_stress', description: '(Fallback) CPU Stress' },
+              { type: 'network_bottleneck', description: '(Fallback) Network Bottleneck' },
+              { type: 'io_bottleneck', description: '(Fallback) IO Bottleneck' },
+            ];
+        }
     }
 }
 
+/**
+ * Creates and configures an EventSource for real-time anomaly updates
+ * @returns {EventSource} EventSource object connected to the anomaly stream endpoint
+ */
+const createAnomalyEventSource = () => {
+  const API_URL = import.meta.env.VITE_API_URL || '';
+  const url = `${API_URL}/api/anomaly/stream`;
+  
+  try {
+    const eventSource = new EventSource(url);
+    console.log('Created EventSource connection to anomaly stream');
+    return eventSource;
+  } catch (error) {
+    console.error('Failed to create EventSource connection:', error);
+    throw error;
+  }
+};
+
 export const anomalyService = new AnomalyService();
+export { createAnomalyEventSource };

@@ -3,99 +3,74 @@ import { workloadService } from '../services/workloadService';
 import { message } from 'antd';
 
 export const useWorkload = () => {
-  const [availableNodes, setAvailableNodes] = useState([]);
+  // Remove state related to available nodes and general active workloads
+  // const [availableNodes, setAvailableNodes] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [activeWorkloads, setActiveWorkloads] = useState([]);
+  const [activeWorkloadRuns, setActiveWorkloadRuns] = useState([]); // Renamed state
   const [error, setError] = useState(null);
 
-  // Fetch available nodes
-  const fetchAvailableNodes = useCallback(async () => {
-    try {
-      const nodes = await workloadService.getAvailableNodes();
-      setAvailableNodes(nodes);
-    } catch (err) {
-      console.error('Error fetching available nodes:', err);
-      setError('Failed to fetch available nodes');
-    }
-  }, []);
+  // Remove fetchAvailableNodes
+  // const fetchAvailableNodes = useCallback(async () => { ... });
 
-  // Fetch active workloads
-  const fetchActiveWorkloads = useCallback(async () => {
+  // Rename fetchActiveWorkloads and update its logic
+  const fetchActiveWorkloadRuns = useCallback(async () => {
     try {
       setLoading(true);
-      const workloads = await workloadService.getActiveWorkloads();
-      setActiveWorkloads(workloads);
+      // Call the renamed service function
+      const runs = await workloadService.getActiveWorkloadRuns();
+      setActiveWorkloadRuns(runs); // Update the renamed state
       setError(null);
     } catch (err) {
-      console.error('Error fetching active workloads:', err);
-      setError('Failed to fetch active workloads');
+      console.error('Error fetching active workload runs:', err);
+      // Use Ant Design message for user feedback
+      message.error(`Failed to fetch active workload runs: ${err.message}`);
+      setError('Failed to fetch active workload runs');
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Start a workload
-  const startWorkload = useCallback(async (workloadType, threads, options) => {
-    try {
-      setLoading(true);
-      const result = await workloadService.startWorkload(workloadType, threads, options);
-      message.success(`Started ${workloadType} workload successfully`);
-      await fetchActiveWorkloads();
-      return result;
-    } catch (err) {
-      console.error('Error starting workload:', err);
-      message.error(`Failed to start workload: ${err.message}`);
-      setError(`Failed to start workload: ${err.message}`);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, [fetchActiveWorkloads]);
+  // Remove startWorkload function
+  // const startWorkload = useCallback(async (...) => { ... }, [fetchActiveWorkloads]);
 
-  // Stop a workload
-  const stopWorkload = useCallback(async (workloadId) => {
-    try {
-      setLoading(true);
-      const result = await workloadService.stopWorkload(workloadId);
-      message.success(`Stopped workload successfully`);
-      await fetchActiveWorkloads();
-      return result;
-    } catch (err) {
-      console.error('Error stopping workload:', err);
-      message.error(`Failed to stop workload: ${err.message}`);
-      setError(`Failed to stop workload: ${err.message}`);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, [fetchActiveWorkloads]);
+  // Remove stopWorkload function
+  // const stopWorkload = useCallback(async (...) => { ... }, [fetchActiveWorkloads]);
 
-  // Get workload status
-  const getWorkloadStatus = useCallback(async (workloadId) => {
-    try {
-      const status = await workloadService.getWorkloadStatus(workloadId);
-      return status;
-    } catch (err) {
-      console.error('Error getting workload status:', err);
-      setError(`Failed to get workload status: ${err.message}`);
-      throw err;
-    }
+  // Remove getWorkloadStatus function
+  // const getWorkloadStatus = useCallback(async (...) => { ... }, []);
+
+  // Remove useEffect that fetched available nodes
+  // useEffect(() => { fetchAvailableNodes(); }, [fetchAvailableNodes]);
+
+  // Keep prepareDatabase functionality if needed separately
+  const prepareDatabase = useCallback(async (workloadType) => {
+     setLoading(true);
+     setError(null);
+     try {
+        await workloadService.prepareDatabase(workloadType);
+        message.success(`Database preparation for ${workloadType} initiated successfully.`);
+        // Optionally return true or the response data
+        return true;
+     } catch (err) {
+        console.error(`Error preparing database for ${workloadType}:`, err);
+        message.error(`Failed to prepare database for ${workloadType}: ${err.message}`);
+        setError(`Failed to prepare database: ${err.message}`);
+        return false;
+     } finally {
+        setLoading(false);
+     }
   }, []);
-
-  // Initialize by fetching available nodes
-  useEffect(() => {
-    fetchAvailableNodes();
-  }, [fetchAvailableNodes]);
 
   return {
-    availableNodes,
-    activeWorkloads,
+    // Remove availableNodes
+    activeWorkloadRuns, // Return renamed state
     loading,
     error,
-    fetchAvailableNodes,
-    fetchActiveWorkloads,
-    startWorkload,
-    stopWorkload,
-    getWorkloadStatus
+    // Remove fetchAvailableNodes
+    fetchActiveWorkloadRuns, // Return renamed fetch function
+    // Remove startWorkload
+    // Remove stopWorkload
+    // Remove getWorkloadStatus
+    prepareDatabase // Keep prepareDatabase if needed
   };
 }; 

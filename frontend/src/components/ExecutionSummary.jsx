@@ -22,8 +22,6 @@ const ExecutionSummary = ({
     isExecuting,
     taskName,
     onTaskNameChange,
-    skipWorkload = false,
-    activeWorkloads = [],
 }) => {
     const getWorkloadTypeName = (type) => {
         switch (type) {
@@ -53,37 +51,31 @@ const ExecutionSummary = ({
         }
     };
     
-    // Generate default task name based on workload type and anomalies
+    // Updated default task name generation
     useEffect(() => {
-        if (workloadConfig || (skipWorkload && activeWorkloads.length > 0)) {
-            // Get workload type - either from config or active workload
-            const workloadType = workloadConfig?.type || activeWorkloads[0]?.type;
-            const workloadName = getWorkloadTypeName(workloadType);
-            
+        // Generate name only if workloadConfig is present
+        if (workloadConfig && workloadConfig.type) {
+            const workloadName = getWorkloadTypeName(workloadConfig.type);
             let defaultName = `${workloadName}`;
-            
+
             if (anomalyConfig?.anomalies?.length > 0) {
-                const anomalyTypes = anomalyConfig.anomalies.map(a => 
+                const anomalyTypes = anomalyConfig.anomalies.map(a =>
                     getAnomalyTypeName(a.type).replace(/\s+/g, '')
                 );
                 defaultName += ` with ${anomalyTypes.join('+')}`;
             } else {
-                defaultName += " Normal";
+                defaultName += " Normal Run"; // Changed default suffix
             }
-            
-            defaultName += ` (${new Date().toISOString().split('T')[0]})`;
-            
-            // In anomaly-only mode, add an "Anomaly" prefix
-            if (skipWorkload) {
-                defaultName = `Anomaly: ${defaultName}`;
-            }
-            
-            onTaskNameChange(defaultName);
-        }
-    }, [workloadConfig, anomalyConfig, skipWorkload, activeWorkloads]);
 
-    // Get active workload for displaying in anomaly-only mode
-    const activeWorkload = skipWorkload && activeWorkloads.length > 0 ? activeWorkloads[0] : null;
+            defaultName += ` (${new Date().toISOString().split('T')[0]})`;
+
+            // Set the default name only if taskName is currently empty
+            if (!taskName) {
+                onTaskNameChange(defaultName);
+            }
+        }
+        // Trigger only when workload or anomaly config changes, not taskName
+    }, [workloadConfig, anomalyConfig, onTaskNameChange]);
 
     // Format option label for better readability
     const formatOptionLabel = (key) => {
@@ -116,15 +108,6 @@ const ExecutionSummary = ({
         <Space direction="vertical" style={{ width: "100%" }} size="large">
             <Card>
                 <Title level={4}>Configuration Summary</Title>
-                {skipWorkload && (
-                    <Alert
-                        message="Anomaly-Only Mode"
-                        description="You are adding anomalies to an existing workload. No new workload will be started."
-                        type="info"
-                        showIcon
-                        style={{ marginBottom: 16 }}
-                    />
-                )}
                 <Space direction="vertical" style={{ width: "100%" }} size="large">
                     <Form layout="vertical">
                         <Form.Item
@@ -140,67 +123,38 @@ const ExecutionSummary = ({
                         </Form.Item>
                     </Form>
 
-                    {/* Display workload config or active workload info */}
-                    {skipWorkload ? (
-                        <Descriptions title="Existing Workload" bordered>
+                    {/* Always display workload config if available */}
+                    {workloadConfig ? (
+                        <Descriptions title="Workload Configuration" bordered>
                             <Descriptions.Item label="Type">
                                 <Tag color="blue">
-                                    {getWorkloadTypeName(activeWorkload?.type)}
+                                    {getWorkloadTypeName(workloadConfig?.type)}
                                 </Tag>
                             </Descriptions.Item>
-                            <Descriptions.Item label="Workload ID">
-                                {activeWorkload?.id}
-                            </Descriptions.Item>
                             <Descriptions.Item label="Threads">
-                                {activeWorkload?.threads}
+                                {workloadConfig?.threads}
                             </Descriptions.Item>
-                            {activeWorkload?.metrics && (
-                                <>
-                                    <Descriptions.Item label="CPU Usage">
-                                        {activeWorkload.metrics.cpu_usage}%
-                                    </Descriptions.Item>
-                                    <Descriptions.Item label="Memory Usage">
-                                        {activeWorkload.metrics.memory_usage}%
-                                    </Descriptions.Item>
-                                    {activeWorkload.metrics.tps && (
-                                        <Descriptions.Item label="TPS">
-                                            {activeWorkload.metrics.tps}
-                                        </Descriptions.Item>
-                                    )}
-                                </>
+                            
+                            {/* Advanced Options Section */}
+                            {workloadConfig?.options && (
+                                <Descriptions.Item label="Advanced Options" span={3}>
+                                    <Descriptions size="small" bordered column={1}>
+                                        {Object.entries(workloadConfig.options)
+                                            .filter(([key]) => key !== 'node')
+                                            .map(([key, value]) => (
+                                                <Descriptions.Item
+                                                    key={key}
+                                                    label={formatOptionLabel(key)}
+                                                >
+                                                    {formatOptionValue(key, value)}
+                                                </Descriptions.Item>
+                                            ))}
+                                    </Descriptions>
+                                </Descriptions.Item>
                             )}
                         </Descriptions>
                     ) : (
-                        workloadConfig && (
-                            <Descriptions title="Workload Configuration" bordered>
-                                <Descriptions.Item label="Type">
-                                    <Tag color="blue">
-                                        {getWorkloadTypeName(workloadConfig?.type)}
-                                    </Tag>
-                                </Descriptions.Item>
-                                <Descriptions.Item label="Threads">
-                                    {workloadConfig?.threads}
-                                </Descriptions.Item>
-                                
-                                {/* Advanced Options Section */}
-                                {workloadConfig?.options && (
-                                    <Descriptions.Item label="Advanced Options" span={3}>
-                                        <Descriptions size="small" bordered column={1}>
-                                            {Object.entries(workloadConfig.options)
-                                                .filter(([key]) => key !== 'node')
-                                                .map(([key, value]) => (
-                                                    <Descriptions.Item
-                                                        key={key}
-                                                        label={formatOptionLabel(key)}
-                                                    >
-                                                        {formatOptionValue(key, value)}
-                                                    </Descriptions.Item>
-                                                ))}
-                                        </Descriptions>
-                                    </Descriptions.Item>
-                                )}
-                            </Descriptions>
-                        )
+                        <Text type="secondary">Workload not yet configured.</Text>
                     )}
 
                     <Descriptions title="Anomaly Configuration" bordered>
@@ -226,21 +180,8 @@ const ExecutionSummary = ({
             <Card>
                 <Space direction="vertical" style={{ width: "100%" }} size="middle">
                     <Text type="secondary">
-                        Review your configuration above. Click Execute to start the task.
+                        Review your configuration above. Click Execute Task button in the main control panel area to start.
                     </Text>
-                    <Button
-                        type="primary"
-                        icon={<PlayCircleOutlined />}
-                        onClick={onExecute}
-                        loading={isExecuting}
-                        disabled={(!workloadConfig && !skipWorkload) || !taskName || (skipWorkload && anomalyConfig?.anomalies?.length === 0)}
-                        size="large"
-                    >
-                        {isExecuting ? 
-                            "Starting Execution..." : 
-                            skipWorkload ? "Inject Anomalies" : "Start Execution"
-                        }
-                    </Button>
                 </Space>
             </Card>
         </Space>

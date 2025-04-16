@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://10.101.168.97:8001';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8001';
 const MAX_RETRIES = 3;
 
 class TrainingService {
@@ -133,6 +133,15 @@ class TrainingService {
     async getProcessStatus() {
         return this._retryableRequest(() => 
             this.client.get('/api/training/process-status')
+        );
+    }
+
+    async startCompoundCollection(anomalyTypes, node = null) {
+        return this._retryableRequest(() =>
+            this.client.post('/api/training/compound', {
+                anomaly_types: anomalyTypes,
+                node: node,
+            })
         );
     }
 }

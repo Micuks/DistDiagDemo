@@ -13,7 +13,7 @@ import {
 } from "antd";
 import { useNavigate } from "react-router-dom";
 import ModelTrainingPanel from "../components/ModelTrainingPanel";
-import { useAnomalyData } from "../hooks/useAnomalyData";
+import { useAnomaly } from "../hooks/useAnomaly";
 import {
     DatabaseOutlined,
     ControlOutlined,
@@ -27,9 +27,8 @@ const { Title, Text, Paragraph } = Typography;
 
 const ModelTrainingPage = () => {
     const navigate = useNavigate();
-    // Don't destructure refetch unless you need to call it explicitly
-    const { isLoading: isLoadingAnomalies, data: activeAnomalies = [] } =
-        useAnomalyData();
+    const { isLoading: isLoadingAnomalies, activeAnomalies = [] } =
+        useAnomaly();
     const [initialLoading, setInitialLoading] = useState(true);
 
     useEffect(() => {

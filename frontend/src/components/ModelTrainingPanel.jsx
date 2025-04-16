@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select, Tabs, Timeline, Typography } from 'antd';
-import { DatabaseOutlined, ApiOutlined, ExperimentOutlined, LineChartOutlined, InfoCircleOutlined, SyncOutlined, RiseOutlined, FallOutlined } from '@ant-design/icons';
+import { Card, Button, Space, Row, Col, Switch, Divider, Statistic, Progress, Alert, Spin, message, Checkbox, Select, Tabs, Timeline, Typography, Modal, Form } from 'antd';
+import { DatabaseOutlined, ApiOutlined, ExperimentOutlined, LineChartOutlined, InfoCircleOutlined, SyncOutlined, RiseOutlined, FallOutlined, PlusCircleOutlined } from '@ant-design/icons';
 import { trainingService } from '../services/trainingService';
-import { useAnomalyData } from '../hooks/useAnomalyData';
+import { useAnomaly } from '../hooks/useAnomaly';
 import ModelPerformanceView from './ModelPerformanceView';
 import ModelTrainingProgress from './ModelTrainingProgress';
-
-const { TabPane } = Tabs;
 
 const ModelAdaptationInfo = ({ activeAnomalies, trainingStats, isAutoMonitoring }) => {
   // TODO: Drop the feature
@@ -145,13 +143,13 @@ const ModelTrainingPanel = () => {
   const [isAutoMonitoring, setIsAutoMonitoring] = useState(false);
   const [availableModels, setAvailableModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(null);
-  const { data: activeAnomalies = [] } = useAnomalyData();
+  const { activeAnomalies = [], isLoading: isLoadingAnomalies } = useAnomaly();
   const [isTraining, setIsTraining] = useState(false);
   const [isCollectionToggling, setIsCollectionToggling] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState({ stage: 'idle', progress: 0 });
   const [activeTab, setActiveTab] = useState('1');
   const [trainingCompletionAcknowledged, setTrainingCompletionAcknowledged] = useState(false);
-  
+
   const fetchStatusIntervalRef = useRef(null);
   const fetchStatsIntervalRef = useRef(null);
   const fetchTrainingStatusIntervalRef = useRef(null);
@@ -353,13 +351,20 @@ const ModelTrainingPanel = () => {
           message.success("Successfully stopped data collection");
         }
       } else {
-        if (activeAnomalies.length > 0) {
+        if (activeAnomalies.length > 1) {
+          const types = activeAnomalies.map(a => a.type);
+          response = await trainingService.startCompoundCollection(types, null);
+          if (response && response.status === 'pending') {
+            message.warning(response.message || "Collection already in progress");
+          } else {
+            message.success(`Started compound data collection for: ${types.join(', ')}`);
+          }
+        } else if (activeAnomalies.length === 1) {
           const activeAnomaly = activeAnomalies[0];
           response = await trainingService.startAnomalyCollection(
             activeAnomaly.type,
             activeAnomaly.node
           );
-          
           if (response && response.status === 'pending') {
             message.warning(response.message || "Collection already in progress");
           } else {
@@ -376,31 +381,16 @@ const ModelTrainingPanel = () => {
         }
       }
 
-      // After toggling, give backend a moment to update its state
+      // Refresh status after action
       await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // Perform a double-check to ensure we get the latest status
       const newStatus = await trainingService.getCollectionStatus();
-      
-      // Verify with process status endpoint as well
       const processStatus = await trainingService.getProcessStatus();
-      
-      // Use process status as source of truth for collection state
       const isReallyCollecting = processStatus.anomaly_collection_in_progress || processStatus.normal_collection_in_progress;
-      
-      // If there's a mismatch, use the process status
-      if ((newStatus.is_collecting_normal || newStatus.is_collecting_anomaly) !== isReallyCollecting) {
-        console.warn("Collection status mismatch detected, using process status endpoint as source of truth");
-        setCollectionStatus({
-          isCollecting: isReallyCollecting,
-          currentType: isReallyCollecting ? newStatus.current_type : null,
-        });
-      } else {
-        setCollectionStatus({
-          isCollecting: newStatus.is_collecting_normal || newStatus.is_collecting_anomaly || false,
-          currentType: newStatus.current_type || null,
-        });
-      }
+
+      setCollectionStatus({
+        isCollecting: isReallyCollecting,
+        currentType: isReallyCollecting ? newStatus.current_type : null,
+      });
     } catch (error) {
       message.error("Failed to toggle data collection");
       console.error(error);
@@ -479,6 +469,14 @@ const ModelTrainingPanel = () => {
   };
 
   const renderDataCollectionTab = () => {
+    const collectionButtonText = collectionStatus.isCollecting
+      ? `Stop Collecting ${collectionStatus.currentType || ''} Data`
+      : activeAnomalies.length > 1
+      ? `Start Compound Collection (${activeAnomalies.map(a => a.type).join(' + ')})`
+      : activeAnomalies.length === 1
+      ? `Start Collection (${activeAnomalies[0].type})`
+      : 'Start Normal Collection';
+
     return (
       <Row gutter={[16, 16]}>
         <Col span={24}>
@@ -489,7 +487,7 @@ const ModelTrainingPanel = () => {
                       type="primary" 
                       onClick={handleTrainModel}
                       loading={isTraining}
-                      disabled={!trainingStats || trainingStats.total_samples < 10 || isTraining}
+                      disabled={!trainingStats || trainingStats.total_samples < 10 || isTraining || collectionStatus.isCollecting}
                     >
                       Train Model
                     </Button>
@@ -499,17 +497,14 @@ const ModelTrainingPanel = () => {
               <Row gutter={[16, 16]} align="middle">
                 <Col span={16}>
                   <Space>
-                    <Switch
-                      checked={collectionStatus.isCollecting}
-                      onChange={handleCollectionToggle}
-                      loading={loading}
-                      disabled={loading || isTraining}
-                    />
-                    <span>
-                      {collectionStatus.isCollecting
-                        ? `Collecting ${collectionStatus.currentType} data`
-                        : 'Start data collection'}
-                    </span>
+                    <Button
+                      type={collectionStatus.isCollecting ? "danger" : "primary"}
+                      onClick={handleCollectionToggle}
+                      loading={loading || isCollectionToggling}
+                      disabled={loading || isTraining || isCollectionToggling}
+                    >
+                      {collectionButtonText}
+                    </Button>
                   </Space>
                 </Col>
                 <Col span={8} style={{ textAlign: 'right' }}>
@@ -518,7 +513,7 @@ const ModelTrainingPanel = () => {
                       checked={isAutoBalancing}
                       onChange={handleAutoBalance}
                       loading={loading}
-                      disabled={loading || isTraining}
+                      disabled={loading || isTraining || collectionStatus.isCollecting}
                     />
                     <span>Auto-balance</span>
                     <Divider type="vertical" />
@@ -535,8 +530,12 @@ const ModelTrainingPanel = () => {
               
               {activeAnomalies.length > 0 && !collectionStatus.isCollecting && (
                 <Alert
-                  message={`Active anomaly detected: ${activeAnomalies[0].type}`}
-                  description="You can collect training data for this anomaly type."
+                  message={
+                    activeAnomalies.length > 1
+                    ? `Multiple active anomalies detected: ${activeAnomalies.map(a => a.type).join(', ')}`
+                    : `Active anomaly detected: ${activeAnomalies[0].type}`
+                  }
+                  description={collectionStatus.isCollecting ? "" : "Click the button above to start collecting relevant training data."}
                   type="info"
                   showIcon
                   style={{ marginTop: 16 }}
@@ -720,28 +719,32 @@ const ModelTrainingPanel = () => {
   };
 
   return (
-    <>
-      <Tabs activeKey={activeTab} onChange={setActiveTab}>
-        <TabPane 
-          tab={<span><DatabaseOutlined />Data Collection</span>} 
-          key="1"
-        >
-          {renderDataCollectionTab()}
-        </TabPane>
-        <TabPane 
-          tab={<span><ApiOutlined />Training Process</span>} 
-          key="2"
-        >
-          {renderTrainingProgressTab()}
-        </TabPane>
-        <TabPane 
-          tab={<span><LineChartOutlined />Model Performance</span>} 
-          key="3"
-        >
-          {renderModelPerformanceTab()}
-        </TabPane>
-      </Tabs>
-    </>
+    <div>
+      <Tabs 
+        activeKey={activeTab} 
+        onChange={setActiveTab}
+        items={[
+          {
+            key: '1',
+            label: 'Data Collection',
+            icon: <DatabaseOutlined />,
+            children: renderDataCollectionTab()
+          },
+          {
+            key: '2',
+            label: 'Training Progress',
+            icon: <ApiOutlined />,
+            children: renderTrainingProgressTab()
+          },
+          {
+            key: '3',
+            label: 'Model Performance',
+            icon: <LineChartOutlined />,
+            children: renderModelPerformanceTab()
+          }
+        ]}
+      />
+    </div>
   );
 };
 

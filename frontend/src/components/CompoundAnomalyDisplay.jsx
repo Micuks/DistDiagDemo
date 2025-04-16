@@ -5,7 +5,6 @@ import { anomalyService } from '../services/anomalyService';
 import { FiAlertTriangle } from 'react-icons/fi';
 
 const { Title, Text } = Typography;
-const { TabPane } = Tabs;
 const { Panel } = Collapse;
 
 const CompoundAnomalyDisplay = () => {
@@ -250,38 +249,42 @@ const CompoundAnomalyDisplay = () => {
                     <div style={{ marginTop: 16 }}>Loading anomaly data...</div>
                 </div>
             ) : (
-                <Tabs defaultActiveKey="compound">
-                    <TabPane 
-                        tab={
-                            <span>
-                                <WarningOutlined />
-                                Compound Anomalies
-                            </span>
-                        } 
-                        key="compound"
-                    >
-                        <Alert
-                            message="Compound Anomaly Detection"
-                            description="Compound anomalies occur when multiple issues affect the same node simultaneously. These are often more serious and require prioritized attention."
-                            type="info"
-                            showIcon
-                            style={{ marginBottom: 16 }}
-                        />
-                        {renderCompoundAnomalies()}
-                    </TabPane>
-                    
-                    <TabPane 
-                        tab={
-                            <span>
-                                <WarningOutlined />
-                                Single Anomalies
-                            </span>
-                        } 
-                        key="single"
-                    >
-                        {renderNormalAnomalies()}
-                    </TabPane>
-                </Tabs>
+                <Tabs 
+                    defaultActiveKey="compound"
+                    items={[
+                        {
+                            key: 'compound',
+                            label: (
+                                <span>
+                                    <WarningOutlined />
+                                    Compound Anomalies
+                                </span>
+                            ),
+                            children: (
+                                <>
+                                    <Alert
+                                        message="Compound Anomaly Detection"
+                                        description="Compound anomalies occur when multiple issues affect the same node simultaneously. These are often more serious and require prioritized attention."
+                                        type="info"
+                                        showIcon
+                                        style={{ marginBottom: 16 }}
+                                    />
+                                    {renderCompoundAnomalies()}
+                                </>
+                            )
+                        },
+                        {
+                            key: 'single',
+                            label: (
+                                <span>
+                                    <WarningOutlined />
+                                    Single Anomalies
+                                </span>
+                            ),
+                            children: renderNormalAnomalies()
+                        }
+                    ]}
+                />
             )}
         </Card>
     );

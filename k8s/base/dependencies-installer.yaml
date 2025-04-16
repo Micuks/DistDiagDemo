@@ -28,7 +28,7 @@ spec:
                 echo "System was updated recently, skipping update"
               fi && \
               # Check and install required packages if not present
-              for pkg in git gcc make pcre-devel cronie util-linux zip perf fuse-libs; do
+              for pkg in git gcc make pcre-devel util-linux zip perf fuse-libs stress-ng iptables iproute; do
                 if ! rpm -q $pkg >/dev/null 2>&1; then
                   echo "Installing $pkg..."
                   yum install -y $pkg
@@ -36,28 +36,10 @@ spec:
                   echo "$pkg is already installed"
                 fi
               done && \
-              # Create dmesg log file if it doesnt exist
-              [ ! -f /var/log/dmesg ] && dmesg > /var/log/dmesg && \
-              # Set up cron job to update dmesg log periodically if not already set up
-              [ ! -f /etc/cron.d/dmesg-update ] && echo "*/5 * * * * root dmesg > /var/log/dmesg" > /etc/cron.d/dmesg-update && \
-              crond
-
-              # Install toda for Chaos Mesh disk experiments
-              if [ ! -f /usr/local/bin/toda ]; then
-                echo "Installing toda..."
-                curl -LO https://github.com/chaos-mesh/toda/releases/download/v0.2.4/toda-linux-amd64.tar.gz && \
-                tar zxvf toda-*.tar.gz && \
-                mv toda /usr/local/bin/ && \
-                chmod +x /usr/local/bin/toda && \
-                rm -f toda-*.tar.gz
-                echo "Toda installation completed"
-              else
-                echo "Toda is already installed"
-              fi
-            ' &
+              echo "Finished dependency check in ${pod}" # Optional confirmation
+            ' # Added closing quote for sh -c
           done
-          # Wait for all background processes to complete
-          wait
-          echo "Dependencies and toda installation completed!"
+          # Removed wait as kubectl exec calls are sequential in the loop
+          echo "Dependencies installation loop completed!"
       restartPolicy: Never
   backoffLimit: 4 

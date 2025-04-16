@@ -6,88 +6,64 @@ import os
 import mysql.connector
 import threading
 import re
-from typing import Dict, List, Optional
-from ..schemas.workload import WorkloadType, WorkloadMetrics, Task, WorkloadStatus
+import redis
+import json
+from typing import Dict, List, Optional, Tuple
+from ..schemas.tasks import WorkloadType
 import pymysql
 from enum import Enum
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
-from kubernetes import client, config
 
 # Load environment variables from .env file
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env'))
 
 logger = logging.getLogger(__name__)
 
+# Define keys for Redis
+WORKLOAD_PROCESS_KEY_PREFIX = "workload_process:"
+ACTIVE_WORKLOAD_RUNS_SET_KEY = "active_workload_runs"
+
 class WorkloadService:
     def __init__(self):
-        self.active_workloads: Dict[str, subprocess.Popen] = {}
+        self.active_procs: Dict[str, subprocess.Popen] = {}
         self._last_io_stats = None
         self._last_io_time = None
-        self.tasks: Dict[str, Task] = {}  # Store tasks in memory
-        # Database connection parameters
         self.db_host = os.getenv('OB_HOST', 'localhost')
         self.db_port = int(os.getenv('OB_PORT', '3306'))
         self.db_user = os.getenv('OB_USER', 'root')
-        self.db_password = os.getenv('OB_PASSWORD', '')
+        self.db_password = os.getenv('OB_PASSWORD', 'root_password')
         self.db_name = os.getenv('OB_NAME', 'sbtest')
         self.tpcc_db = os.getenv('TPCC_DB', 'tpcc')
         self.tpch_db = os.getenv('TPCH_DB', 'tpch')
-        self.workload_outputs = {}
-        # Initialize with default zones, will be updated with actual zones
+        self.redis_host = os.getenv('REDIS_HOST', 'localhost')
+        self.redis_port = int(os.getenv('REDIS_PORT', 6379))
+        self.redis_db = int(os.getenv('REDIS_DB_WORKLOADS', 2))
+        self.redis_client = None
+        self._connect_redis()
         self.ob_zones = []
-        # Node to port mapping
-        self.available_nodes = self._fetch_available_nodes()
-        self.node_port_mapping = self._build_node_port_mapping()
-        # Fetch zones from database during initialization
         self._fetch_zones()
         logger.info("WorkloadService initialized")
-        logger.info(f"Database connection: host={self.db_host}, port={self.db_port}, user={self.db_user}")
+        if self.redis_client:
+            logger.info(f"WorkloadService connected to Redis DB {self.redis_db}. Checking for orphaned processes...")
+        else:
+            logger.error("WorkloadService failed to connect to Redis. Process persistence/cleanup disabled.")
 
-    def _build_node_port_mapping(self):
-        """Build node to port mapping from available nodes"""
-        # Map each available node to a port
-        # Use a dictionary to track assigned ports
-        used_ports = {}
-        base_port = 22811
-        port_map = {}
+    def _connect_redis(self):
+        """Connects to the Redis instance for workload process tracking."""
+        try:
+            self.redis_client = redis.Redis(
+                host=self.redis_host,
+                port=self.redis_port,
+                db=self.redis_db,
+                decode_responses=True
+            )
+            self.redis_client.ping() # Test connection
+        except redis.exceptions.ConnectionError as e:
+            logger.error(f"Failed to connect to Redis for WorkloadService (DB {self.redis_db}): {e}")
+            self.redis_client = None
 
-        # First try to assign based on node number if it follows the pattern obcluster-X-*
-        for node in self.available_nodes:
-            # Check if node matches the pattern obcluster-X-* where X is a number
-            import re
-            node_match = re.match(r'obcluster-(\d+)-.*', node)
-            if node_match:
-                # Use the node number as index
-                node_index = int(node_match.group(1)) - 1
-                port = base_port + node_index * 10
-                # If port is already used, assign it sequentially
-                while port in used_ports.values():
-                    port += 10
-                port_map[node] = port
-                used_ports[node] = port
-            else:
-                # For nodes that don't match pattern, assign sequentially
-                for i in range(9):  # Maximum 9 ports (22811, 22821, ..., 22891)
-                    port = base_port + i * 10
-                    if port not in used_ports.values():
-                        port_map[node] = port
-                        used_ports[node] = port
-                        break
-
-        # Add fallback entries for node1, node2, etc. for backward compatibility
-        for i, node_name in enumerate(['node1', 'node2', 'node3']):
-            if node_name not in port_map:
-                port = base_port + i * 10
-                # Make sure not to override existing ports
-                while port in used_ports.values():
-                    port += 10
-                port_map[node_name] = port
-
-        logger.info(f"Built node port mapping: {port_map}")
-        return port_map
-        
     def _fetch_zones(self) -> List[str]:
         """Fetch OceanBase zones from database"""
         try:
@@ -122,98 +98,6 @@ class WorkloadService:
                 cursor.close()
             if 'conn' in locals():
                 conn.close()
-
-    def create_task(self, name: str, workload_type: WorkloadType, workload_config: Dict, anomalies: List[Dict] = None) -> Task:
-        """Create a new task"""
-        logger.info(f"Creating task with name: {name}, type: {workload_type}")
-        task_id = str(uuid.uuid4())
-        task = Task(
-            id=task_id,
-            name=name,
-            workload_id=f"{workload_type.value}_{workload_config.get('threads', 1)}",
-            workload_type=workload_type,
-            workload_config=workload_config,
-            anomalies=anomalies or [],
-            start_time=datetime.utcnow(),
-            status=WorkloadStatus.RUNNING
-        )
-        self.tasks[task_id] = task
-        logger.info(f"Created task {task_id}, total tasks: {len(self.tasks)}")
-        return task
-
-    def get_task(self, task_id: str) -> Optional[Task]:
-        """Get a task by ID"""
-        return self.tasks.get(task_id)
-
-    def get_all_tasks(self) -> List[Task]:
-        """Get all tasks"""
-        return list(self.tasks.values())
-
-    def update_task_status(self, task_id: str, status: WorkloadStatus, error_message: Optional[str] = None) -> Optional[Task]:
-        """Update task status"""
-        if task_id not in self.tasks:
-            return None
-        
-        task = self.tasks[task_id]
-        task.status = status
-        if error_message:
-            task.error_message = error_message
-        if status in [WorkloadStatus.STOPPED, WorkloadStatus.ERROR]:
-            task.end_time = datetime.utcnow()
-        
-        return task
-
-    def get_active_tasks(self) -> List[Task]:
-        """Get all active tasks"""
-        logger.info(f"Getting active tasks, total tasks: {len(self.tasks)}")
-        for task_id, task in self.tasks.items():
-            logger.info(f"Task {task_id}: {task.name}, status: {task.status}, type: {type(task.status)}")
-        
-        active_tasks = [task for task in self.tasks.values() if task.status == WorkloadStatus.RUNNING]
-        logger.info(f"Found {len(active_tasks)} active tasks")
-        return active_tasks
-
-    def cleanup_old_tasks(self, hours_threshold: int = 12) -> int:
-        """Remove stopped tasks older than the specified threshold (default 12 hours)
-        
-        Returns:
-            int: Number of tasks that were removed
-        """
-        current_time = datetime.utcnow()
-        removed_count = 0
-        
-        # Make a copy of keys since we'll be modifying the dictionary
-        task_ids = list(self.tasks.keys())
-        
-        for task_id in task_ids:
-            task = self.tasks[task_id]
-            
-            # Skip if task is still running
-            if task.status == WorkloadStatus.RUNNING:
-                continue
-                
-            # If task has end_time (it was properly stopped), check if it's old enough to remove
-            if task.end_time:
-                time_diff = current_time - task.end_time
-                hours_diff = time_diff.total_seconds() / 3600
-                
-                if hours_diff >= hours_threshold:
-                    del self.tasks[task_id]
-                    removed_count += 1
-                    logger.info(f"Removed old task {task_id} ({task.name}) - stopped {hours_diff:.1f} hours ago")
-            
-            # If task has no end_time but is marked as stopped, it might be in an inconsistent state
-            # In this case, we'll also remove it if it's old enough based on start_time
-            elif task.status in [WorkloadStatus.STOPPED, WorkloadStatus.ERROR]:
-                time_diff = current_time - task.start_time
-                hours_diff = time_diff.total_seconds() / 3600
-                
-                if hours_diff >= hours_threshold:
-                    del self.tasks[task_id]
-                    removed_count += 1
-                    logger.info(f"Removed inconsistent task {task_id} ({task.name}) - started {hours_diff:.1f} hours ago but never properly ended")
-        
-        return removed_count
 
     def _check_tables_exist(self, port: int = None) -> bool:
         """Check if sysbench tables already exist"""
@@ -332,81 +216,6 @@ class WorkloadService:
                 cursor.close()
             if 'conn' in locals():
                 conn.close()
-
-    def _parse_sysbench_metrics(self, line: str) -> Optional[Dict]:
-        """Parse sysbench output line for metrics"""
-        try:
-            # Example line: [ 10s ] thds: 4 tps: 142.91 qps: 2858.21 (r/w/o: 2000.74/571.64/285.82) lat (ms,95%): 45.79 err/s: 0.00 reconn/s: 0.00
-            metrics = {}
-            
-            # Extract TPS
-            tps_match = re.search(r'tps: (\d+\.\d+)', line)
-            if tps_match:
-                metrics['tps'] = float(tps_match.group(1))
-            
-            # Extract QPS
-            qps_match = re.search(r'qps: (\d+\.\d+)', line)
-            if qps_match:
-                metrics['qps'] = float(qps_match.group(1))
-            
-            # Extract latency
-            lat_match = re.search(r'lat \(ms,95%\): (\d+\.\d+)', line)
-            if lat_match:
-                metrics['latency_ms'] = float(lat_match.group(1))
-            
-            # Extract errors
-            err_match = re.search(r'err/s: (\d+\.\d+)', line)
-            if err_match:
-                metrics['errors'] = int(float(err_match.group(1)))
-            
-            return metrics if metrics else None
-        except Exception as e:
-            logger.error(f"Error parsing sysbench metrics: {str(e)}")
-            return None
-
-    def _parse_tpcc_metrics(self, line: str) -> Optional[Dict[str, float]]:
-        """Parse TPCC output line and extract metrics"""
-        try:
-            metrics = {}
-            
-            # Parse TpmC (transactions per minute) if present
-            if 'TpmC' in line:
-                match = re.search(r'TpmC: (\d+\.?\d*)', line)
-                if match:
-                    metrics['tpmC'] = float(match.group(1))
-            
-            # Parse individual transaction types
-            for tx_type in ['NEW_ORDER', 'PAYMENT', 'DELIVERY', 'STOCK_LEVEL', 'ORDER_STATUS']:
-                if tx_type in line:
-                    # Look for count and latency
-                    count_match = re.search(rf'{tx_type}\s+(\d+)', line)
-                    latency_match = re.search(rf'{tx_type}.*?(\d+\.?\d*)\s*ms', line)
-                    
-                    if count_match:
-                        metrics[f'{tx_type.lower()}_count'] = int(count_match.group(1))
-                    if latency_match:
-                        metrics[f'{tx_type.lower()}_latency'] = float(latency_match.group(1))
-            
-            return metrics if metrics else None
-            
-        except Exception as e:
-            logger.warning(f"Failed to parse TPCC metrics from line: {line}", exc_info=True)
-            return None
-
-    def _parse_tpch_metrics(self, line: str) -> Optional[Dict]:
-        """Parse TPCH output line for metrics"""
-        try:
-            metrics = {}
-            # Example: Query 1 completed - Time: 10.5s
-            query_match = re.search(r'Query (\d+) completed - Time: (\d+\.\d+)s', line)
-            if query_match:
-                query_num = int(query_match.group(1))
-                execution_time = float(query_match.group(2))
-                metrics[f'q{query_num}_time'] = execution_time
-            return metrics if metrics else None
-        except Exception as e:
-            logger.error(f"Error parsing TPCH metrics: {str(e)}")
-            return None
 
     def prepare_tpcc(self) -> bool:
         """Prepare the database for TPCC workload"""
@@ -561,418 +370,335 @@ class WorkloadService:
             logger.exception(f"Error preparing TPCH database on {node_type}: {str(e)}")
             return False
 
-    def _read_workload_output(self, workload_id: str, process: subprocess.Popen):
-        """Read and store workload output"""
-        try:
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                if line:
-                    if workload_id not in self.workload_outputs:
-                        self.workload_outputs[workload_id] = []
-                    self.workload_outputs[workload_id].append(line.strip())
-                    logger.debug(f"Workload {workload_id} output: {line.strip()}")
-        except Exception as e:
-            logger.error(f"Error reading workload output: {str(e)}")
-
-    def start_workload(self, workload_type: WorkloadType, num_threads: int = 4, options: Dict = None, task_name: str = None) -> bool:
-        """Start a new workload with custom options"""
-        try:
-            workload_id = f"{workload_type.value}_{num_threads}"
-            
-            if workload_id in self.active_workloads:
-                logger.warning(f"Workload {workload_id} is already running")
-                return False
-            
-            logger.info(f"Starting workload: type={workload_type.value}, threads={num_threads}, options={options}, task_name={task_name}")
-            
-            # Create task if name is provided
-            task = None
-            if task_name:
-                logger.info(f"Creating task with name: {task_name}")
-                # Create a proper WorkloadConfig object instead of just a dictionary
-                workload_config = {
-                    "workload_type": workload_type,
-                    "num_threads": num_threads,
-                    "options": options
-                }
-                task = self.create_task(
-                    name=task_name,
-                    workload_type=workload_type,
-                    workload_config=workload_config,
-                    anomalies=[]  # Anomalies will be added later if needed
-                )
-                logger.info(f"Task created with ID: {task.id}")
-            else:
-                logger.warning("No task_name provided, skipping task creation")
-            
-            # Always use the default database connection parameters from __init__
-            logger.info("Using default database connection from obproxy")
-            success = self._start_workload_on_node(
-                workload_type, 
-                num_threads, 
-                options, 
-                task, 
-                workload_id,
-                self.db_host, 
-                self.db_port
-            )
-            
-            if success and task:
-                self.update_task_status(task.id, WorkloadStatus.RUNNING)
-            
-            return success
-            
-        except Exception as e:
-            logger.exception(f"Error starting workload: {str(e)}")
-            if task:
-                self.update_task_status(task.id, WorkloadStatus.ERROR, str(e))
+    async def start_workload(
+        self,
+        workload_type: WorkloadType,
+        run_id: str,
+        config: Dict,
+        num_threads: int = 4
+    ) -> bool:
+        """Starts a workload process, identified by run_id, and tracks it in Redis."""
+        if not self.redis_client:
+            logger.error("Redis client not available. Cannot start workload.")
             return False
-    
-    def _start_workload_on_node(self, workload_type: WorkloadType, num_threads: int, options: Dict, task, workload_id: str, host: str, port: int) -> bool:
-        """Start a workload on a specific node"""
+
+        # Check if run_id already exists in Redis (should not happen ideally)
+        if self.redis_client.exists(f"{WORKLOAD_PROCESS_KEY_PREFIX}{run_id}"):
+            logger.warning(f"Workload run_id {run_id} already exists in Redis. Aborting start.")
+            return False
+
+        # Check if run_id is already in active_procs (in-memory check)
+        if run_id in self.active_procs:
+            logger.warning(f"Workload run_id {run_id} is already present in active_procs. Aborting start.")
+            return False
+
+        # Extract necessary config (adjust based on actual config structure)
+        # Ensure num_threads is taken from config if present
+        threads = config.get('num_threads', config.get('threads', num_threads))
+        options = config
+
+        logger.info(f"Attempting to start workload: run_id={run_id}, type={workload_type.value}, threads={threads}, options={options}")
+
+        # Always use the default database connection parameters from __init__
+        logger.info(f"Using database connection: host={self.db_host}, port={self.db_port}")
+        host = self.db_host
+        port = self.db_port
+
+        cmd_str = None
+        cmd_list = []
+        cwd = None
+
         try:
-            cmd = None
             if workload_type == WorkloadType.SYSBENCH:
-                # Build sysbench command with custom options
-                cmd = (
-                    f"sysbench oltp_read_write "
-                    f"--db-driver=mysql "
-                    f"--mysql-host={host} "
-                    f"--mysql-port={port} "
-                    f"--mysql-user={self.db_user} "
-                    f"--mysql-password={self.db_password} "
-                    f"--mysql-db={self.db_name} "
-                    f"--tables={options.get('tables', 10)} "
-                    f"--table-size={options.get('tableSize', 100000)} "
-                    f"--threads={num_threads} "
-                    f"--time=0 "
-                    f"--report-interval={options.get('reportInterval', 10)} "
-                    f"--rand-type={options.get('randType', 'uniform')} "
+                # Build sysbench command with custom options from config
+                cmd_list = [
+                    "sysbench", "oltp_read_write",
+                    "--db-driver=mysql",
+                    f"--mysql-host={host}",
+                    f"--mysql-port={port}",
+                    f"--mysql-user={self.db_user}",
+                    f"--mysql-password={self.db_password}",
+                    f"--mysql-db={self.db_name}",
+                    f"--tables={options.get('tables', 10)}",
+                    f"--table-size={options.get('tableSize', 100000)}",
+                    f"--threads={threads}",
+                    f"--time={options.get('time', 0)}",
+                    f"--report-interval={options.get('reportInterval', 10)}",
+                    f"--rand-type={options.get('randType', 'uniform')}",
                     "run"
-                )
+                ]
+                cmd_str = " ".join(map(str, cmd_list))
             elif workload_type == WorkloadType.TPCC:
                 # Get the absolute path to the tpcc-mysql directory
                 tpcc_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "tpcc-mysql")
-                
-                # Validate TPCC directory exists
-                if not os.path.exists(tpcc_dir):
-                    logger.error(f"TPCC directory not found: {tpcc_dir}")
-                    return False
-                
-                # Validate tpcc_start script exists and is executable
                 tpcc_script = os.path.join(tpcc_dir, 'tpcc_start')
-                if not os.path.exists(tpcc_script):
-                    logger.error(f"TPCC start script not found: {tpcc_script}")
+
+                if not os.path.exists(tpcc_script) or not os.access(tpcc_script, os.X_OK):
+                    logger.error(f"TPCC start script not found or not executable: {tpcc_script}")
                     return False
-                if not os.access(tpcc_script, os.X_OK):
-                    logger.error(f"TPCC start script is not executable: {tpcc_script}")
-                    return False
-                
-                # Check if TPCC database exists
-                try:
-                    with pymysql.connect(
-                        host=host,
-                        port=port,
-                        user=self.db_user,
-                        password=self.db_password
-                    ) as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute("SHOW DATABASES LIKE %s", (self.tpcc_db,))
-                            if not cursor.fetchone():
-                                logger.error(f"TPCC database {self.tpcc_db} does not exist")
-                                return False
-                except Exception as e:
-                    logger.error(f"Failed to check TPCC database on {host}:{port}: {str(e)}")
-                    return False
-                
-                # Build TPCC command with custom options
-                cmd = (
-                    f"{tpcc_script} "
-                    f"-h {host} "
-                    f"-P {port} "
-                    f"-d {self.tpcc_db} "
-                    f"-u {self.db_user} "
-                    f"-p {self.db_password} "
-                    f"-w {options.get('warehouses', 10)} "  # Number of warehouses
-                    f"-c {num_threads} "  # Number of connections
-                    f"-r {options.get('warmupTime', 10)} "  # Warmup time in seconds
-                    f"-l {options.get('runningTime', 60) * 60} "  # Run time in seconds
-                    f"-i {options.get('reportInterval', 10)} "  # Report interval
+                # Check if TPCC database exists (optional, might rely on prepare step)
+                # ... (database check logic could be kept or removed) ...
+
+                cmd_list = [
+                    tpcc_script,
+                    f"-h", host,
+                    f"-P", str(port),
+                    f"-d", self.tpcc_db,
+                    f"-u", self.db_user,
+                    f"-p", self.db_password,
+                    f"-w", str(options.get('warehouses', 10)),
+                    f"-c", str(threads),
+                    f"-r", str(options.get('warmupTime', 10)),
+                    f"-l", str(options.get('runningTime', 60) * 10),
+                    f"-i", str(options.get('reportInterval', 10)),
                     "run"
-                )
+                ]
+                cmd_str = " ".join(cmd_list)
+                cwd = tpcc_dir
+
             elif workload_type == WorkloadType.TPCH:
-                cmd = (
-                    f"tpch-mysql "
-                    f"--host={host} "
-                    f"--port={port} "
-                    f"--user={self.db_user} "
-                    f"--password={self.db_password} "
-                    f"--database={self.tpch_db} "
-                    f"--scale-factor=1 "
-                    f"--threads={num_threads} "
-                    f"--time=0 "
-                    f"--report-interval={options.get('reportInterval', 10)} "
+                # Check if tpch-mysql command exists (basic check)
+                if subprocess.run(["which", "tpch-mysql"], capture_output=True).returncode != 0:
+                    logger.error("tpch-mysql command not found in PATH.")
+                    return False
+
+                cmd_list = [
+                    "tpch-mysql",
+                    f"--host={host}",
+                    f"--port={port}",
+                    f"--user={self.db_user}",
+                    f"--password={self.db_password}",
+                    f"--database={self.tpch_db}",
+                    f"--scale-factor=1",
+                    f"--threads={threads}",
+                    f"--time={options.get('time', 0)}",
+                    f"--report-interval={options.get('reportInterval', 10)}",
                     "run"
-                )
-            
-            if not cmd:
+                ]
+                cmd_str = " ".join(map(str, cmd_list))
+
+            if not cmd_list:
                 logger.error(f"Unsupported workload type: {workload_type}")
                 return False
 
-            logger.debug(f"Executing command: {cmd}")
-            
+            logger.debug(f"Executing command for run_id {run_id}: {cmd_str}")
+
+            # Start the process
             process = subprocess.Popen(
-                cmd.split(),
+                cmd_list,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=1,
                 universal_newlines=True,
-                cwd=os.path.dirname(cmd.split()[0]) if workload_type == WorkloadType.TPCC else None
+                cwd=cwd
             )
-            
-            # Wait briefly to check if the process starts successfully
+
+            # Wait briefly to check if the process started successfully
             time.sleep(1)
             if process.poll() is not None:
                 _, stderr = process.communicate()
-                logger.error(f"Workload process failed to start. Return code: {process.returncode}")
+                logger.error(f"Workload process for run_id {run_id} failed to start. Return code: {process.returncode}")
                 if stderr:
                     logger.error(f"Stderr output: {stderr}")
                 return False
-            
-            self.active_workloads[workload_id] = process
-            
-            # Start a thread to read the output
-            output_thread = threading.Thread(
-                target=self._read_workload_output,
-                args=(workload_id, process)
-            )
-            output_thread.daemon = True
-            output_thread.start()
-            
+
+            # Store process info in memory and Redis
+            self.active_procs[run_id] = process
+            pid = process.pid
+            start_time_iso = datetime.now(timezone.utc).isoformat()
+
+            process_data = {
+                "pid": pid,
+                "command": cmd_str,
+                "workload_type": workload_type.value,
+                "run_id": run_id,
+                "start_time": start_time_iso
+            }
+            self.redis_client.set(f"{WORKLOAD_PROCESS_KEY_PREFIX}{run_id}", json.dumps(process_data))
+            self.redis_client.sadd(ACTIVE_WORKLOAD_RUNS_SET_KEY, run_id)
+
+            logger.info(f"Successfully started workload process for run_id {run_id} with PID {pid}")
             return True
+
+        except redis.exceptions.ConnectionError as e:
+            logger.error(f"Redis error starting workload {run_id}: {e}")
+            return False
         except Exception as e:
-            logger.exception(f"Error starting workload on specific node: {str(e)}")
+            logger.exception(f"Error starting workload {run_id}: {str(e)}")
+            # Clean up if process started but Redis failed?
+            if run_id in self.active_procs:
+                try:
+                    self.active_procs[run_id].terminate()
+                    self.active_procs[run_id].wait(timeout=2)
+                except: pass
+                del self.active_procs[run_id]
             return False
 
-    def stop_workload(self, workload_id: str) -> bool:
-        """Stop a running workload by ID"""
+    async def stop_workload(self, run_id: str) -> bool:
+        """Stop a running workload by run_id and remove tracking from Redis."""
+        logger.info(f"Attempting to stop workload run_id: {run_id}")
+        if not self.redis_client:
+            logger.error("Redis client not available. Cannot stop workload.")
+            return False
+
+        process_key = f"{WORKLOAD_PROCESS_KEY_PREFIX}{run_id}"
+        process_info_json = self.redis_client.get(process_key)
+
+        if not process_info_json:
+            logger.warning(f"Workload run_id {run_id} not found in Redis. Cannot stop.")
+            # Also check in-memory procs? Might be inconsistent state.
+            if run_id in self.active_procs:
+                 logger.warning(f"Run_id {run_id} found in active_procs but not Redis. Attempting termination.")
+                 process = self.active_procs.pop(run_id)
+                 try:
+                     process.terminate()
+                     process.wait(timeout=5)
+                     logger.info(f"Terminated process for run_id {run_id} found only in memory.")
+                     return True # Indicate success as process was likely stopped
+                 except Exception as e:
+                     logger.error(f"Error terminating process for run_id {run_id} found only in memory: {e}")
+                     return False
+            return False
+
         try:
-            # First check for direct match
-            if workload_id in self.active_workloads:
-                process = self.active_workloads[workload_id]
-                process.terminate()
-                process.wait(timeout=5)
-                
-                del self.active_workloads[workload_id]
-                if workload_id in self.workload_outputs:
-                    del self.workload_outputs[workload_id]
-                
-                # Try to find the associated task and update its status
-                associated_task = None
-                for task in self.get_active_tasks():
-                    if task.workload_id == workload_id:
-                        associated_task = task
-                        break
-                
-                # Update task status if workload was successfully stopped
-                if associated_task:
-                    self.update_task_status(associated_task.id, WorkloadStatus.STOPPED)
-                
-                return True
-            
-            # If not found directly, check for node-specific workloads
-            # Format: original_workload_id_nodename
-            matching_workloads = [wid for wid in self.active_workloads.keys() if wid.startswith(f"{workload_id}_")]
-            
-            if not matching_workloads:
-                logger.warning(f"Workload {workload_id} is not running")
-                return False
-            
-            # Stop all matching workloads
-            for wid in matching_workloads:
-                process = self.active_workloads[wid]
-                process.terminate()
-                process.wait(timeout=5)
-                
-                del self.active_workloads[wid]
-                if wid in self.workload_outputs:
-                    del self.workload_outputs[wid]
-            
-            # Update associated task status
-            for task in self.tasks.values():
-                if task.workload_id == workload_id:
-                    self.update_task_status(task.id, WorkloadStatus.STOPPED)
+            process_info = json.loads(process_info_json)
+            pid = process_info.get('pid')
+
+            # Stop the process using PID
+            process_terminated = False
+            if pid and psutil.pid_exists(pid):
+                try:
+                    proc = psutil.Process(pid)
+                    proc.terminate() # Send SIGTERM
+                    proc.wait(timeout=5) # Wait for termination
+                    logger.info(f"Terminated process PID {pid} for run_id {run_id}.")
+                    process_terminated = True
+                except psutil.NoSuchProcess:
+                    logger.warning(f"Process PID {pid} for run_id {run_id} not found, likely already stopped.")
+                    process_terminated = True # Consider it stopped
+                except psutil.TimeoutExpired:
+                    logger.warning(f"Timeout waiting for process PID {pid} (run_id {run_id}) to terminate. Sending SIGKILL.")
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                        process_terminated = True
+                    except Exception as kill_e:
+                         logger.error(f"Error sending SIGKILL to PID {pid} (run_id {run_id}): {kill_e}")
+                except Exception as e:
+                    logger.error(f"Error terminating process PID {pid} for run_id {run_id}: {e}")
+            elif pid:
+                 logger.warning(f"Process PID {pid} for run_id {run_id} does not exist.")
+                 process_terminated = True # Already stopped
+            else:
+                logger.warning(f"No PID found in Redis for run_id {run_id}. Cannot terminate directly.")
+                # Cannot guarantee stop if PID is missing
+
+            # Also remove from in-memory dict if present
+            if run_id in self.active_procs:
+                del self.active_procs[run_id]
+
+            # Clean up Redis entries regardless of termination success (to avoid stale entries)
+            self.redis_client.delete(process_key)
+            self.redis_client.srem(ACTIVE_WORKLOAD_RUNS_SET_KEY, run_id)
+            logger.info(f"Removed Redis entries for run_id {run_id}.")
+
+            return process_terminated # Return True if process is confirmed (or assumed) stopped
+
+        except redis.exceptions.ConnectionError as e:
+            logger.error(f"Redis error stopping workload {run_id}: {e}")
+            return False # Cannot confirm state without Redis
+        except Exception as e:
+            logger.exception(f"Error stopping workload run_id {run_id}: {str(e)}")
+            # Attempt cleanup even on error
+            try:
+                if run_id in self.active_procs: del self.active_procs[run_id]
+                self.redis_client.delete(process_key)
+                self.redis_client.srem(ACTIVE_WORKLOAD_RUNS_SET_KEY, run_id)
+            except: pass
+            return False
+
+    def get_active_workload_runs_info(self) -> List[Dict]:
+        """Get list of active workload runs tracked in Redis."""
+        if not self.redis_client:
+            logger.error("Redis client not available. Cannot get active workload runs.")
+            return []
+
+        active_runs = []
+        run_ids_to_cleanup = [] # Track IDs that need cleanup
+        try:
+            run_ids = list(self.redis_client.smembers(ACTIVE_WORKLOAD_RUNS_SET_KEY))
+            if not run_ids:
+                return []
+
+            keys_to_fetch = [f"{WORKLOAD_PROCESS_KEY_PREFIX}{run_id}" for run_id in run_ids]
+            # Handle case where mget returns None (e.g., Redis down during call)
+            process_data_list = self.redis_client.mget(keys_to_fetch) or []
+
+            valid_run_ids = set() # Track IDs successfully retrieved
+            for i, process_json in enumerate(process_data_list):
+                # Ensure index exists before accessing run_ids
+                if i >= len(run_ids):
+                    logger.warning(f"Mismatch between run_ids count ({len(run_ids)}) and mget results ({len(process_data_list)}). Skipping extra results.")
                     break
-            
-            return True
-            
-        except Exception as e:
-            logger.exception(f"Error stopping workload: {str(e)}")
-            return False
-
-    def get_workload_status(self, workload_id: str) -> Dict:
-        """Get the status of a workload"""
-        try:
-            # Direct match
-            if workload_id in self.active_workloads:
-                process = self.active_workloads[workload_id]
-                is_running = process.poll() is None
-                
-                return {
-                    "status": "running" if is_running else "stopped",
-                    "output": self.workload_outputs.get(workload_id, [])
-                }
-            
-            # Check for node-specific workloads
-            # Format: original_workload_id_nodename
-            matching_workloads = [wid for wid in self.active_workloads.keys() if wid.startswith(f"{workload_id}_")]
-            
-            if matching_workloads:
-                # Combine output from all matching workloads
-                combined_output = []
-                all_running = True
-                
-                for wid in matching_workloads:
-                    process = self.active_workloads[wid]
-                    is_running = process.poll() is None
-                    all_running = all_running and is_running
-                    combined_output.extend(self.workload_outputs.get(wid, []))
-                
-                return {
-                    "status": "running" if all_running else "partially_running",
-                    "output": combined_output
-                }
-            
-            return {
-                "status": "not_found",
-                "output": []
-            }
-            
-        except Exception as e:
-            logger.exception(f"Error getting workload status: {str(e)}")
-            return {
-                "status": "error",
-                "output": []
-            }
-
-    def _fetch_available_nodes(self) -> List[str]:
-        """Get list of available nodes for running workloads"""
-        try:
-            # First try to use the kubernetes API directly
-            try:
-                # Load kubernetes configuration
-                if os.getenv('KUBERNETES_SERVICE_HOST'):
-                    config.load_incluster_config()
+                run_id = run_ids[i]
+                if process_json:
+                    try:
+                        process_info = json.loads(process_json)
+                        pid = process_info.get('pid')
+                        # Verify process is still running
+                        if pid and psutil.pid_exists(pid):
+                            # Correct indentation for append dictionary
+                            active_runs.append({
+                                'run_id': run_id,
+                                'pid': pid,
+                                'type': process_info.get('workload_type', 'unknown'),
+                                'start_time': process_info.get('start_time')
+                                # Add command? Might be too verbose
+                            })
+                            valid_run_ids.add(run_id)
+                        elif pid:
+                             # PID exists in info but process doesn't exist
+                             logger.warning(f"Process for run_id {run_id} (PID: {pid}) not running, but found in Redis. Marking for cleanup.")
+                             run_ids_to_cleanup.append(run_id)
+                        else:
+                             # No PID in info, incomplete data
+                             logger.warning(f"Incomplete data for run_id {run_id} in Redis (missing PID). Marking for cleanup.")
+                             run_ids_to_cleanup.append(run_id)
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to decode JSON for workload process {run_id}. Marking for cleanup.")
+                        run_ids_to_cleanup.append(run_id)
+                    except Exception as e:
+                         logger.error(f"Error processing workload run {run_id}: {e}. Skipping.")
                 else:
-                    config.load_kube_config()
-                
-                # Create API client
-                core_api = client.CoreV1Api()
-                namespace = os.getenv('OCEANBASE_NAMESPACE', 'oceanbase')
-                
-                # List pods
-                pods = core_api.list_namespaced_pod(
-                    namespace=namespace, 
-                    label_selector="ref-obcluster"
-                )
-                
-                # Extract pod names
-                pod_names = []
-                for pod in pods.items:
-                    if pod.metadata.name.startswith("obcluster-"):
-                        pod_names.append(pod.metadata.name)
-                
-                if pod_names:
-                    logger.info(f"Found {len(pod_names)} pods using direct Kubernetes API")
-                    return pod_names
-            except Exception as direct_api_error:
-                logger.warning(f"Failed to get nodes using direct Kubernetes API: {str(direct_api_error)}")
-                
-            # If direct API access failed, try using k8s_service as a fallback
-            from backend.app.services.k8s_service import k8s_service
-            try:
-                # Try to use a synchronous method from k8s_service if available
-                if hasattr(k8s_service, '_fetch_available_nodes_sync'):
-                    nodes = k8s_service._fetch_available_nodes_sync()
-                    if nodes:
-                        logger.info(f"Found {len(nodes)} nodes using k8s_service sync method")
-                        return nodes
-            except Exception as k8s_service_error:
-                logger.warning(f"Failed to get nodes using k8s_service sync method: {str(k8s_service_error)}")
-                
-            # Fallback to environment variable
-            nodes_str = os.getenv('AVAILABLE_NODES', 'node1,node2,node3')
-            nodes = [node.strip() for node in nodes_str.split(',')]
-            logger.info(f"Using default nodes from environment: {nodes}")
-            return nodes
+                     # Key missing, inconsistent state
+                     logger.warning(f"Workload run_id {run_id} in active set but key missing. Marking for cleanup.")
+                     run_ids_to_cleanup.append(run_id)
+
+            # Perform cleanup outside the loop
+            if run_ids_to_cleanup:
+                logger.info(f"Cleaning up {len(run_ids_to_cleanup)} stale/invalid workload run entries from Redis.")
+                keys_to_delete = [f"{WORKLOAD_PROCESS_KEY_PREFIX}{rid}" for rid in run_ids_to_cleanup]
+                try:
+                    if keys_to_delete:
+                        self.redis_client.delete(*keys_to_delete)
+                    self.redis_client.srem(ACTIVE_WORKLOAD_RUNS_SET_KEY, *run_ids_to_cleanup)
+                    # Clean from memory too
+                    for rid in run_ids_to_cleanup:
+                        if rid in self.active_procs: del self.active_procs[rid]
+                except redis.exceptions.ConnectionError as redis_e:
+                     logger.error(f"Redis connection error during cleanup: {redis_e}")
+                except Exception as cleanup_e:
+                    logger.error(f"Error during Redis cleanup of workload runs: {cleanup_e}")
+
+
+            logger.debug(f"Active workload runs found: {len(active_runs)}")
+            return active_runs
+
+        except redis.exceptions.ConnectionError as e:
+            logger.error(f"Redis error getting active workload runs: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Error getting available nodes: {str(e)}")
-            nodes_str = os.getenv('AVAILABLE_NODES', 'node1,node2,node3')
-            return [node.strip() for node in nodes_str.split(',')]
-
-    def get_available_nodes(self) -> List[str]:
-        """Get list of available nodes for running workloads"""
-        if not self.available_nodes:
-            self._fetch_available_nodes()
-        return self.available_nodes
-
-    def get_active_workloads(self) -> List[Dict]:
-        """Get list of active workloads with system metrics"""
-        try:
-            # Clean up finished processes
-            finished_workloads = [
-                wid for wid, proc in self.active_workloads.items()
-                if proc.poll() is not None
-            ]
-            for wid in finished_workloads:
-                logger.info(f"Removing finished workload: {wid}")
-                del self.active_workloads[wid]
-                
-                # Update associated task status
-                for task in self.tasks.values():
-                    if task.workload_id == wid:
-                        self.update_task_status(task.id, WorkloadStatus.STOPPED)
-                        break
-
-            active_workloads = []
-            for workload_id, process in self.active_workloads.items():
-                # Parse node from workload_id if present
-                # Format could be either "type_threads" or "type_threads_nodename"
-                parts = workload_id.split('_')
-                if len(parts) >= 3:  # Has node info
-                    workload_type = parts[0]
-                    threads = parts[1]
-                    node = '_'.join(parts[2:])  # Rejoin in case node name has underscores
-                else:
-                    workload_type = parts[0]
-                    threads = parts[1]
-                    node = None
-                
-                # Find associated task
-                task = next((t for t in self.tasks.values() if t.workload_id == workload_id), None)
-                
-                workload_info = {
-                    'id': workload_id,
-                    'type': workload_type,
-                    'threads': int(threads),
-                    'pid': process.pid,
-                    'start_time': task.start_time if task else datetime.utcnow(),
-                    'status': task.status if task else WorkloadStatus.RUNNING
-                }
-                
-                # Add node information if available
-                if node:
-                    workload_info['node'] = node
-                
-                active_workloads.append(workload_info)
-            
-            logger.debug(f"Active workloads: {active_workloads}")
-            return active_workloads
-            
-        except Exception as e:
-            logger.exception("Error getting active workloads")
+            logger.exception("Error getting active workload runs")
             return []
 
     def get_system_metrics(self) -> Dict:
@@ -1023,45 +749,48 @@ class WorkloadService:
                 'disk_usage': 0.0
             }
             
-    def stop_all_workloads(self) -> bool:
-        """Stop all active workloads"""
+    async def stop_all_workloads(self) -> bool:
+        """Stop all active workloads tracked in Redis."""
+        logger.info("Attempting to stop all active workload runs...")
+        if not self.redis_client:
+            logger.error("Redis client not available. Cannot stop all workloads.")
+            return False
+        
+        success = True
         try:
-            if not self.active_workloads:
-                logger.info("No active workloads to stop")
+            run_ids = list(self.redis_client.smembers(ACTIVE_WORKLOAD_RUNS_SET_KEY))
+            if not run_ids:
+                logger.info("No active workload runs found in Redis to stop.")
+                # Also clear in-memory just in case
+                self.active_procs.clear()
                 return True
             
-            logger.info(f"Stopping all {len(self.active_workloads)} active workloads")
-            success = True
+            logger.info(f"Found {len(run_ids)} active workload runs to stop: {run_ids}")
             
-            # Make a copy of keys since we'll be modifying the dictionary
-            workload_ids = list(self.active_workloads.keys())
+            # Use asyncio.gather if stop_workload becomes async, otherwise loop
+            for run_id in run_ids:
+                if not await self.stop_workload(run_id):
+                    logger.warning(f"Failed to stop workload run_id {run_id} during stop-all.")
+                    success = False # Mark overall success as False if any stop fails
             
-            for workload_id in workload_ids:
-                try:
-                    process = self.active_workloads[workload_id]
-                    process.terminate()
-                    process.wait(timeout=5)
-                    
-                    del self.active_workloads[workload_id]
-                    if workload_id in self.workload_outputs:
-                        del self.workload_outputs[workload_id]
-                        
-                    # Update associated task status
-                    for task in self.tasks.values():
-                        if task.workload_id == workload_id:
-                            self.update_task_status(task.id, WorkloadStatus.STOPPED)
-                            break
-                        
-                    logger.info(f"Stopped workload: {workload_id}")
-                except Exception as e:
-                    logger.error(f"Failed to stop workload {workload_id}: {str(e)}")
-                    success = False
-                
-            # Update status of all active tasks to STOPPED
-            for task in self.get_active_tasks():
-                self.update_task_status(task.id, WorkloadStatus.STOPPED)
-            
+            # Final check - clear any remaining keys/sets just in case stop_workload missed something
+            # Might be overly aggressive, consider if needed
+            # remaining_ids = self.redis_client.smembers(ACTIVE_WORKLOAD_RUNS_SET_KEY)
+            # if remaining_ids:
+            #     logger.warning(f"Redis still contains active runs after stop_all: {remaining_ids}. Force cleaning.")
+            #     keys_to_del = [f"{WORKLOAD_PROCESS_KEY_PREFIX}{rid}" for rid in remaining_ids]
+            #     if keys_to_del:
+            #         self.redis_client.delete(*keys_to_del)
+            #     self.redis_client.delete(ACTIVE_WORKLOAD_RUNS_SET_KEY)
+
+            # Clear in-memory store
+            self.active_procs.clear()
+
+            logger.info("Finished stop_all_workloads attempt.")
             return success
+        except redis.exceptions.ConnectionError as e:
+            logger.error(f"Redis error during stop_all_workloads: {e}")
+            return False
         except Exception as e:
             logger.exception("Error stopping all workloads")
             return False

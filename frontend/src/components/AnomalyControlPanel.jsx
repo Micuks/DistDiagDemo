@@ -1,14 +1,23 @@
-import React, { useState, useEffect } from 'react';
-import { Card, Button, Space, Table, message, Row, Col, Tag, Spin, Alert } from 'antd';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Card, Button, Space, Table, message, Row, Col, Tag, Spin, Alert, Modal, Tooltip, Select, Switch, Typography } from 'antd';
 import { anomalyService } from '../services/anomalyService';
+import { WarningOutlined, InfoCircleOutlined, StopOutlined, ReloadOutlined, CheckCircleOutlined, LaptopOutlined, UnorderedListOutlined, AppstoreOutlined } from '@ant-design/icons';
+import { useAnomalyStreamData } from '../hooks/useAnomalyStreamData';
 import { useAnomalyData } from '../hooks/useAnomalyData';
+import formatDistanceToNow from 'date-fns/formatDistanceToNow';
 
 const AnomalyControlPanel = () => {
-    const { data: activeAnomalies = [], error, isLoading, refetch } = useAnomalyData();
+    const { 
+        data: activeAnomalies = [], 
+        isLoading,
+        isConnected: isStreamConnected,
+        refetch: refetchAnomalies 
+    } = useAnomalyStreamData();
     const [loading, setLoading] = useState(false);
     const [tableLoading, setTableLoading] = useState(true);
     const [lastStableData, setLastStableData] = useState([]);
     const [groupedAnomalies, setGroupedAnomalies] = useState([]);
+    const [anomalies, setAnomalies] = useState([]);
     
     // Group anomalies by type
     useEffect(() => {
@@ -65,6 +74,12 @@ const AnomalyControlPanel = () => {
             setTableLoading(false);
         }
     }, [groupedAnomalies, activeAnomalies, isLoading, tableLoading]);
+
+    // Update anomaly status handling
+    useEffect(() => {
+        // Set anomalies from the streaming data
+        setAnomalies(activeAnomalies || []);
+    }, [activeAnomalies]);
 
     const anomalyTypes = [
         { id: 'cpu_stress', name: 'CPU Stress' },
@@ -127,7 +142,7 @@ const AnomalyControlPanel = () => {
                 <Button 
                     type="primary" 
                     danger 
-                    onClick={() => handleAnomalyToggle(record.type, record.names)}
+                    onClick={() => handleAnomalyToggle(record.type)}
                     loading={loading}
                 >
                     Stop
@@ -142,85 +157,52 @@ const AnomalyControlPanel = () => {
         );
     };
 
-    const handleAnomalyToggle = async (anomalyId, anomalyNames) => {
+    const handleAnomalyToggle = async (anomalyType) => {
+        setLoading(true);
         try {
-            setLoading(true);
-            if (isAnomalyActive(anomalyId)) {
-                // If it's a grouped entry with multiple names, stop each one
-                if (Array.isArray(anomalyNames) && anomalyNames.length > 1) {
-                    message.loading(`Stopping all ${anomalyId} anomalies...`, 1);
-                    
-                    for (const name of anomalyNames) {
-                        try {
-                            await anomalyService.stopAnomaly(anomalyId, name);
-                        } catch (innerError) {
-                            console.error(`Failed to stop anomaly ${name}:`, innerError);
-                            // Continue with others even if one fails
-                        }
-                    }
-                    
-                    message.success(`All ${anomalyId} anomalies stopped`);
-                } else {
-                    // Just stop by type if no names array
-                    await anomalyService.stopAnomaly(anomalyId);
-                    message.success(`Anomaly ${anomalyId} stopped`);
-                }
+            const isActive = isAnomalyActive(anomalyType);
+            
+            if (isActive) {
+                await Promise.all(
+                    activeAnomalies
+                        .filter(anomaly => anomaly.type === anomalyType)
+                        .map(anomaly => anomalyService.deleteAnomaly(anomaly.id))
+                );
+                message.success(`${anomalyType} anomaly stopped`);
             } else {
-                await anomalyService.startAnomaly(anomalyId);
-                message.success(`Anomaly ${anomalyId} started`);
+                await anomalyService.injectAnomaly(anomalyType);
+                message.success(`${anomalyType} anomaly started`);
             }
-            await refetch();
-        } catch (err) {
-            message.error(`Failed to toggle anomaly: ${err.message}`);
+            
+            // Use the refetch from the new hook
+            refetchAnomalies();
+        } catch (error) {
+            console.error(`Error toggling ${anomalyType} anomaly:`, error);
+            message.error(`Failed to toggle ${anomalyType} anomaly`);
         } finally {
             setLoading(false);
         }
     };
 
     const handleStopAllAnomalies = async () => {
+        setLoading(true);
         try {
-            setLoading(true);
-            message.loading({ content: 'Stopping all anomalies...', key: 'stopAll' });
+            await anomalyService.stopAnomalyCollection();
+            message.success('All anomalies stopped');
             
-            const result = await anomalyService.stopAllAnomalies();
-            
-            // Force an immediate refetch regardless of the result
-            await refetch();
-            
-            // Check if any anomalies remain
-            const currentAnomalies = await anomalyService.getActiveAnomalies();
-            
-            if (currentAnomalies && currentAnomalies.length > 0) {
-                // Some anomalies still exist
-                message.warning({ 
-                    content: `Stopped some anomalies but ${currentAnomalies.length} remain active. Try again or stop individually.`, 
-                    key: 'stopAll', 
-                    duration: 5 
-                });
-                console.warn('Anomalies still active after stopAll:', currentAnomalies);
-            } else {
-                // All anomalies successfully stopped
-                message.success({ 
-                    content: 'Successfully stopped all anomalies', 
-                    key: 'stopAll' 
-                });
-            }
-            
-            // Set a timer to do one more refetch after a short delay
-            // This handles cases where deletions are still being processed in the backend
-            setTimeout(() => {
-                refetch();
-            }, 2000);
+            // Use the refetch from the new hook
+            refetchAnomalies();
         } catch (error) {
-            console.error('Failed to stop all anomalies:', error);
-            message.error({ 
-                content: `Failed to stop all anomalies: ${error.message}`, 
-                key: 'stopAll', 
-                duration: 5 
-            });
+            console.error('Error stopping all anomalies:', error);
+            message.error('Failed to stop all anomalies');
         } finally {
             setLoading(false);
         }
+    };
+
+    const handleRefresh = () => {
+        refetchAnomalies();
+        message.info('Refreshing anomaly data...');
     };
 
     if (error) {
@@ -237,11 +219,39 @@ const AnomalyControlPanel = () => {
     // Determine which data to show - use lastStableData during refreshes to prevent flickering
     const tableData = (isLoading && lastStableData.length > 0) ? lastStableData : (groupedAnomalies || []);
 
+    const renderConnectionStatus = () => {
+        return (
+            <Tooltip title={isStreamConnected ? "Real-time updates connected" : "Using polling fallback"}>
+                <Tag color={isStreamConnected ? "green" : "orange"}>
+                    {isStreamConnected ? <CheckCircleOutlined /> : <ReloadOutlined spin />}
+                    {isStreamConnected ? " Live" : " Polling"}
+                </Tag>
+            </Tooltip>
+        );
+    };
+
     return (
         <div>
             <Row gutter={[16, 16]}>
                 <Col span={24}>
-                    <Card title="Anomaly Control">
+                    <Card 
+                        title={
+                            <Space>
+                                Anomaly Control
+                                {renderConnectionStatus()}
+                            </Space>
+                        }
+                        extra={
+                            <Button 
+                                icon={<ReloadOutlined />} 
+                                onClick={handleRefresh} 
+                                loading={isLoading}
+                                size="small"
+                            >
+                                Refresh
+                            </Button>
+                        }
+                    >
                         <Space direction="vertical" style={{ width: '100%' }}>
                             <Space wrap>
                                 {anomalyTypes.map(option => (
@@ -259,6 +269,7 @@ const AnomalyControlPanel = () => {
                                     danger
                                     onClick={handleStopAllAnomalies}
                                     loading={loading}
+                                    icon={<StopOutlined />}
                                 >
                                     Stop All
                                 </Button>
